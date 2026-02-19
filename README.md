@@ -135,7 +135,7 @@ An example implementation based on Redis channels is provided.
 - Redis Channel as the result queue.
 
 
-![Async Processor - Redis architecture](/docs/images/batch_processor_redis_architecture.png "BP - Redis")
+![Async Processor - Redis architecture](/docs/images/redis_pubsub_architecture.png "AP - Redis")
 
 #### Redis Command line parameters
 
