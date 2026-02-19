@@ -144,6 +144,8 @@ func requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberI
 	sub := pubSubClient.Subscriber(subscriberID)
 
 	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		deliveryAttempt := msg.DeliveryAttempt
+
 		var msgObj api.RequestMessage
 		err := json.Unmarshal(msg.Data, &msgObj)
 		if err != nil {
@@ -160,6 +162,10 @@ func requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberI
 			msgObj.Metadata = make(map[string]string)
 		}
 		msgObj.Metadata[PUBSUB_ID] = msg.ID
+		if deliveryAttempt != nil {
+			msgObj.RetryCount = *deliveryAttempt - 1
+		}
+
 		ch <- msgObj
 
 		result := <-resultsChannel

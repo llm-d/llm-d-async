@@ -157,6 +157,8 @@ The GCP PubSub implementation requires the user to configure the following:
     - Dead Letter Queue (DLQ).
 - Results Topic.
 
+<u>Note:</u> If DLQ is NOT configured for the request topic. Retried messages will be counted multiple times in the #_of_requests metric.
+
 ![Async Processor - GCP PubSub Architecture](/docs/images/gcp_pubsub_architecture.png "AP - GCP PubSub") 
 
 #### GCP PubSub Command line parameters
