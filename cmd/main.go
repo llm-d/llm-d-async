@@ -44,7 +44,7 @@ func main() {
 
 	flag.StringVar(&igwBaseURL, "igw-base-url", "", "Base URL of the IGW (e.g. https://localhost:30800)")
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
-	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub")
+	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, gcp-pubsub")
 
 	opts := zap.Options{
 		Development: true,

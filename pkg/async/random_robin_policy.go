@@ -41,7 +41,6 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []api.RequestChannel) 
 				rm := val.Interface().(api.RequestMessage)
 				erm := api.EmbelishedRequestMessage{
 					RequestMessage: rm,
-					OrgChannel:     channels[i1].Channel,
 					// TODO: move from here
 					HttpHeaders: map[string]string{
 						"Content-Type":                  "application/json",

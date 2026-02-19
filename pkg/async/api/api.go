@@ -50,7 +50,6 @@ type EmbelishedRequestChannel struct {
 
 type EmbelishedRequestMessage struct {
 	RequestMessage
-	OrgChannel     chan RequestMessage
 	HttpHeaders    map[string]string
 	RequestPathURL string
 	Metadata       map[string]string
