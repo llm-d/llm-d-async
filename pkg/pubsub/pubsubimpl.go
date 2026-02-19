@@ -68,12 +68,7 @@ func (r *PubSubMQFlow) Characteristics() api.Characteristics {
 
 func (r *PubSubMQFlow) RequestChannels() []api.RequestChannel {
 
-	metadata := map[string]any{
-		"request-path-url":    *requestPathURL,
-		"inference-objective": *inferenceObjective,
-	}
-
-	return []api.RequestChannel{{Channel: r.requestChannel, Metadata: metadata}}
+	return []api.RequestChannel{{Channel: r.requestChannel, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
 }
 
 func (r *PubSubMQFlow) Start(ctx context.Context) {

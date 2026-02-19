@@ -58,12 +58,7 @@ func (r *RedisMQFlow) Start(ctx context.Context) {
 }
 func (r *RedisMQFlow) RequestChannels() []api.RequestChannel {
 
-	metadata := map[string]any{
-		"request-path-url":    *requestPathURL,
-		"inference-objective": *inferenceObjective,
-	}
-
-	return []api.RequestChannel{{Channel: r.requestChannel, Metadata: metadata}}
+	return []api.RequestChannel{{Channel: r.requestChannel, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
 }
 
 func (r *RedisMQFlow) RetryChannel() chan api.RetryMessage {
