@@ -10,6 +10,7 @@ import (
 
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -77,7 +78,7 @@ func NewGCPPubSubMQFlow() *PubSubMQFlow {
 			requestChannel: api.RequestChannel{
 				Channel:            ch,
 				InferenceObjective: cfg.InferenceObjective,
-				RequestPathURL:     cfg.RequestPathURL,
+				RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
 			},
 			subscriberID: cfg.SubscriberID,
 		})

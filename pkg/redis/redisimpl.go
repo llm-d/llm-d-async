@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"github.com/redis/go-redis/v9"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -76,7 +77,7 @@ func NewRedisMQFlow() *RedisMQFlow {
 		channels = append(channels, RequestChannelData{api.RequestChannel{
 			Channel:            ch,
 			InferenceObjective: cfg.InferenceObjective,
-			RequestPathURL:     cfg.RequestPathURL,
+			RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
 		}, cfg.QueueName})
 	}
 	return &RedisMQFlow{

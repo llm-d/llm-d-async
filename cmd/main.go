@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/pubsub"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
+	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -109,6 +110,8 @@ func main() {
 		setupLog.Error(nil, "Unknown message queue implementation", "message-queue-impl", messageQueueImpl)
 		os.Exit(1)
 	}
+
+	igwBaseURL = util.NormalizeBaseURL(igwBaseURL)
 
 	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel
 	for w := 1; w <= concurrency; w++ {
