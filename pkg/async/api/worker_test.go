@@ -18,7 +18,6 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 			RetryCount:      0,
 			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Add(time.Second*-10).Unix()),
 		},
-		OrgChannel:     make(chan RequestMessage, 1),
 		HttpHeaders:    map[string]string{},
 		RequestPathURL: "",
 	}
@@ -50,7 +49,6 @@ func TestRetryMessage_retry(t *testing.T) {
 			RetryCount:      0,
 			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Add(time.Second*10).Unix()),
 		},
-		OrgChannel:     make(chan RequestMessage, 1),
 		HttpHeaders:    map[string]string{},
 		RequestPathURL: "",
 	}
@@ -109,7 +107,6 @@ func TestSheddedRequest(t *testing.T) {
 			DeadlineUnixSec: fmt.Sprintf(("%d"), deadline),
 			Payload:         map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 		},
-		OrgChannel:     make(chan RequestMessage),
 		RequestPathURL: "/v1/completions",
 		HttpHeaders:    map[string]string{},
 	}
@@ -150,7 +147,6 @@ func TestSuccessfulRequest(t *testing.T) {
 			DeadlineUnixSec: fmt.Sprintf(("%d"), deadline),
 			Payload:         map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 		},
-		OrgChannel:     make(chan RequestMessage),
 		RequestPathURL: "/v1/completions",
 		HttpHeaders:    map[string]string{},
 	}

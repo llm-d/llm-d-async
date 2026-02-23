@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"sync"
 
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -19,19 +21,30 @@ var pubSubClient *pubsub.Client
 
 var (
 	projectID = flag.String("pubsub.project-id", "", "GCP project ID for PubSub")
-	// TODO: support multiples
-	requestPathURL      = flag.String("pubsub.request-path-url", "/v1/completions", "inference request path url")
-	inferenceObjective  = flag.String("pubsub.inference-objective", "", "inference objective to use in requests")
-	requestSubscriberID = flag.String("pubsub.request-subscriber-id", "", "GCP PubSub request topic subscriber ID")
+
+	requestPathURL      = flag.String("pubsub.request-path-url", "/v1/completions", "inference request path url. Mutally exclusive with pubsub.topics-config-file flag.")
+	inferenceObjective  = flag.String("pubsub.inference-objective", "", "inference objective to use in requests. Mutally exclusive with pubsub.topics-config-file flag.")
+	requestSubscriberID = flag.String("pubsub.request-subscriber-id", "", "GCP PubSub request topic subscriber ID. Mutally exclusive with pubsub.topics-config-file flag.")
 	resultTopicID       = flag.String("pubsub.result-topic-id", "", "GCP PubSub topic ID for results")
-	resultChannels      sync.Map
+	topicsConfigFile    = flag.String("pubsub.topics-config-file", "", "Topics Configuration file. Mutally exclusive with pubsub.request-subscriber-id, pubsub.request-path-url and pubsub.inference-objective flags. See documentation about syntax")
+
+	resultChannels sync.Map
 )
 
+type TopicConfig struct {
+	SubscriberID       string `json:"subscriber_id"`
+	InferenceObjective string `json:"inference_objective"`
+	RequestPathURL     string `json:"request_path_url"`
+}
 type PubSubMQFlow struct {
-	resultTopicID  string
-	requestChannel chan api.RequestMessage
-	retryChannel   chan api.RetryMessage
-	resultChannel  chan api.ResultMessage
+	resultTopicID   string
+	requestChannels []RequestChannelData
+	retryChannel    chan api.RetryMessage
+	resultChannel   chan api.ResultMessage
+}
+type RequestChannelData struct {
+	requestChannel api.RequestChannel
+	subscriberID   string
 }
 
 func NewGCPPubSubMQFlow() *PubSubMQFlow {
@@ -43,12 +56,39 @@ func NewGCPPubSubMQFlow() *PubSubMQFlow {
 		// TODO:
 		panic(err)
 	}
+	var configs []TopicConfig
+	if *topicsConfigFile != "" {
+		data, err := os.ReadFile(*topicsConfigFile)
+		if err != nil {
+			panic(fmt.Sprintf("failed to read topics config file: %v", err))
+		}
+
+		if err := json.Unmarshal(data, &configs); err != nil {
+			panic(fmt.Sprintf("failed to unmarshal topics config: %v", err))
+		}
+	} else {
+		configs = []TopicConfig{{SubscriberID: *requestSubscriberID, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
+	}
+
+	var channels []RequestChannelData
+	for _, cfg := range configs {
+		ch := make(chan api.RequestMessage)
+
+		channels = append(channels, RequestChannelData{
+			requestChannel: api.RequestChannel{
+				Channel:            ch,
+				InferenceObjective: cfg.InferenceObjective,
+				RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
+			},
+			subscriberID: cfg.SubscriberID,
+		})
+	}
 
 	return &PubSubMQFlow{
-		resultTopicID:  *resultTopicID,
-		requestChannel: make(chan api.RequestMessage),
-		retryChannel:   make(chan api.RetryMessage),
-		resultChannel:  make(chan api.ResultMessage),
+		resultTopicID:   *resultTopicID,
+		requestChannels: channels,
+		retryChannel:    make(chan api.RetryMessage),
+		resultChannel:   make(chan api.ResultMessage),
 	}
 }
 
@@ -68,16 +108,17 @@ func (r *PubSubMQFlow) Characteristics() api.Characteristics {
 
 func (r *PubSubMQFlow) RequestChannels() []api.RequestChannel {
 
-	metadata := map[string]any{
-		"request-path-url":    *requestPathURL,
-		"inference-objective": *inferenceObjective,
+	var channels []api.RequestChannel
+	for _, channelData := range r.requestChannels {
+		channels = append(channels, channelData.requestChannel)
 	}
-
-	return []api.RequestChannel{{Channel: r.requestChannel, Metadata: metadata}}
+	return channels
 }
 
 func (r *PubSubMQFlow) Start(ctx context.Context) {
-	go requestWorker(ctx, pubSubClient, *requestSubscriberID, r.requestChannel)
+	for _, channelData := range r.requestChannels {
+		go requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.Channel)
+	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	go resultWorker(ctx, publisher, r.resultChannel)
 

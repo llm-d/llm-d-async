@@ -27,7 +27,7 @@ spec:
         - /async-processor
         args:
           - --igw-base-url={{ .Values.ap.igwBaseURL }}
-          {{- if .Values.redis.enabled }}
+          {{- if .Values.ap.redis.enabled }}
           - --message-queue-impl=redis-pubsub
           - --redis.request-path-url
           - "{{ .Values.ap.redis.requestPathURL }}"

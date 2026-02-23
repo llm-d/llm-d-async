@@ -9,9 +9,9 @@ import (
 func TestProcessAllChannels(t *testing.T) {
 	msgsPerChannel := 5
 	channels := []api.RequestChannel{
-		{Channel: make(chan api.RequestMessage, msgsPerChannel), Metadata: map[string]any{}},
-		{Channel: make(chan api.RequestMessage, msgsPerChannel), Metadata: map[string]any{}},
-		{Channel: make(chan api.RequestMessage, msgsPerChannel), Metadata: map[string]any{}},
+		{Channel: make(chan api.RequestMessage, msgsPerChannel), InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan api.RequestMessage, msgsPerChannel), InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan api.RequestMessage, msgsPerChannel), InferenceObjective: "", RequestPathURL: ""},
 	}
 	policy := NewRandomRobinPolicy()
 

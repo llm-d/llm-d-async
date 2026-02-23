@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/pubsub"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
+	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -44,7 +45,7 @@ func main() {
 
 	flag.StringVar(&igwBaseURL, "igw-base-url", "", "Base URL of the IGW (e.g. https://localhost:30800)")
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
-	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub")
+	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, gcp-pubsub")
 
 	opts := zap.Options{
 		Development: true,
@@ -109,6 +110,8 @@ func main() {
 		setupLog.Error(nil, "Unknown message queue implementation", "message-queue-impl", messageQueueImpl)
 		os.Exit(1)
 	}
+
+	igwBaseURL = util.NormalizeBaseURL(igwBaseURL)
 
 	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel
 	for w := 1; w <= concurrency; w++ {

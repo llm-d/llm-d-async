@@ -39,8 +39,9 @@ type RequestMessage struct {
 
 type RequestChannel struct {
 	Channel chan RequestMessage
-	// currently metadata is anything and the queue implementation should make use of it however it likes.
-	Metadata map[string]any
+
+	InferenceObjective string
+	RequestPathURL     string
 }
 
 type EmbelishedRequestChannel struct {
@@ -49,7 +50,6 @@ type EmbelishedRequestChannel struct {
 
 type EmbelishedRequestMessage struct {
 	RequestMessage
-	OrgChannel     chan RequestMessage
 	HttpHeaders    map[string]string
 	RequestPathURL string
 	Metadata       map[string]string

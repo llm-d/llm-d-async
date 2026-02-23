@@ -9,7 +9,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-	"path"
 	"strconv"
 	"time"
 
@@ -41,8 +40,10 @@ func Worker(ctx context.Context, characteristics Characteristics, igwBaseURL str
 
 			// Using a function object for easy boundries for 'return' and 'defer'!
 			sendInferenceRequest := func() {
-				logger.V(logutil.DEBUG).Info("Sending inference request.")
-				request, err := http.NewRequestWithContext(ctx, "POST", path.Join(igwBaseURL, msg.RequestPathURL), bytes.NewBuffer(payloadBytes))
+
+				fullUrl := igwBaseURL + msg.RequestPathURL
+				logger.V(logutil.DEBUG).Info("Sending inference request: " + fullUrl)
+				request, err := http.NewRequestWithContext(ctx, "POST", fullUrl, bytes.NewBuffer(payloadBytes))
 				if err != nil {
 					metrics.FailedReqs.Inc()
 					resultChannel <- CreateErrorResultMessage(msg.RequestMessage, fmt.Sprintf("Failed to create request to inference: %s", err.Error()))
