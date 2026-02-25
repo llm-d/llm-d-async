@@ -30,7 +30,7 @@ var (
 	retryQueueName  = flag.String("redis.retry-queue-name", "retry-sortedset", "name of the Redis sorted set for retry messages")
 	resultQueueName = flag.String("redis.result-queue-name", "result-queue", "name of the Redis channel for result messages")
 
-	queuesConfigFile = flag.String("redis.queues-config-file", "", "ToQueuespics Configuration file. Mutally exclusive with redis.request-queue-name, redis.request-path-url and redis.inference-objective flags. See documentation about syntax")
+	queuesConfigFile = flag.String("redis.queues-config-file", "", "Queues Configuration file. Mutally exclusive with redis.request-queue-name, redis.request-path-url and redis.inference-objective flags. See documentation about syntax")
 )
 
 type QueueConfig struct {

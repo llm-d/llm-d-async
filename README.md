@@ -39,7 +39,10 @@ The architecture adheres to the following core principles:
 - [Implementations](#implementations)
     - [Redis Channels](#redis-channels)
       - [Redis Command line parameters](#redis-command-line-parameters)
+        - [Multiple Queues Configuration File Syntax](#multiple-queues-configuration-file-syntax)
     - [GCP Pub/Sub](#gcp-pub-sub)
+      - [GCP PubSub Command line parameters](#gcp-pubsub-command-line-parameters)
+        - [Multiple Topics Configuration File Syntax](#multiple-topics-configuration-file-syntax)
 - [Development](#development)
 
 
@@ -139,13 +142,29 @@ An example implementation based on Redis channels is provided.
 
 #### Redis Command line parameters
 
-- `redis.inference-gateway`: Inference gateway endppoint. Requests will be sent to this endpoint.
-- `redis.inference-objective`: InferenceObjective to use for requests (set as the HTTP header x-gateway-inference-objective if not empty). 
-- `redis.request-queue-name`: The name of the channel for the requests. Default is <u>request-queue</u>.
+- `redis.request-path-url`: Request path url (e.g.: "/v1/completions"). <br> Mutally exclusive with redis.queues-config-file flag.")
+- `redis.inference-objective`: InferenceObjective to use for requests (set as the HTTP header x-gateway-inference-objective if not empty).  <br> Mutally exclusive with `redis.queues-config-file` flag.
+- `redis.request-queue-name`: The name of the channel for the requests. Default is <u>request-queue</u>.  <br> Mutally exclusive with `redis.queues-config-file` flag.
 - `redis.retry-queue-name`: The name of the channel for the retries. Default is <u>retry-sortedset</u>.
 - `redis.result-queue-name`: The name of the channel for the results. Default is <u>result-queue</u>.
+- `redis.queues-config-file`: The configuration file name when using multiple queues. <br> Mutally exclusive with `redis.request-queue-name`, `redis.request-path-url` and `redis.inference-objective` flags.
 
-**NOTE:** the `redis.inference-gateway` and `redis.inference-objective` will soon migrate to a per request queue definitions so an index number will be added to the flag name.
+#### Multiple Queues Configuration File Syntax
+
+The configuration file when using the `redis.queues-config-file` flag should have the following format:
+
+```json 
+[
+    {
+       "queue_name": "some_channel_name", 
+       "inference_objective": "some_inference_objective", 
+       "request_path_url": "e.g.: /v1/completions"
+    },
+    ...
+]
+```
+
+
 
 ### GCP Pub/Sub
 
@@ -164,12 +183,26 @@ The GCP PubSub implementation requires the user to configure the following:
 #### GCP PubSub Command line parameters
 
 - `pubsub.project-id`: The name GCP project ID using the PubSub API.
-- `pubsub.inference-gateway`: Inference gateway endppoint. Requests will be sent to this endpoint.
-- `pubsub.inference-objective`: InferenceObjective to use for requests (set as the HTTP header x-gateway-inference-objective if not empty). 
-- `pubsub.request-subscriber-id`: The subscriber ID for the requests topic.
+- `pubsub.request-path-url`: Request path url (e.g.: "/v1/completions"). <br> Mutally exclusive with pubsub.topics-config-file flag.
+- `pubsub.inference-objective`: InferenceObjective to use for requests (set as the HTTP header x-gateway-inference-objective if not empty). <br> Mutally exclusive with pubsub.topics-config-file flag.
+- `pubsub.request-subscriber-id`: The subscriber ID for the requests topic.<br> Mutally exclusive with pubsub.topics-config-file flag.
 - `pubsub.result-topic-id`: The results topic ID.
+- `pubsub.topics-config-file`: The configuration file name when using multiple topics. <br> Mutally exclusive with `pubsub.request-subscriber-id`, `pubsub.request-path-url` and `pubsub.inference-objective` flags.
 
-**NOTE:** the `pubsub.inference-gateway` and `pubsub.inference-objective` will soon migrate to a per request queue definitions so an index number will be added to the flag name.
+#### Multiple Topics Configuration File Syntax
+
+The configuration file when using the `pubsub.topics-config-file` flag should have the following format:
+
+```json 
+[
+    {
+       "subscriber_id": "some_subscriber_id", 
+       "inference_objective": "some_inference_objective", 
+       "request_path_url": "e.g.: /v1/completions"
+    },
+    ...
+]
+```
 
 ## Development
 
