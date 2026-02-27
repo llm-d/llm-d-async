@@ -27,6 +27,7 @@ var (
 	ssResultQueueName    = flag.String("redis.ss.result-queue-name", "result-list", "Result list name")
 	ssQueuesConfigFile   = flag.String("redis.ss.queues-config-file", "", "Multiple queues config file")
 	ssPollIntervalMs     = flag.Int("redis.ss.poll-interval-ms", 1000, "Poll interval in milliseconds")
+	ssBatchSize          = flag.Int("redis.ss.batch-size", 10, "Number of messages to process per poll")
 )
 
 type queueConfig struct {
@@ -46,6 +47,7 @@ type RedisSortedSetFlow struct {
 	retryChannel    chan api.RetryMessage
 	resultChannel   chan api.ResultMessage
 	pollInterval    time.Duration
+	batchSize       int
 }
 
 func NewRedisSortedSetFlow() *RedisSortedSetFlow {
@@ -69,6 +71,7 @@ func NewRedisSortedSetFlow() *RedisSortedSetFlow {
 		retryChannel:    make(chan api.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage),
 		pollInterval:    time.Duration(*ssPollIntervalMs) * time.Millisecond,
+		batchSize:       *ssBatchSize,
 	}
 }
 
@@ -138,7 +141,7 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan api.RequestMessage, queueName string, logger logr.Logger) {
 	currentTime := float64(time.Now().Unix())
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < r.batchSize; i++ {
 		results, err := r.rdb.ZPopMin(ctx, queueName, 1).Result()
 		if err == redis.Nil || len(results) == 0 {
 			break

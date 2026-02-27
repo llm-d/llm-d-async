@@ -35,6 +35,7 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
 	}
 
 	// Add message with valid deadline
@@ -76,6 +77,7 @@ func TestSortedSetFlow_DeadlineOrdering(t *testing.T) {
 	flow := &RedisSortedSetFlow{
 		rdb:          rdb,
 		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
 	}
 
 	now := time.Now().Unix()
@@ -129,6 +131,7 @@ func TestSortedSetFlow_ExpiredMessages(t *testing.T) {
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
 	}
 
 	pastDeadline := time.Now().Unix() - 100
@@ -165,6 +168,7 @@ func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
 	}
 
 	testCases := []struct {
@@ -209,6 +213,7 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 		rdb:          rdb,
 		retryChannel: make(chan api.RetryMessage, 1),
 		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
 	}
 
 	go flow.retryWorker(ctx)
@@ -254,6 +259,7 @@ func TestSortedSetFlow_ResultFIFO(t *testing.T) {
 		rdb:           rdb,
 		resultChannel: make(chan api.ResultMessage, 2),
 		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
 	}
 
 	go flow.resultWorker(ctx)
@@ -295,7 +301,7 @@ func TestSortedSetFlow_NoRaceCondition(t *testing.T) {
 
 	for w := 0; w < 3; w++ {
 		wg.Add(1)
-		flow := &RedisSortedSetFlow{rdb: rdb, pollInterval: 20 * time.Millisecond}
+		flow := &RedisSortedSetFlow{rdb: rdb, pollInterval: 20 * time.Millisecond, batchSize: 10}
 		msgChan := make(chan api.RequestMessage, 10)
 
 		go func() {
@@ -344,6 +350,7 @@ func TestSortedSetFlow_ContextCancellation(t *testing.T) {
 		retryChannel:  make(chan api.RetryMessage),
 		resultChannel: make(chan api.ResultMessage),
 		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
 	}
 
 	workerCtx, cancel := context.WithCancel(ctx)
