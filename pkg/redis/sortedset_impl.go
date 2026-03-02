@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -48,9 +50,23 @@ type RedisSortedSetFlow struct {
 	resultChannel   chan api.ResultMessage
 	pollInterval    time.Duration
 	batchSize       int
+	gate            flowcontrol.DispatchGate
 }
 
-func NewRedisSortedSetFlow() *RedisSortedSetFlow {
+// SortedSetOption is a functional option for configuring RedisSortedSetFlow
+type SortedSetOption func(*RedisSortedSetFlow)
+
+// WithDispatchGate enables dispatch gating with the provided gate.
+// When enabled, the flow checks the "dispatch budget" before processing messages
+// and scales the batch size proportionally to available capacity.
+// Default: always dispatch all.
+func WithDispatchGate(gate flowcontrol.DispatchGate) SortedSetOption {
+	return func(r *RedisSortedSetFlow) {
+		r.gate = gate
+	}
+}
+
+func NewRedisSortedSetFlow(opts ...SortedSetOption) *RedisSortedSetFlow {
 	configs := loadQueueConfigs()
 	channels := make([]requestChannelData, 0, len(configs))
 
@@ -65,7 +81,7 @@ func NewRedisSortedSetFlow() *RedisSortedSetFlow {
 		})
 	}
 
-	return &RedisSortedSetFlow{
+	r := &RedisSortedSetFlow{
 		rdb:             redis.NewClient(&redis.Options{Addr: *ssRedisAddr}),
 		requestChannels: channels,
 		retryChannel:    make(chan api.RetryMessage),
@@ -73,6 +89,16 @@ func NewRedisSortedSetFlow() *RedisSortedSetFlow {
 		pollInterval:    time.Duration(*ssPollIntervalMs) * time.Millisecond,
 		batchSize:       *ssBatchSize,
 	}
+
+	for _, opt := range opts {
+		opt(r)
+	}
+
+	if r.gate == nil {
+		r.gate = flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 { return 1.0 })
+	}
+
+	return r
 }
 
 func loadQueueConfigs() []queueConfig {
@@ -141,7 +167,10 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan api.RequestMessage, queueName string, logger logr.Logger) {
 	currentTime := float64(time.Now().Unix())
 
-	for i := 0; i < r.batchSize; i++ {
+	budget := r.gate.Budget(ctx)
+	batchSize := int(math.Floor(float64(r.batchSize) * budget))
+
+	for i := 0; i < batchSize; i++ {
 		results, err := r.rdb.ZPopMin(ctx, queueName, 1).Result()
 		if err == redis.Nil || len(results) == 0 {
 			break

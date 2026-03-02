@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/pubsub"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
@@ -33,6 +35,7 @@ func main() {
 	var concurrency int
 	var requestMergePolicy string
 	var messageQueueImpl string
+	var dispatchGateType string
 
 	var igwBaseURL string
 
@@ -45,7 +48,8 @@ func main() {
 
 	flag.StringVar(&igwBaseURL, "igw-base-url", "", "Base URL of the IGW (e.g. https://localhost:30800)")
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
-	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub")
+	flag.StringVar(&dispatchGateType, "dispatch-gate", "noop", "The dispatch gate policy to use. Supported policies: noop")
+	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, redis-sortedset-gated, gcp-pubsub")
 
 	opts := zap.Options{
 		Development: true,
@@ -91,6 +95,18 @@ func main() {
 
 	/////
 
+	// Create dispatch gate
+	var gate flowcontrol.DispatchGate
+	switch dispatchGateType {
+	case "noop":
+		gate = flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 {
+			return 1.0 // Full capacity
+		})
+	default:
+		setupLog.Error(nil, "Unknown dispatch gate type", "dispatch-gate", dispatchGateType)
+		os.Exit(1)
+	}
+
 	var policy api.RequestMergePolicy
 	switch requestMergePolicy {
 	case "random-robin":
@@ -106,6 +122,9 @@ func main() {
 		impl = redis.NewRedisMQFlow()
 	case "redis-sortedset":
 		impl = redis.NewRedisSortedSetFlow()
+	case "redis-sortedset-gated":
+		impl = redis.NewRedisSortedSetFlow(redis.WithDispatchGate(gate))
+		setupLog.Info("Using Redis sorted-set flow with dispatch gating", "gate-type", dispatchGateType)
 	case "gcp-pubsub":
 		impl = pubsub.NewGCPPubSubMQFlow()
 	default:
