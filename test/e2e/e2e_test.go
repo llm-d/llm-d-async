@@ -102,7 +102,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 		gomega.Expect(result.Id).To(gomega.Equal("retry-msg"))
 	})
 
-	ginkgo.It("stores results in FIFO order", func() {
+	ginkgo.It("collects all results from batch of messages", func() {
 		// Enqueue 5 messages rapidly with the same priority
 		deadline := time.Now().Add(5 * time.Minute)
 		ids := []string{"fifo-1", "fifo-2", "fifo-3", "fifo-4", "fifo-5"}

@@ -35,9 +35,15 @@ func NewRedisDispatchGate() *RedisDispatchGate {
 // Defaults to 1.0 (full capacity) when the key is absent or unparseable.
 func (g *RedisDispatchGate) Budget(ctx context.Context) float64 {
 	val, err := g.rdb.Get(ctx, g.key).Result()
-	if err != nil {
-		// Key doesn't exist or Redis error; default to full capacity.
+	if err == goredis.Nil {
+		// Key doesn't exist; default to full capacity.
 		return 1.0
+	}
+	if err != nil {
+		// Redis error; log and fail closed.
+		logger := log.FromContext(ctx)
+		logger.V(logutil.DEFAULT).Error(err, "Failed to read dispatch gate budget from Redis")
+		return 0.0
 	}
 	budget, err := strconv.ParseFloat(val, 64)
 	if err != nil {

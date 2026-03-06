@@ -20,6 +20,8 @@ const (
 	resultQueue  = "result-list"
 )
 
+var adminClient = &http.Client{Timeout: 10 * time.Second}
+
 func enqueueMessage(ctx context.Context, rdb *redis.Client, queue string, msg api.RequestMessage) {
 	data, err := json.Marshal(msg)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
@@ -62,7 +64,7 @@ func cleanupQueues(ctx context.Context, rdb *redis.Client) {
 func resetMock(adminURL string) {
 	req, err := http.NewRequest(http.MethodDelete, adminURL+"/admin/reset", nil)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := adminClient.Do(req)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close() //nolint:errcheck
 	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
@@ -70,14 +72,19 @@ func resetMock(adminURL string) {
 
 func setMockFailures(adminURL string, status, count int) {
 	body, _ := json.Marshal(map[string]int{"status": status, "count": count})
-	resp, err := http.Post(adminURL+"/admin/fail-next", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, adminURL+"/admin/fail-next", bytes.NewReader(body))
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := adminClient.Do(req)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close() //nolint:errcheck
 	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
 }
 
 func getRequestLog(adminURL string) []string {
-	resp, err := http.Get(adminURL + "/admin/request-log")
+	req, err := http.NewRequest(http.MethodGet, adminURL+"/admin/request-log", nil)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	resp, err := adminClient.Do(req)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close() //nolint:errcheck
 	body, err := io.ReadAll(resp.Body)

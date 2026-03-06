@@ -130,8 +130,6 @@ IGW_MOCK_IMG ?= e2e-igw-mock:latest
 .PHONY: test-e2e
 test-e2e: ## Run e2e tests against a Kind cluster
 	@command -v kind >/dev/null 2>&1 || { echo "kind is not installed"; exit 1; }
-	$(CONTAINER_TOOL) build -t $(E2E_IMG) .
-	$(CONTAINER_TOOL) build -t $(IGW_MOCK_IMG) test/e2e/igw-mock/
 	AP_IMAGE=$(E2E_IMG) go test ./test/e2e/ -timeout 30m -v -ginkgo.v \
 		$(if $(FOCUS),-ginkgo.focus="$(FOCUS)",) \
 		$(if $(SKIP),-ginkgo.skip="$(SKIP)",)
@@ -258,7 +256,7 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 GINKGO ?= $(LOCALBIN)/ginkgo
-GINKGO_VERSION ?= v2.22.0
+GINKGO_VERSION ?= v2.28.1
 
 .PHONY: ginkgo
 ginkgo: $(GINKGO) ## Download ginkgo locally if necessary.

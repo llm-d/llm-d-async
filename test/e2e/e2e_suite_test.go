@@ -44,7 +44,7 @@ var (
 
 	testConfig *testutils.TestConfig
 
-	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
+	containerRuntime = env.GetEnvString("CONTAINER_TOOL", env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr), ginkgo.GinkgoLogr)
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d-incubation/async-processor:e2e-test", ginkgo.GinkgoLogr)
 	igwMockImage     = "e2e-igw-mock:latest"
 	// nsName is the namespace in which the K8S objects will be created
