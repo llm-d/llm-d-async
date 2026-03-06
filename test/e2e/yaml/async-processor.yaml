@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: async-processor
+  namespace: e2e-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: async-processor-auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: async-processor
+    namespace: e2e-test
+roleRef:
+  kind: ClusterRole
+  name: system:auth-delegator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: async-processor
+  namespace: e2e-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: async-processor
+  template:
+    metadata:
+      labels:
+        app: async-processor
+    spec:
+      serviceAccountName: async-processor
+      containers:
+        - name: async-processor
+          image: ${AP_IMAGE}
+          imagePullPolicy: Never
+          args:
+            - "--message-queue-impl=redis-sortedset-gated"
+            - "--dispatch-gate=redis"
+            - "--igw-base-url=http://igw-mock.e2e-test.svc.cluster.local:80"
+            - "--redis.ss.addr=redis.e2e-test.svc.cluster.local:6379"
+            - "--redis.ss.poll-interval-ms=500"
+            - "--redis.ss.batch-size=10"
+            - "--metrics-endpoint-auth=false"
+            - "--concurrency=1"

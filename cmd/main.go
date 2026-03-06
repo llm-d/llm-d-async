@@ -102,6 +102,9 @@ func main() {
 		gate = flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 {
 			return 1.0 // Full capacity
 		})
+	case "redis":
+		gate = redis.NewRedisDispatchGate()
+		setupLog.Info("Using Redis-based dispatch gate")
 	default:
 		setupLog.Error(fmt.Errorf("unknown dispatch gate type: %s", dispatchGateType), "Unknown dispatch gate type", "dispatch-gate", dispatchGateType)
 		os.Exit(1)
