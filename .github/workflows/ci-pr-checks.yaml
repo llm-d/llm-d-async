@@ -49,11 +49,8 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.8.0
-          args: ""
+      - name: Lint
+        run: make lint
 
       - name: Build
         run: make build
