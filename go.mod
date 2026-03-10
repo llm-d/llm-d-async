@@ -1,8 +1,6 @@
 module github.com/llm-d-incubation/llm-d-async
 
-go 1.24.1
-
-toolchain go1.24.2
+go 1.25.0
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.4.0
@@ -14,7 +12,7 @@ require (
 	github.com/prometheus/common v0.67.5
 	github.com/redis/go-redis/v9 v9.18.0
 	go.uber.org/zap v1.27.1
-	golang.org/x/oauth2 v0.35.0
+	golang.org/x/oauth2 v0.36.0
 	k8s.io/api v0.34.5
 	k8s.io/apimachinery v0.34.5
 	k8s.io/client-go v0.34.5
