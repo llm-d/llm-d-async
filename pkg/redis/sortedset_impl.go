@@ -248,6 +248,7 @@ func (r *RedisSortedSetFlow) retryWorker(ctx context.Context) {
 }
 
 // Pushes results to Redis list (FIFO)
+// Routes results to the queue specified in request metadata, or default queue if not specified
 func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 	logger := log.FromContext(ctx)
 
@@ -256,9 +257,19 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case msg := <-r.resultChannel:
+			// Check metadata for custom result queue (set by producer)
+			resultQueue := *ssResultQueueName // default queue
+			if msg.Metadata != nil {
+				if customQueue, ok := msg.Metadata["result_queue"]; ok && customQueue != "" {
+					resultQueue = customQueue
+				}
+			}
+
 			msgStr := r.marshalResult(msg)
-			if err := r.rdb.LPush(ctx, *ssResultQueueName, msgStr).Err(); err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to push result")
+			if err := r.rdb.LPush(ctx, resultQueue, msgStr).Err(); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to push result", "queue", resultQueue)
+			} else {
+				logger.V(logutil.DEBUG).Info("Pushed result to queue", "id", msg.Id, "queue", resultQueue)
 			}
 		}
 	}
