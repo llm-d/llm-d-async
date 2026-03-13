@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -71,9 +70,7 @@ func main() {
 	var gate flowcontrol.DispatchGate
 	switch dispatchGateType {
 	case "noop":
-		gate = flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 {
-			return 1.0 // Full capacity
-		})
+		gate = flowcontrol.ConstOpenGate()
 	case "redis":
 		gate = redis.NewRedisDispatchGate()
 		setupLog.Info("Using Redis-based dispatch gate")

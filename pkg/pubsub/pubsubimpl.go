@@ -111,7 +111,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 	}
 
 	if p.gate == nil {
-		p.gate = flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 { return 1.0 })
+		p.gate = flowcontrol.ConstOpenGate()
 	}
 
 	return p

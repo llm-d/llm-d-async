@@ -334,9 +334,9 @@ func TestSameTenantMultipleQueues(t *testing.T) {
 
 	// Same tenant creates two producers with different result queues
 	prod1, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:        mr.Addr(),
-		TenantID:         "alice",
-		ResultQueueName:  "batch-jobs",
+		RedisAddr:       mr.Addr(),
+		TenantID:        "alice",
+		ResultQueueName: "batch-jobs",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -346,9 +346,9 @@ func TestSameTenantMultipleQueues(t *testing.T) {
 	})
 
 	prod2, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:        mr.Addr(),
-		TenantID:         "alice",
-		ResultQueueName:  "realtime",
+		RedisAddr:       mr.Addr(),
+		TenantID:        "alice",
+		ResultQueueName: "realtime",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {

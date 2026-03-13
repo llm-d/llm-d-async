@@ -95,7 +95,7 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) *RedisSortedSetFlow {
 	}
 
 	if r.gate == nil {
-		r.gate = flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 { return 1.0 })
+		r.gate = flowcontrol.ConstOpenGate()
 	}
 
 	return r

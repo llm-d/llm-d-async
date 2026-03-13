@@ -37,3 +37,7 @@ type DispatchGateFunc func(context.Context) float64
 func (f DispatchGateFunc) Budget(ctx context.Context) float64 {
 	return f(ctx)
 }
+
+func ConstOpenGate() DispatchGate {
+	return DispatchGateFunc(func(ctx context.Context) float64 { return 1.0 })
+}

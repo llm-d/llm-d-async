@@ -18,7 +18,7 @@ import (
 
 // noopGate returns a gate that always returns full budget (1.0)
 func noopGate() flowcontrol.DispatchGate {
-	return flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 { return 1.0 })
+	return flowcontrol.ConstOpenGate()
 }
 
 // Test helper to create test flow and Redis
@@ -546,9 +546,7 @@ func TestSortedSetFlow_WithDispatchGateOption(t *testing.T) {
 	defer func() { *ssRequestQueueName = origQueue }()
 
 	// Use WithDispatchGate option
-	gate := flowcontrol.DispatchGateFunc(func(ctx context.Context) float64 {
-		return 1.0
-	})
+	gate := flowcontrol.ConstOpenGate()
 
 	flow := NewRedisSortedSetFlow(WithDispatchGate(gate))
 	flow.rdb = rdb
