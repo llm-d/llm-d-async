@@ -24,38 +24,25 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/api"
+	"github.com/stretchr/testify/require"
 )
 
 // buildPromQL tests
 
 func TestBuildPromQL_NoLabels(t *testing.T) {
-	got := buildPromQL("my_metric", nil)
-	if got != "my_metric" {
-		t.Errorf("expected %q, got %q", "my_metric", got)
-	}
+	require.Equal(t, "my_metric", buildPromQL("my_metric", nil))
 }
 
 func TestBuildPromQL_EmptyLabels(t *testing.T) {
-	got := buildPromQL("my_metric", map[string]string{})
-	if got != "my_metric" {
-		t.Errorf("expected %q, got %q", "my_metric", got)
-	}
+	require.Equal(t, "my_metric", buildPromQL("my_metric", map[string]string{}))
 }
 
 func TestBuildPromQL_SingleLabel(t *testing.T) {
-	got := buildPromQL("my_metric", map[string]string{"name": "foo"})
-	expected := `my_metric{name="foo"}`
-	if got != expected {
-		t.Errorf("expected %q, got %q", expected, got)
-	}
+	require.Equal(t, `my_metric{name="foo"}`, buildPromQL("my_metric", map[string]string{"name": "foo"}))
 }
 
 func TestBuildPromQL_MultipleLabels(t *testing.T) {
-	got := buildPromQL("my_metric", map[string]string{"name": "foo", "app": "bar"})
-	expected := `my_metric{app="bar",name="foo"}`
-	if got != expected {
-		t.Errorf("expected %q, got %q", expected, got)
-	}
+	require.Equal(t, `my_metric{app="bar",name="foo"}`, buildPromQL("my_metric", map[string]string{"name": "foo", "app": "bar"}))
 }
 
 // PrometheusMetricSource.Query tests
@@ -70,8 +57,8 @@ func newTestSource(t *testing.T, statusCode int, responseBody string) (*Promethe
 	source, err := NewPrometheusMetricSource(api.Config{Address: server.URL})
 	if err != nil {
 		server.Close()
-		t.Fatalf("failed to create PrometheusMetricSource: %v", err)
 	}
+	require.NoError(t, err)
 	return source, server
 }
 
@@ -81,21 +68,11 @@ func TestPrometheusMetricSource_SingleSample(t *testing.T) {
 	defer server.Close()
 
 	samples, err := source.Query(context.Background(), "my_metric", map[string]string{"name": "foo"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(samples) != 1 {
-		t.Fatalf("expected 1 sample, got %d", len(samples))
-	}
-	if samples[0].Value != 42.5 {
-		t.Errorf("expected value 42.5, got %f", samples[0].Value)
-	}
-	if samples[0].Labels["name"] != "foo" {
-		t.Errorf("expected label name=foo, got %q", samples[0].Labels["name"])
-	}
-	if samples[0].Labels["__name__"] != "my_metric" {
-		t.Errorf("expected label __name__=my_metric, got %q", samples[0].Labels["__name__"])
-	}
+	require.NoError(t, err)
+	require.Len(t, samples, 1)
+	require.Equal(t, 42.5, samples[0].Value)
+	require.Equal(t, "foo", samples[0].Labels["name"])
+	require.Equal(t, "my_metric", samples[0].Labels["__name__"])
 }
 
 func TestPrometheusMetricSource_MultipleSamples(t *testing.T) {
@@ -107,21 +84,14 @@ func TestPrometheusMetricSource_MultipleSamples(t *testing.T) {
 	defer server.Close()
 
 	samples, err := source.Query(context.Background(), "my_metric", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(samples) != 3 {
-		t.Fatalf("expected 3 samples, got %d", len(samples))
-	}
-	expectedValues := []float64{1, 2, 3}
-	expectedNames := []string{"a", "b", "c"}
-	for i, s := range samples {
-		if s.Value != expectedValues[i] {
-			t.Errorf("sample[%d]: expected value %f, got %f", i, expectedValues[i], s.Value)
-		}
-		if s.Labels["name"] != expectedNames[i] {
-			t.Errorf("sample[%d]: expected name=%q, got %q", i, expectedNames[i], s.Labels["name"])
-		}
+	require.NoError(t, err)
+	require.Len(t, samples, 3)
+	for i, expected := range []struct {
+		name  string
+		value float64
+	}{{"a", 1}, {"b", 2}, {"c", 3}} {
+		require.Equal(t, expected.value, samples[i].Value)
+		require.Equal(t, expected.name, samples[i].Labels["name"])
 	}
 }
 
@@ -131,12 +101,8 @@ func TestPrometheusMetricSource_EmptyVector(t *testing.T) {
 	defer server.Close()
 
 	samples, err := source.Query(context.Background(), "my_metric", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(samples) != 0 {
-		t.Errorf("expected 0 samples, got %d", len(samples))
-	}
+	require.NoError(t, err)
+	require.Empty(t, samples)
 }
 
 func TestPrometheusMetricSource_ServerError(t *testing.T) {
@@ -145,9 +111,7 @@ func TestPrometheusMetricSource_ServerError(t *testing.T) {
 	defer server.Close()
 
 	_, err := source.Query(context.Background(), "my_metric", nil)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+	require.Error(t, err)
 }
 
 func TestPrometheusMetricSource_ServerUnreachable(t *testing.T) {
@@ -155,9 +119,7 @@ func TestPrometheusMetricSource_ServerUnreachable(t *testing.T) {
 	server.Close()
 
 	_, err := source.Query(context.Background(), "my_metric", nil)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+	require.Error(t, err)
 }
 
 func TestPrometheusMetricSource_QueryPassthrough(t *testing.T) {
@@ -170,24 +132,14 @@ func TestPrometheusMetricSource_QueryPassthrough(t *testing.T) {
 	defer server.Close()
 
 	source, err := NewPrometheusMetricSource(api.Config{Address: server.URL})
-	if err != nil {
-		t.Fatalf("failed to create source: %v", err)
-	}
+	require.NoError(t, err)
 
 	_, err = source.Query(context.Background(), "inference_pool_average_queue_size", map[string]string{"name": "my-model"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	expected := `inference_pool_average_queue_size{name="my-model"}`
-	if receivedQuery != expected {
-		t.Errorf("expected query %q, got %q", expected, receivedQuery)
-	}
+	require.NoError(t, err)
+	require.Equal(t, `inference_pool_average_queue_size{name="my-model"}`, receivedQuery)
 }
 
 func TestNewPrometheusMetricSource_InvalidAddress(t *testing.T) {
 	_, err := NewPrometheusMetricSource(api.Config{Address: "://invalid"})
-	if err == nil {
-		t.Fatal("expected error for invalid address, got nil")
-	}
+	require.Error(t, err)
 }

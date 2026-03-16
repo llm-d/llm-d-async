@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/api"
+	"github.com/stretchr/testify/require"
 )
 
 // mockMetricSource is a test implementation of MetricSource.
@@ -55,11 +56,7 @@ func TestBinaryMetricDispatchGate_MetricValueZero(t *testing.T) {
 	defer server.Close()
 
 	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", map[string]string{"name": "test"})
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 for zero metric, got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGate_MetricValueNonZero(t *testing.T) {
@@ -68,11 +65,7 @@ func TestBinaryMetricDispatchGate_MetricValueNonZero(t *testing.T) {
 	defer server.Close()
 
 	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", map[string]string{"name": "test"})
-	budget := gate.Budget(context.Background())
-
-	if budget != 0.0 {
-		t.Errorf("expected budget 0.0 for non-zero metric, got %f", budget)
-	}
+	require.Equal(t, 0.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGate_EmptyVector(t *testing.T) {
@@ -81,11 +74,7 @@ func TestBinaryMetricDispatchGate_EmptyVector(t *testing.T) {
 	defer server.Close()
 
 	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 for empty vector (fail-open), got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGate_ServerError(t *testing.T) {
@@ -94,24 +83,15 @@ func TestBinaryMetricDispatchGate_ServerError(t *testing.T) {
 	defer server.Close()
 
 	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 for server error (fail-open), got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGate_ServerUnreachable(t *testing.T) {
-	// Create a server and immediately close it so the URL is unreachable
 	server := newTestPrometheusServer(http.StatusOK, "")
 	server.Close()
 
 	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 for unreachable server (fail-open), got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGate_MultipleSamples(t *testing.T) {
@@ -121,11 +101,7 @@ func TestBinaryMetricDispatchGate_MultipleSamples(t *testing.T) {
 	defer server.Close()
 
 	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 (first sample is zero), got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGate_MultipleSamplesFirstNonZero(t *testing.T) {
@@ -135,11 +111,7 @@ func TestBinaryMetricDispatchGate_MultipleSamplesFirstNonZero(t *testing.T) {
 	defer server.Close()
 
 	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
-	budget := gate.Budget(context.Background())
-
-	if budget != 0.0 {
-		t.Errorf("expected budget 0.0 (first sample is non-zero), got %f", budget)
-	}
+	require.Equal(t, 0.0, gate.Budget(context.Background()))
 }
 
 // Unit tests using the MetricSource interface directly
@@ -149,11 +121,7 @@ func TestBinaryMetricDispatchGateWithSource_ZeroValue(t *testing.T) {
 		&mockMetricSource{samples: []Sample{{Value: 0.0}}},
 		"test_metric", nil,
 	)
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 for zero value, got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGateWithSource_NonZeroValue(t *testing.T) {
@@ -161,11 +129,7 @@ func TestBinaryMetricDispatchGateWithSource_NonZeroValue(t *testing.T) {
 		&mockMetricSource{samples: []Sample{{Value: 42.0}}},
 		"test_metric", nil,
 	)
-	budget := gate.Budget(context.Background())
-
-	if budget != 0.0 {
-		t.Errorf("expected budget 0.0 for non-zero value, got %f", budget)
-	}
+	require.Equal(t, 0.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGateWithSource_Error(t *testing.T) {
@@ -173,11 +137,7 @@ func TestBinaryMetricDispatchGateWithSource_Error(t *testing.T) {
 		&mockMetricSource{err: errors.New("connection refused")},
 		"test_metric", nil,
 	)
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 for error (fail-open), got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGateWithSource_EmptySamples(t *testing.T) {
@@ -185,10 +145,5 @@ func TestBinaryMetricDispatchGateWithSource_EmptySamples(t *testing.T) {
 		&mockMetricSource{samples: []Sample{}},
 		"test_metric", nil,
 	)
-	budget := gate.Budget(context.Background())
-
-	if budget != 1.0 {
-		t.Errorf("expected budget 1.0 for empty samples (fail-open), got %f", budget)
-	}
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
-
