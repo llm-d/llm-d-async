@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,7 +90,7 @@ func buildPromQL(metricName string, labels map[string]string) string {
 
 	parts := make([]string, 0, len(labels))
 	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, labels[k]))
+		parts = append(parts, fmt.Sprintf(`%s=%s`, k, strconv.Quote(labels[k])))
 	}
 	return fmt.Sprintf(`%s{%s}`, metricName, strings.Join(parts, ","))
 }
