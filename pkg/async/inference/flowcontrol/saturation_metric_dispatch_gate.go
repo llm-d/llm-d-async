@@ -18,11 +18,15 @@ package flowcontrol
 
 import (
 	"context"
+	"flag"
 
 	"github.com/prometheus/client_golang/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
+
+var saturationInferencePool = flag.String("gate.saturation.inference-pool", "", "inference pool name for saturation metric")
+var saturationThreshold = flag.Float64("gate.saturation.threshold", 0.8, "saturation threshold above which budget is zero")
 
 // SaturationMetricDispatchGate implements DispatchGate based on pool saturation.
 // It reads the inference_extension_flow_control_pool_saturation metric and

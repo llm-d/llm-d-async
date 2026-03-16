@@ -29,8 +29,7 @@ var isGMP = flag.Bool("gate.pmetric.is-gmp", false, "Is this GMP (Google Managed
 var prometheusURL = flag.String("gate.prometheus.url", "", "Prometheus URL for non GMP metric")
 var gmpProjectID = flag.String("gate.pmetric.gmp.project-id", "", "Project ID for Google Managed Prometheus")
 var prometheusQueryModelName = flag.String("gate.prometheus.model-name", "", "metrics name to use for avg_queue_size")
-var saturationInferencePool = flag.String("gate.saturation.inference-pool", "", "inference pool name for saturation metric")
-var saturationThreshold = flag.Float64("gate.saturation.threshold", 0.8, "saturation threshold above which budget is zero")
+
 
 // BinaryMetricDispatchGate implements DispatchGate using a MetricSource.
 // It returns 0.0 (no capacity) if the metric value is non-zero,
