@@ -47,7 +47,7 @@ func main() {
 
 	flag.StringVar(&igwBaseURL, "igw-base-url", "", "Base URL of the IGW (e.g. https://localhost:30800)")
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
-	flag.StringVar(&dispatchGateType, "dispatch-gate", "noop", "The dispatch gate policy to use. Supported policies: noop, redis, metric-avg-queue-size")
+	flag.StringVar(&dispatchGateType, "dispatch-gate", "noop", "The dispatch gate policy to use. Supported policies: noop, redis, metric-avg-queue-size, metric-saturation")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, redis-sortedset-gated, gcp-pubsub, gcp-pubsub-gated")
 
 	opts := zap.Options{
@@ -76,6 +76,9 @@ func main() {
 		setupLog.Info("Using Redis-based dispatch gate")
 	case "metric-avg-queue-size":
 		gate = flowcontrol.AverageQueueSizeGate()
+	case "metric-saturation":
+		gate = flowcontrol.SaturationGate()
+		setupLog.Info("Using saturation metric dispatch gate")
 	default:
 		setupLog.Error(fmt.Errorf("unknown dispatch gate type: %s", dispatchGateType), "Unknown dispatch gate type", "dispatch-gate", dispatchGateType)
 		os.Exit(1)

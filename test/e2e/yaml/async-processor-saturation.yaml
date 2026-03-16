@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: async-processor-saturation
+  namespace: e2e-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: async-processor-saturation-auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: async-processor-saturation
+    namespace: e2e-test
+roleRef:
+  kind: ClusterRole
+  name: system:auth-delegator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: async-processor-saturation
+  namespace: e2e-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: async-processor-saturation
+  template:
+    metadata:
+      labels:
+        app: async-processor-saturation
+    spec:
+      serviceAccountName: async-processor-saturation
+      containers:
+        - name: async-processor
+          image: ${AP_IMAGE}
+          imagePullPolicy: Never
+          args:
+            - "--message-queue-impl=redis-sortedset-gated"
+            - "--dispatch-gate=metric-saturation"
+            - "--gate.prometheus.url=http://prom-mock.e2e-test.svc.cluster.local:9090"
+            - "--gate.saturation.inference-pool=e2e-pool"
+            - "--gate.saturation.threshold=0.8"
+            - "--igw-base-url=http://igw-mock.e2e-test.svc.cluster.local:80"
+            - "--redis.ss.addr=redis.e2e-test.svc.cluster.local:6379"
+            - "--redis.ss.poll-interval-ms=500"
+            - "--redis.ss.batch-size=10"
+            - "--redis.ss.request-queue-name=saturation-request-sortedset"
+            - "--redis.ss.result-queue-name=saturation-result-list"
+            - "--metrics-endpoint-auth=false"
+            - "--concurrency=1"

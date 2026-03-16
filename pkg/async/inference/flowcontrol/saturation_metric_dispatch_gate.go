@@ -75,3 +75,18 @@ func (g *SaturationMetricDispatchGate) Budget(ctx context.Context) float64 {
 	}
 	return 1.0 - saturation
 }
+
+// SaturationGate creates a SaturationMetricDispatchGate from command-line flags.
+func SaturationGate() *SaturationMetricDispatchGate {
+	if *isGMP {
+		source, err := NewGMPMetricSource(*gmpProjectID)
+		if err != nil {
+			panic(err)
+		}
+		return NewSaturationMetricDispatchGateWithSource(source, *saturationInferencePool, *saturationThreshold)
+	}
+
+	return NewSaturationMetricDispatchGate(api.Config{
+		Address: *prometheusURL,
+	}, *saturationInferencePool, *saturationThreshold)
+}

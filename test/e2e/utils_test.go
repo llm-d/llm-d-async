@@ -105,6 +105,17 @@ func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
 	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
 }
 
+func setPromMockSaturation(promMockURL string, value string) {
+	body, _ := json.Marshal(map[string]string{"value": value})
+	req, err := http.NewRequest(http.MethodPost, promMockURL+"/admin/saturation", bytes.NewReader(body))
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := adminClient.Do(req)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	defer resp.Body.Close() //nolint:errcheck
+	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
+}
+
 func makeRequestMessage(id string, deadlineOffset time.Duration) api.RequestMessage {
 	deadline := time.Now().Add(deadlineOffset)
 	return api.RequestMessage{
