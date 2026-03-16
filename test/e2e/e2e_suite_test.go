@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -236,6 +237,16 @@ func setupRedisClient() {
 	})
 	gomega.Eventually(func() error {
 		return rdb.Ping(context.Background()).Err()
+	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
+
+	ginkgo.By("Waiting for prom-mock to be ready on localhost:" + promMockPort)
+	gomega.Eventually(func() error {
+		resp, err := http.Get(promMockURL + "/admin/saturation")
+		if err != nil {
+			return err
+		}
+		resp.Body.Close()
+		return nil
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
 }
 
