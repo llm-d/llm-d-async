@@ -19,6 +19,8 @@ package flowcontrol
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
@@ -27,33 +29,36 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// MetricSource provides a single metric value from an external source.
+// Sample represents a single metric sample with its labels and value.
+type Sample struct {
+	Labels map[string]string
+	Value  float64
+}
+
+// MetricSource queries a metrics backend for time-series data.
 type MetricSource interface {
-	// GetValue returns the current metric value, or an error if the value
-	// could not be retrieved.
-	GetValue(ctx context.Context) (float64, error)
+	// Query returns the current samples for the given metric name and label matchers.
+	Query(ctx context.Context, metricName string, labels map[string]string) ([]Sample, error)
 }
 
 // PrometheusMetricSource implements MetricSource by querying a Prometheus-compatible API.
 type PrometheusMetricSource struct {
-	api   v1.API
-	query string
+	api v1.API
 }
 
-// NewPrometheusMetricSource creates a MetricSource that queries a Prometheus-compatible API.
-func NewPrometheusMetricSource(clientConfig api.Config, query string) (*PrometheusMetricSource, error) {
+// NewPrometheusMetricSource creates a MetricSource backed by a Prometheus-compatible API.
+func NewPrometheusMetricSource(clientConfig api.Config) (*PrometheusMetricSource, error) {
 	client, err := api.NewClient(clientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error creating Prometheus API client: %w", err)
 	}
 	return &PrometheusMetricSource{
-		api:   v1.NewAPI(client),
-		query: query,
+		api: v1.NewAPI(client),
 	}, nil
 }
 
 // NewGMPMetricSource creates a MetricSource for Google Managed Prometheus.
-func NewGMPMetricSource(projectID string, query string) (*PrometheusMetricSource, error) {
+func NewGMPMetricSource(projectID string) (*PrometheusMetricSource, error) {
 	ctx := context.Background()
 	gcpClient, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/monitoring.read")
 	if err != nil {
@@ -64,24 +69,53 @@ func NewGMPMetricSource(projectID string, query string) (*PrometheusMetricSource
 	return NewPrometheusMetricSource(api.Config{
 		Address:      promURL,
 		RoundTripper: gcpClient.Transport,
-	}, query)
+	})
 }
 
-// GetValue queries Prometheus and returns the value of the first sample in the result vector.
-func (s *PrometheusMetricSource) GetValue(ctx context.Context) (float64, error) {
-	result, _, err := s.api.Query(ctx, s.query, time.Now())
+// buildPromQL constructs a PromQL instant vector selector from a metric name and label matchers.
+func buildPromQL(metricName string, labels map[string]string) string {
+	if len(labels) == 0 {
+		return metricName
+	}
+
+	// Sort keys for deterministic output
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(labels))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, labels[k]))
+	}
+	return fmt.Sprintf(`%s{%s}`, metricName, strings.Join(parts, ","))
+}
+
+// Query executes a PromQL instant query and returns the result as samples.
+func (s *PrometheusMetricSource) Query(ctx context.Context, metricName string, labels map[string]string) ([]Sample, error) {
+	query := buildPromQL(metricName, labels)
+
+	result, _, err := s.api.Query(ctx, query, time.Now())
 	if err != nil {
-		return 0, fmt.Errorf("error querying Prometheus: %w", err)
+		return nil, fmt.Errorf("error querying Prometheus: %w", err)
 	}
 
 	vec, ok := result.(model.Vector)
 	if !ok {
-		return 0, fmt.Errorf("expected Vector result, got %T", result)
+		return nil, fmt.Errorf("expected Vector result, got %T", result)
 	}
 
-	if len(vec) == 0 {
-		return 0, fmt.Errorf("no metrics found for query: %s", s.query)
+	samples := make([]Sample, len(vec))
+	for i, s := range vec {
+		lbls := make(map[string]string, len(s.Metric))
+		for k, v := range s.Metric {
+			lbls[string(k)] = string(v)
+		}
+		samples[i] = Sample{
+			Labels: lbls,
+			Value:  float64(s.Value),
+		}
 	}
-
-	return float64(vec[0].Value), nil
+	return samples, nil
 }

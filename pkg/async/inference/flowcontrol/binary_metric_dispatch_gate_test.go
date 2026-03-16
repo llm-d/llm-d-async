@@ -29,12 +29,12 @@ import (
 
 // mockMetricSource is a test implementation of MetricSource.
 type mockMetricSource struct {
-	value float64
-	err   error
+	samples []Sample
+	err     error
 }
 
-func (m *mockMetricSource) GetValue(_ context.Context) (float64, error) {
-	return m.value, m.err
+func (m *mockMetricSource) Query(_ context.Context, _ string, _ map[string]string) ([]Sample, error) {
+	return m.samples, m.err
 }
 
 // newTestPrometheusServer creates an httptest.Server that serves Prometheus HTTP API
@@ -47,12 +47,14 @@ func newTestPrometheusServer(statusCode int, responseBody string) *httptest.Serv
 	}))
 }
 
+// Integration tests using a mock Prometheus HTTP server
+
 func TestBinaryMetricDispatchGate_MetricValueZero(t *testing.T) {
 	body := `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"name":"test"},"value":[1234567890,"0"]}]}}`
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_query")
+	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", map[string]string{"name": "test"})
 	budget := gate.Budget(context.Background())
 
 	if budget != 1.0 {
@@ -65,7 +67,7 @@ func TestBinaryMetricDispatchGate_MetricValueNonZero(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_query")
+	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", map[string]string{"name": "test"})
 	budget := gate.Budget(context.Background())
 
 	if budget != 0.0 {
@@ -78,7 +80,7 @@ func TestBinaryMetricDispatchGate_EmptyVector(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_query")
+	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
 	budget := gate.Budget(context.Background())
 
 	if budget != 1.0 {
@@ -91,7 +93,7 @@ func TestBinaryMetricDispatchGate_ServerError(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusInternalServerError, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_query")
+	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
 	budget := gate.Budget(context.Background())
 
 	if budget != 1.0 {
@@ -104,7 +106,7 @@ func TestBinaryMetricDispatchGate_ServerUnreachable(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, "")
 	server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_query")
+	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
 	budget := gate.Budget(context.Background())
 
 	if budget != 1.0 {
@@ -118,7 +120,7 @@ func TestBinaryMetricDispatchGate_MultipleSamples(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_query")
+	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
 	budget := gate.Budget(context.Background())
 
 	if budget != 1.0 {
@@ -132,7 +134,7 @@ func TestBinaryMetricDispatchGate_MultipleSamplesFirstNonZero(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_query")
+	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
 	budget := gate.Budget(context.Background())
 
 	if budget != 0.0 {
@@ -140,10 +142,13 @@ func TestBinaryMetricDispatchGate_MultipleSamplesFirstNonZero(t *testing.T) {
 	}
 }
 
-// Tests using the MetricSource interface directly
+// Unit tests using the MetricSource interface directly
 
 func TestBinaryMetricDispatchGateWithSource_ZeroValue(t *testing.T) {
-	gate := NewBinaryMetricDispatchGateWithSource(&mockMetricSource{value: 0.0})
+	gate := NewBinaryMetricDispatchGateWithSource(
+		&mockMetricSource{samples: []Sample{{Value: 0.0}}},
+		"test_metric", nil,
+	)
 	budget := gate.Budget(context.Background())
 
 	if budget != 1.0 {
@@ -152,7 +157,10 @@ func TestBinaryMetricDispatchGateWithSource_ZeroValue(t *testing.T) {
 }
 
 func TestBinaryMetricDispatchGateWithSource_NonZeroValue(t *testing.T) {
-	gate := NewBinaryMetricDispatchGateWithSource(&mockMetricSource{value: 42.0})
+	gate := NewBinaryMetricDispatchGateWithSource(
+		&mockMetricSource{samples: []Sample{{Value: 42.0}}},
+		"test_metric", nil,
+	)
 	budget := gate.Budget(context.Background())
 
 	if budget != 0.0 {
@@ -161,10 +169,26 @@ func TestBinaryMetricDispatchGateWithSource_NonZeroValue(t *testing.T) {
 }
 
 func TestBinaryMetricDispatchGateWithSource_Error(t *testing.T) {
-	gate := NewBinaryMetricDispatchGateWithSource(&mockMetricSource{err: errors.New("connection refused")})
+	gate := NewBinaryMetricDispatchGateWithSource(
+		&mockMetricSource{err: errors.New("connection refused")},
+		"test_metric", nil,
+	)
 	budget := gate.Budget(context.Background())
 
 	if budget != 1.0 {
 		t.Errorf("expected budget 1.0 for error (fail-open), got %f", budget)
 	}
 }
+
+func TestBinaryMetricDispatchGateWithSource_EmptySamples(t *testing.T) {
+	gate := NewBinaryMetricDispatchGateWithSource(
+		&mockMetricSource{samples: []Sample{}},
+		"test_metric", nil,
+	)
+	budget := gate.Budget(context.Background())
+
+	if budget != 1.0 {
+		t.Errorf("expected budget 1.0 for empty samples (fail-open), got %f", budget)
+	}
+}
+

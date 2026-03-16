@@ -34,22 +34,26 @@ var prometheusQueryModelName = flag.String("gate.prometheus.model-name", "", "me
 // It returns 0.0 (no capacity) if the metric value is non-zero,
 // and 1.0 (full capacity) if the metric value is zero.
 type BinaryMetricDispatchGate struct {
-	source MetricSource
+	source     MetricSource
+	metricName string
+	labels     map[string]string
 }
 
-// NewBinaryMetricDispatchGate creates a new gate based on the provided Prometheus metric.
-func NewBinaryMetricDispatchGate(clientConfig api.Config, query string) *BinaryMetricDispatchGate {
-	source, err := NewPrometheusMetricSource(clientConfig, query)
+// NewBinaryMetricDispatchGate creates a new gate that queries Prometheus for the given metric.
+func NewBinaryMetricDispatchGate(clientConfig api.Config, metricName string, labels map[string]string) *BinaryMetricDispatchGate {
+	source, err := NewPrometheusMetricSource(clientConfig)
 	if err != nil {
 		panic(err)
 	}
-	return NewBinaryMetricDispatchGateWithSource(source)
+	return NewBinaryMetricDispatchGateWithSource(source, metricName, labels)
 }
 
 // NewBinaryMetricDispatchGateWithSource creates a new gate using the provided MetricSource.
-func NewBinaryMetricDispatchGateWithSource(source MetricSource) *BinaryMetricDispatchGate {
+func NewBinaryMetricDispatchGateWithSource(source MetricSource, metricName string, labels map[string]string) *BinaryMetricDispatchGate {
 	return &BinaryMetricDispatchGate{
-		source: source,
+		source:     source,
+		metricName: metricName,
+		labels:     labels,
 	}
 }
 
@@ -57,30 +61,36 @@ func NewBinaryMetricDispatchGateWithSource(source MetricSource) *BinaryMetricDis
 func (g *BinaryMetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 
-	value, err := g.source.GetValue(ctx)
+	samples, err := g.source.Query(ctx, g.metricName, g.labels)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Info("MetricSource error, failing open", "error", err)
 		return 1.0
 	}
 
-	if value == 0.0 {
+	if len(samples) == 0 {
+		logger.V(logutil.DEFAULT).Info("No metrics found, failing open")
+		return 1.0
+	}
+
+	if samples[0].Value == 0.0 {
 		return 1.0
 	}
 	return 0.0
 }
 
 func AverageQueueSizeGate() *BinaryMetricDispatchGate {
-	query := `inference_pool_average_queue_size{name="` + *prometheusQueryModelName + `"}`
+	metricName := "inference_pool_average_queue_size"
+	labels := map[string]string{"name": *prometheusQueryModelName}
 
 	if *isGMP {
-		source, err := NewGMPMetricSource(*gmpProjectID, query)
+		source, err := NewGMPMetricSource(*gmpProjectID)
 		if err != nil {
 			panic(err)
 		}
-		return NewBinaryMetricDispatchGateWithSource(source)
+		return NewBinaryMetricDispatchGateWithSource(source, metricName, labels)
 	}
 
 	return NewBinaryMetricDispatchGate(api.Config{
 		Address: *prometheusURL,
-	}, query)
+	}, metricName, labels)
 }
