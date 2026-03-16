@@ -30,7 +30,6 @@ var prometheusURL = flag.String("gate.prometheus.url", "", "Prometheus URL for n
 var gmpProjectID = flag.String("gate.pmetric.gmp.project-id", "", "Project ID for Google Managed Prometheus")
 var prometheusQueryModelName = flag.String("gate.prometheus.model-name", "", "metrics name to use for avg_queue_size")
 
-
 // BinaryMetricDispatchGate implements DispatchGate using a MetricSource.
 // It returns 0.0 (no capacity) if the metric value is non-zero,
 // and 1.0 (full capacity) if the metric value is zero.
@@ -59,9 +58,6 @@ func NewBinaryMetricDispatchGateWithSource(source MetricSource, metricName strin
 }
 
 // Budget implements DispatchGate.
-// On error or missing data it fails open (returns 1.0) because the absence of
-// a queue-size metric likely means there is no backlog, so it is safe to allow
-// requests through.
 func (g *BinaryMetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 
