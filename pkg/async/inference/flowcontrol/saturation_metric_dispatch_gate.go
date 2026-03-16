@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"context"
 	"flag"
+	"math"
 
 	"github.com/prometheus/client_golang/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -77,6 +78,11 @@ func (g *SaturationMetricDispatchGate) Budget(ctx context.Context) float64 {
 	}
 
 	saturation := samples[0].Value
+	if math.IsNaN(saturation) || math.IsInf(saturation, 0) {
+		logger.V(logutil.DEFAULT).Info("Invalid saturation value, failing closed", "value", saturation)
+		return 0.0
+	}
+	saturation = math.Max(0.0, math.Min(1.0, saturation))
 	if saturation >= g.threshold {
 		return 0.0
 	}
