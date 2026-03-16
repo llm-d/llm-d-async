@@ -245,8 +245,7 @@ func setupRedisClient() {
 		if err != nil {
 			return err
 		}
-		resp.Body.Close()
-		return nil
+		return resp.Body.Close()
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
 }
 
