@@ -52,7 +52,7 @@ func newTestSource(t *testing.T, statusCode int, responseBody string) (*Promethe
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
-		fmt.Fprint(w, responseBody)
+		_, _ = fmt.Fprint(w, responseBody)
 	}))
 	source, err := NewPrometheusMetricSource(api.Config{Address: server.URL})
 	if err != nil {
@@ -127,7 +127,7 @@ func TestPrometheusMetricSource_QueryPassthrough(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedQuery = r.FormValue("query")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+		_, _ = fmt.Fprint(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
 	}))
 	defer server.Close()
 

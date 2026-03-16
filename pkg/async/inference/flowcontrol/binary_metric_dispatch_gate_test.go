@@ -44,7 +44,7 @@ func newTestPrometheusServer(statusCode int, responseBody string) *httptest.Serv
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
-		fmt.Fprint(w, responseBody)
+		_, _ = fmt.Fprint(w, responseBody)
 	}))
 }
 
