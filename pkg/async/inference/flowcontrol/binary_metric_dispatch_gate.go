@@ -59,6 +59,9 @@ func NewBinaryMetricDispatchGateWithSource(source MetricSource, metricName strin
 }
 
 // Budget implements DispatchGate.
+// On error or missing data it fails open (returns 1.0) because the absence of
+// a queue-size metric likely means there is no backlog, so it is safe to allow
+// requests through.
 func (g *BinaryMetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 

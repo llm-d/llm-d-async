@@ -59,6 +59,9 @@ func NewSaturationMetricDispatchGateWithSource(source MetricSource, inferencePoo
 }
 
 // Budget implements DispatchGate.
+// On error or missing data it fails closed (returns 0.0) because without a
+// reliable saturation reading the system cannot confirm there is spare capacity,
+// so it is safer to hold back requests until the metric becomes available.
 func (g *SaturationMetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 
