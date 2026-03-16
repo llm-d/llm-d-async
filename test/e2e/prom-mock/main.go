@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 )
 
@@ -43,6 +44,10 @@ func (s *server) handleSetSaturation(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if _, err := strconv.ParseFloat(body.Value, 64); err != nil {
+			http.Error(w, "value must be a valid number", http.StatusBadRequest)
 			return
 		}
 		s.mu.Lock()
