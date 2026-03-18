@@ -7,6 +7,10 @@ on:
   release:
     types: [published]  # Also runs when a GitHub release is published
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   set-params:
     runs-on: ubuntu-latest
@@ -43,4 +47,4 @@ jobs:
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: ${{ needs.set-params.outputs.prerelease }}
     secrets:
-      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
