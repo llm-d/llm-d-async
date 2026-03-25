@@ -166,5 +166,5 @@ func TestSaturationMetricDispatchGate_NegativeSaturation(t *testing.T) {
 		&mockMetricSource{samples: []Sample{{Value: -0.5}}},
 		"my-pool", 0.8, 1.0,
 	)
-	require.InDelta(t, 1.5, gate.Budget(context.Background()), 1e-9)
+	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }

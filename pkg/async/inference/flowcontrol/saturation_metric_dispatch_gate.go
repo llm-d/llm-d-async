@@ -33,11 +33,10 @@ var saturationFallback = flag.Float64("gate.saturation.fallback", 0.0, "fallback
 // SaturationMetricDispatchGate implements DispatchGate based on pool saturation.
 // It reads the inference_extension_flow_control_pool_saturation metric and
 // returns 0.0 if saturation is at or above the configured threshold,
-// otherwise returns max(0, 1 - saturation). The output is clamped at zero so
-// callers always receive a non-negative budget.
+// otherwise returns 1 - saturation, clamped to [0.0, 1.0].
 //
-// On error or missing/invalid data, the gate returns a default fallback value
-// (usually 0.0 i.e. closed, or 1.0 i.e. open).
+// On error or missing/invalid data, the gate returns the configured fallback
+// budget (derived from the fallback saturation value, also clamped to [0.0, 1.0]).
 type SaturationMetricDispatchGate struct {
 	source     MetricSource
 	metricName string
@@ -62,14 +61,13 @@ func NewSaturationMetricDispatchGateWithSource(source MetricSource, inferencePoo
 		metricName: "inference_extension_flow_control_pool_saturation",
 		labels:     map[string]string{"inference_pool": inferencePool},
 		threshold:  threshold,
-		fallback:   1.0 - fallback, // fallback is a _saturation_ value. Budget is 1-fallback
+		fallback:   math.Max(0.0, math.Min(1.0, 1.0-fallback)), // fallback is a saturation value; budget is clamped to [0,1]
 	}
 }
 
 // Budget implements DispatchGate.
 // On error or missing data the gate returns the configured fallback budget.
-// The output is clamped at zero: saturation values above 1.0 produce a budget
-// of 0.0 rather than a negative number.
+// The output is always clamped to [0.0, 1.0].
 func (g *SaturationMetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 
@@ -92,7 +90,7 @@ func (g *SaturationMetricDispatchGate) Budget(ctx context.Context) float64 {
 	if saturation >= g.threshold {
 		return 0.0
 	}
-	return math.Max(0.0, 1.0-saturation)
+	return math.Min(1.0, math.Max(0.0, 1.0-saturation))
 }
 
 // SaturationGate creates a SaturationMetricDispatchGate from command-line flags.
