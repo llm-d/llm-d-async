@@ -29,39 +29,27 @@ import (
 var saturationInferencePool = flag.String("gate.saturation.inference-pool", "", "inference pool name for saturation metric")
 var saturationThreshold = flag.Float64("gate.saturation.threshold", 0.8, "saturation threshold above which budget is zero")
 var saturationFallback = flag.Float64("gate.saturation.fallback", 0.0, "fallback saturation value on error/missing metrics; default 0.0")
+var saturationQueryExpr = flag.String("gate.saturation.query-expr", "", "custom PromQL expression for saturation metric; overrides inference-pool label selector")
 
 // SaturationMetricDispatchGate implements DispatchGate based on pool saturation.
-// It reads the inference_extension_flow_control_pool_saturation metric and
-// returns 0.0 if saturation is at or above the configured threshold,
-// otherwise returns 1 - saturation, clamped to [0.0, 1.0].
+// It queries a MetricSource for saturation samples and returns 0.0 if saturation
+// is at or above the configured threshold, otherwise returns max(0, 1 - saturation),
+// clamped to [0.0, 1.0].
 //
 // On error or missing/invalid data, the gate returns the configured fallback
 // budget (derived from the fallback saturation value, also clamped to [0.0, 1.0]).
 type SaturationMetricDispatchGate struct {
-	source     MetricSource
-	metricName string
-	labels     map[string]string
-	threshold  float64
-	fallback   float64
-}
-
-// NewSaturationMetricDispatchGate creates a new gate that queries Prometheus for the pool saturation metric.
-func NewSaturationMetricDispatchGate(clientConfig api.Config, inferencePool string, threshold float64, fallback float64) *SaturationMetricDispatchGate {
-	source, err := NewPrometheusMetricSource(clientConfig)
-	if err != nil {
-		panic(err)
-	}
-	return NewSaturationMetricDispatchGateWithSource(source, inferencePool, threshold, fallback)
+	source    MetricSource
+	threshold float64
+	fallback  float64
 }
 
 // NewSaturationMetricDispatchGateWithSource creates a new gate using the provided MetricSource.
-func NewSaturationMetricDispatchGateWithSource(source MetricSource, inferencePool string, threshold float64, fallback float64) *SaturationMetricDispatchGate {
+func NewSaturationMetricDispatchGateWithSource(source MetricSource, threshold float64, fallback float64) *SaturationMetricDispatchGate {
 	return &SaturationMetricDispatchGate{
-		source:     source,
-		metricName: "inference_extension_flow_control_pool_saturation",
-		labels:     map[string]string{"inference_pool": inferencePool},
-		threshold:  threshold,
-		fallback:   math.Max(0.0, math.Min(1.0, 1.0-fallback)), // fallback is a saturation value; budget is clamped to [0,1]
+		source:    source,
+		threshold: threshold,
+		fallback:  math.Max(0.0, math.Min(1.0, 1.0-fallback)), // fallback is a saturation value; budget is clamped to [0,1]
 	}
 }
 
@@ -71,7 +59,7 @@ func NewSaturationMetricDispatchGateWithSource(source MetricSource, inferencePoo
 func (g *SaturationMetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 
-	samples, err := g.source.Query(ctx, g.metricName, g.labels)
+	samples, err := g.source.Query(ctx)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Info("MetricSource error, using fallback value", "fallback", g.fallback, "error", err)
 		return g.fallback
@@ -95,15 +83,28 @@ func (g *SaturationMetricDispatchGate) Budget(ctx context.Context) float64 {
 
 // SaturationGate creates a SaturationMetricDispatchGate from command-line flags.
 func SaturationGate() *SaturationMetricDispatchGate {
+	expr := buildPromQL("inference_extension_flow_control_pool_saturation",
+		map[string]string{"inference_pool": *saturationInferencePool})
+	if *saturationQueryExpr != "" {
+		expr = *saturationQueryExpr
+	}
+
+	var source MetricSource
 	if *isGMP {
-		source, err := NewGMPMetricSource(*gmpProjectID)
+		var err error
+		source, err = NewGMPPromQLMetricSource(*gmpProjectID, expr)
 		if err != nil {
 			panic(err)
 		}
-		return NewSaturationMetricDispatchGateWithSource(source, *saturationInferencePool, *saturationThreshold, *saturationFallback)
+	} else {
+		var err error
+		source, err = NewPromQLMetricSource(api.Config{
+			Address: *prometheusURL,
+		}, expr)
+		if err != nil {
+			panic(err)
+		}
 	}
 
-	return NewSaturationMetricDispatchGate(api.Config{
-		Address: *prometheusURL,
-	}, *saturationInferencePool, *saturationThreshold, *saturationFallback)
+	return NewSaturationMetricDispatchGateWithSource(source, *saturationThreshold, *saturationFallback)
 }

@@ -34,7 +34,7 @@ type mockMetricSource struct {
 	err     error
 }
 
-func (m *mockMetricSource) Query(_ context.Context, _ string, _ map[string]string) ([]Sample, error) {
+func (m *mockMetricSource) Query(_ context.Context) ([]Sample, error) {
 	return m.samples, m.err
 }
 
@@ -55,7 +55,9 @@ func TestBinaryMetricDispatchGate_MetricValueZero(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", map[string]string{"name": "test"})
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, buildPromQL("test_metric", map[string]string{"name": "test"}))
+	require.NoError(t, err)
+	gate := NewBinaryMetricDispatchGateWithSource(source)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
@@ -64,7 +66,9 @@ func TestBinaryMetricDispatchGate_MetricValueNonZero(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", map[string]string{"name": "test"})
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, buildPromQL("test_metric", map[string]string{"name": "test"}))
+	require.NoError(t, err)
+	gate := NewBinaryMetricDispatchGateWithSource(source)
 	require.Equal(t, 0.0, gate.Budget(context.Background()))
 }
 
@@ -73,7 +77,9 @@ func TestBinaryMetricDispatchGate_EmptyVector(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, "test_metric")
+	require.NoError(t, err)
+	gate := NewBinaryMetricDispatchGateWithSource(source)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
@@ -82,15 +88,20 @@ func TestBinaryMetricDispatchGate_ServerError(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusInternalServerError, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, "test_metric")
+	require.NoError(t, err)
+	gate := NewBinaryMetricDispatchGateWithSource(source)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
 func TestBinaryMetricDispatchGate_ServerUnreachable(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, "")
+	serverURL := server.URL
 	server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
+	source, err := NewPromQLMetricSource(api.Config{Address: serverURL}, "test_metric")
+	require.NoError(t, err)
+	gate := NewBinaryMetricDispatchGateWithSource(source)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
@@ -100,7 +111,9 @@ func TestBinaryMetricDispatchGate_MultipleSamples(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, "test_metric")
+	require.NoError(t, err)
+	gate := NewBinaryMetricDispatchGateWithSource(source)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
@@ -110,7 +123,9 @@ func TestBinaryMetricDispatchGate_MultipleSamplesFirstNonZero(t *testing.T) {
 	server := newTestPrometheusServer(http.StatusOK, body)
 	defer server.Close()
 
-	gate := NewBinaryMetricDispatchGate(api.Config{Address: server.URL}, "test_metric", nil)
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, "test_metric")
+	require.NoError(t, err)
+	gate := NewBinaryMetricDispatchGateWithSource(source)
 	require.Equal(t, 0.0, gate.Budget(context.Background()))
 }
 
@@ -119,7 +134,6 @@ func TestBinaryMetricDispatchGate_MultipleSamplesFirstNonZero(t *testing.T) {
 func TestBinaryMetricDispatchGateWithSource_ZeroValue(t *testing.T) {
 	gate := NewBinaryMetricDispatchGateWithSource(
 		&mockMetricSource{samples: []Sample{{Value: 0.0}}},
-		"test_metric", nil,
 	)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
@@ -127,7 +141,6 @@ func TestBinaryMetricDispatchGateWithSource_ZeroValue(t *testing.T) {
 func TestBinaryMetricDispatchGateWithSource_NonZeroValue(t *testing.T) {
 	gate := NewBinaryMetricDispatchGateWithSource(
 		&mockMetricSource{samples: []Sample{{Value: 42.0}}},
-		"test_metric", nil,
 	)
 	require.Equal(t, 0.0, gate.Budget(context.Background()))
 }
@@ -135,7 +148,6 @@ func TestBinaryMetricDispatchGateWithSource_NonZeroValue(t *testing.T) {
 func TestBinaryMetricDispatchGateWithSource_Error(t *testing.T) {
 	gate := NewBinaryMetricDispatchGateWithSource(
 		&mockMetricSource{err: errors.New("connection refused")},
-		"test_metric", nil,
 	)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
@@ -143,7 +155,6 @@ func TestBinaryMetricDispatchGateWithSource_Error(t *testing.T) {
 func TestBinaryMetricDispatchGateWithSource_EmptySamples(t *testing.T) {
 	gate := NewBinaryMetricDispatchGateWithSource(
 		&mockMetricSource{samples: []Sample{}},
-		"test_metric", nil,
 	)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }

@@ -34,26 +34,13 @@ var prometheusQueryModelName = flag.String("gate.prometheus.model-name", "", "me
 // It returns 0.0 (no capacity) if the metric value is non-zero,
 // and 1.0 (full capacity) if the metric value is zero.
 type BinaryMetricDispatchGate struct {
-	source     MetricSource
-	metricName string
-	labels     map[string]string
-}
-
-// NewBinaryMetricDispatchGate creates a new gate that queries Prometheus for the given metric.
-func NewBinaryMetricDispatchGate(clientConfig api.Config, metricName string, labels map[string]string) *BinaryMetricDispatchGate {
-	source, err := NewPrometheusMetricSource(clientConfig)
-	if err != nil {
-		panic(err)
-	}
-	return NewBinaryMetricDispatchGateWithSource(source, metricName, labels)
+	source MetricSource
 }
 
 // NewBinaryMetricDispatchGateWithSource creates a new gate using the provided MetricSource.
-func NewBinaryMetricDispatchGateWithSource(source MetricSource, metricName string, labels map[string]string) *BinaryMetricDispatchGate {
+func NewBinaryMetricDispatchGateWithSource(source MetricSource) *BinaryMetricDispatchGate {
 	return &BinaryMetricDispatchGate{
-		source:     source,
-		metricName: metricName,
-		labels:     labels,
+		source: source,
 	}
 }
 
@@ -61,7 +48,7 @@ func NewBinaryMetricDispatchGateWithSource(source MetricSource, metricName strin
 func (g *BinaryMetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 
-	samples, err := g.source.Query(ctx, g.metricName, g.labels)
+	samples, err := g.source.Query(ctx)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Info("MetricSource error, failing open", "error", err)
 		return 1.0
@@ -78,19 +65,27 @@ func (g *BinaryMetricDispatchGate) Budget(ctx context.Context) float64 {
 	return 0.0
 }
 
+// AverageQueueSizeGate creates a BinaryMetricDispatchGate from command-line flags.
 func AverageQueueSizeGate() *BinaryMetricDispatchGate {
-	metricName := "inference_pool_average_queue_size"
-	labels := map[string]string{"name": *prometheusQueryModelName}
+	expr := buildPromQL("inference_pool_average_queue_size",
+		map[string]string{"name": *prometheusQueryModelName})
 
+	var source MetricSource
 	if *isGMP {
-		source, err := NewGMPMetricSource(*gmpProjectID)
+		var err error
+		source, err = NewGMPPromQLMetricSource(*gmpProjectID, expr)
 		if err != nil {
 			panic(err)
 		}
-		return NewBinaryMetricDispatchGateWithSource(source, metricName, labels)
+	} else {
+		var err error
+		source, err = NewPromQLMetricSource(api.Config{
+			Address: *prometheusURL,
+		}, expr)
+		if err != nil {
+			panic(err)
+		}
 	}
 
-	return NewBinaryMetricDispatchGate(api.Config{
-		Address: *prometheusURL,
-	}, metricName, labels)
+	return NewBinaryMetricDispatchGateWithSource(source)
 }

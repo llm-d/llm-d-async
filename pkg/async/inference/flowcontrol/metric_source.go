@@ -39,29 +39,34 @@ type Sample struct {
 }
 
 // MetricSource queries a metrics backend for time-series data.
+// The query configuration is baked into the implementation at construction time;
+// callers simply invoke Query to retrieve the current samples.
 type MetricSource interface {
-	// Query returns the current samples for the given metric name and label matchers.
-	Query(ctx context.Context, metricName string, labels map[string]string) ([]Sample, error)
+	// Query returns the current samples for the preconfigured query.
+	Query(ctx context.Context) ([]Sample, error)
 }
 
-// PrometheusMetricSource implements MetricSource by querying a Prometheus-compatible API.
-type PrometheusMetricSource struct {
-	api v1.API
+// PromQLMetricSource implements MetricSource by executing a PromQL expression
+// against a Prometheus-compatible API.
+type PromQLMetricSource struct {
+	api  v1.API
+	expr string
 }
 
-// NewPrometheusMetricSource creates a MetricSource backed by a Prometheus-compatible API.
-func NewPrometheusMetricSource(clientConfig api.Config) (*PrometheusMetricSource, error) {
+// NewPromQLMetricSource creates a MetricSource that executes the given PromQL expression.
+func NewPromQLMetricSource(clientConfig api.Config, expr string) (*PromQLMetricSource, error) {
 	client, err := api.NewClient(clientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error creating Prometheus API client: %w", err)
 	}
-	return &PrometheusMetricSource{
-		api: v1.NewAPI(client),
+	return &PromQLMetricSource{
+		api:  v1.NewAPI(client),
+		expr: expr,
 	}, nil
 }
 
-// NewGMPMetricSource creates a MetricSource for Google Managed Prometheus.
-func NewGMPMetricSource(projectID string) (*PrometheusMetricSource, error) {
+// NewGMPPromQLMetricSource creates a PromQL MetricSource for Google Managed Prometheus.
+func NewGMPPromQLMetricSource(projectID string, expr string) (*PromQLMetricSource, error) {
 	ctx := context.Background()
 	gcpClient, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/monitoring.read")
 	if err != nil {
@@ -69,10 +74,10 @@ func NewGMPMetricSource(projectID string) (*PrometheusMetricSource, error) {
 	}
 
 	promURL := fmt.Sprintf("https://monitoring.googleapis.com/v1/projects/%s/location/global/prometheus", projectID)
-	return NewPrometheusMetricSource(api.Config{
+	return NewPromQLMetricSource(api.Config{
 		Address:      promURL,
 		RoundTripper: gcpClient.Transport,
-	})
+	}, expr)
 }
 
 // buildPromQL constructs a PromQL instant vector selector from a metric name and label matchers.
@@ -95,13 +100,11 @@ func buildPromQL(metricName string, labels map[string]string) string {
 	return fmt.Sprintf(`%s{%s}`, metricName, strings.Join(parts, ","))
 }
 
-// Query executes a PromQL instant query and returns the result as samples.
-func (s *PrometheusMetricSource) Query(ctx context.Context, metricName string, labels map[string]string) ([]Sample, error) {
-	query := buildPromQL(metricName, labels)
-
+// Query executes the preconfigured PromQL expression and returns the result as samples.
+func (s *PromQLMetricSource) Query(ctx context.Context) ([]Sample, error) {
 	logger := log.FromContext(ctx)
 
-	result, warnings, err := s.api.Query(ctx, query, time.Now())
+	result, warnings, err := s.api.Query(ctx, s.expr, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("error querying Prometheus: %w", err)
 	}

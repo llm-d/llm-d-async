@@ -45,16 +45,16 @@ func TestBuildPromQL_MultipleLabels(t *testing.T) {
 	require.Equal(t, `my_metric{app="bar",name="foo"}`, buildPromQL("my_metric", map[string]string{"name": "foo", "app": "bar"}))
 }
 
-// PrometheusMetricSource.Query tests
+// PromQLMetricSource.Query tests
 
-func newTestSource(t *testing.T, statusCode int, responseBody string) (*PrometheusMetricSource, *httptest.Server) {
+func newTestSource(t *testing.T, statusCode int, responseBody string, expr string) (*PromQLMetricSource, *httptest.Server) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
 		_, _ = fmt.Fprint(w, responseBody)
 	}))
-	source, err := NewPrometheusMetricSource(api.Config{Address: server.URL})
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, expr)
 	if err != nil {
 		server.Close()
 	}
@@ -62,12 +62,12 @@ func newTestSource(t *testing.T, statusCode int, responseBody string) (*Promethe
 	return source, server
 }
 
-func TestPrometheusMetricSource_SingleSample(t *testing.T) {
+func TestPromQLMetricSource_SingleSample(t *testing.T) {
 	body := `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"my_metric","name":"foo"},"value":[1234567890,"42.5"]}]}}`
-	source, server := newTestSource(t, http.StatusOK, body)
+	source, server := newTestSource(t, http.StatusOK, body, buildPromQL("my_metric", map[string]string{"name": "foo"}))
 	defer server.Close()
 
-	samples, err := source.Query(context.Background(), "my_metric", map[string]string{"name": "foo"})
+	samples, err := source.Query(context.Background())
 	require.NoError(t, err)
 	require.Len(t, samples, 1)
 	require.Equal(t, 42.5, samples[0].Value)
@@ -75,15 +75,15 @@ func TestPrometheusMetricSource_SingleSample(t *testing.T) {
 	require.Equal(t, "my_metric", samples[0].Labels["__name__"])
 }
 
-func TestPrometheusMetricSource_MultipleSamples(t *testing.T) {
+func TestPromQLMetricSource_MultipleSamples(t *testing.T) {
 	body := `{"status":"success","data":{"resultType":"vector","result":[` +
 		`{"metric":{"name":"a"},"value":[1234567890,"1"]},` +
 		`{"metric":{"name":"b"},"value":[1234567890,"2"]},` +
 		`{"metric":{"name":"c"},"value":[1234567890,"3"]}]}}`
-	source, server := newTestSource(t, http.StatusOK, body)
+	source, server := newTestSource(t, http.StatusOK, body, "my_metric")
 	defer server.Close()
 
-	samples, err := source.Query(context.Background(), "my_metric", nil)
+	samples, err := source.Query(context.Background())
 	require.NoError(t, err)
 	require.Len(t, samples, 3)
 	for i, expected := range []struct {
@@ -95,34 +95,34 @@ func TestPrometheusMetricSource_MultipleSamples(t *testing.T) {
 	}
 }
 
-func TestPrometheusMetricSource_EmptyVector(t *testing.T) {
+func TestPromQLMetricSource_EmptyVector(t *testing.T) {
 	body := `{"status":"success","data":{"resultType":"vector","result":[]}}`
-	source, server := newTestSource(t, http.StatusOK, body)
+	source, server := newTestSource(t, http.StatusOK, body, "my_metric")
 	defer server.Close()
 
-	samples, err := source.Query(context.Background(), "my_metric", nil)
+	samples, err := source.Query(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, samples)
 }
 
-func TestPrometheusMetricSource_ServerError(t *testing.T) {
+func TestPromQLMetricSource_ServerError(t *testing.T) {
 	body := `{"status":"error","errorType":"internal","error":"something went wrong"}`
-	source, server := newTestSource(t, http.StatusInternalServerError, body)
+	source, server := newTestSource(t, http.StatusInternalServerError, body, "my_metric")
 	defer server.Close()
 
-	_, err := source.Query(context.Background(), "my_metric", nil)
+	_, err := source.Query(context.Background())
 	require.Error(t, err)
 }
 
-func TestPrometheusMetricSource_ServerUnreachable(t *testing.T) {
-	source, server := newTestSource(t, http.StatusOK, "")
+func TestPromQLMetricSource_ServerUnreachable(t *testing.T) {
+	source, server := newTestSource(t, http.StatusOK, "", "my_metric")
 	server.Close()
 
-	_, err := source.Query(context.Background(), "my_metric", nil)
+	_, err := source.Query(context.Background())
 	require.Error(t, err)
 }
 
-func TestPrometheusMetricSource_QueryPassthrough(t *testing.T) {
+func TestPromQLMetricSource_QueryPassthrough(t *testing.T) {
 	var receivedQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedQuery = r.FormValue("query")
@@ -131,15 +131,34 @@ func TestPrometheusMetricSource_QueryPassthrough(t *testing.T) {
 	}))
 	defer server.Close()
 
-	source, err := NewPrometheusMetricSource(api.Config{Address: server.URL})
+	expr := buildPromQL("inference_pool_average_queue_size", map[string]string{"name": "my-model"})
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, expr)
 	require.NoError(t, err)
 
-	_, err = source.Query(context.Background(), "inference_pool_average_queue_size", map[string]string{"name": "my-model"})
+	_, err = source.Query(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, `inference_pool_average_queue_size{name="my-model"}`, receivedQuery)
 }
 
-func TestNewPrometheusMetricSource_InvalidAddress(t *testing.T) {
-	_, err := NewPrometheusMetricSource(api.Config{Address: "://invalid"})
+func TestPromQLMetricSource_CustomExprPassthrough(t *testing.T) {
+	var receivedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedQuery = r.FormValue("query")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+	}))
+	defer server.Close()
+
+	expr := `max(avg_over_time(inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}[5m]))`
+	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, expr)
+	require.NoError(t, err)
+
+	_, err = source.Query(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, expr, receivedQuery)
+}
+
+func TestNewPromQLMetricSource_InvalidAddress(t *testing.T) {
+	_, err := NewPromQLMetricSource(api.Config{Address: "://invalid"}, "my_metric")
 	require.Error(t, err)
 }
