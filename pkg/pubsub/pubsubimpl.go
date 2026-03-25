@@ -234,7 +234,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		logger.V(logutil.DEFAULT).Info("PubSub MaxOutstandingMessages", "value", currBatchSize)
 		sub.ReceiveSettings.MaxOutstandingMessages = currBatchSize
 		sub.ReceiveSettings.NumGoroutines = 1
-		if currBatchSize == 0 {
+		if currBatchSize <= 0 {
 			<-receiveCtx.Done()
 			continue
 		}
