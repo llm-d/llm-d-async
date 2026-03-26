@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -94,12 +96,13 @@ func TestSheddedRequest(t *testing.T) {
 			Header:     make(http.Header),
 		}, nil
 	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan EmbelishedRequestMessage, 1)
 	retryChannel := make(chan RetryMessage, 1)
 	resultChannel := make(chan ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, httpclient, requestChannel, retryChannel, resultChannel)
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- EmbelishedRequestMessage{
@@ -134,12 +137,13 @@ func TestSuccessfulRequest(t *testing.T) {
 			Header:     make(http.Header),
 		}, nil
 	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan EmbelishedRequestMessage, 1)
 	retryChannel := make(chan RetryMessage, 1)
 	resultChannel := make(chan ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, httpclient, requestChannel, retryChannel, resultChannel)
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel)
 
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
@@ -164,4 +168,140 @@ func TestSuccessfulRequest(t *testing.T) {
 		}
 	}
 
+}
+
+func TestFatalError_NoRetry(t *testing.T) {
+	msgId := "456"
+	// Simulate a transport error (fatal)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("network unreachable")
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan EmbelishedRequestMessage, 1)
+	retryChannel := make(chan RetryMessage, 1)
+	resultChannel := make(chan ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel)
+
+	deadline := time.Now().Add(time.Second * 100).Unix()
+
+	requestChannel <- EmbelishedRequestMessage{
+		RequestMessage: RequestMessage{
+			Id:              msgId,
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf(("%d"), deadline),
+			Payload:         map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		},
+		RequestURL:  "http://localhost:30800/v1/completions",
+		HttpHeaders: map[string]string{},
+	}
+
+	select {
+	case <-retryChannel:
+		t.Errorf("Should not retry a fatal error")
+	case r := <-resultChannel:
+		if r.Id != msgId {
+			t.Errorf("Expected result message id to be %s, got %s", msgId, r.Id)
+		}
+		var resultMap map[string]any
+		err := json.Unmarshal([]byte(r.Payload), &resultMap)
+		if err != nil {
+			t.Errorf("Failed to unmarshal result payload: %s. Payload was: %s", err, r.Payload)
+		}
+		if _, hasError := resultMap["error"]; !hasError {
+			t.Errorf("Expected error in result payload, got: %s", r.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("Timeout waiting for result")
+	}
+}
+
+func TestRateLimitRequest(t *testing.T) {
+	msgId := "789"
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       nil,
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan EmbelishedRequestMessage, 1)
+	retryChannel := make(chan RetryMessage, 1)
+	resultChannel := make(chan ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel)
+	deadline := time.Now().Add(time.Second * 100).Unix()
+
+	requestChannel <- EmbelishedRequestMessage{
+		RequestMessage: RequestMessage{
+			Id:              msgId,
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf(("%d"), deadline),
+			Payload:         map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		},
+		RequestURL:  "http://localhost:30800/v1/completions",
+		HttpHeaders: map[string]string{},
+	}
+
+	select {
+	case r := <-retryChannel:
+		if r.Id != msgId {
+			t.Errorf("Expected retry message id to be %s, got %s", msgId, r.Id)
+		}
+	case <-resultChannel:
+		t.Errorf("Should not get result from a 429 response, should retry")
+	case <-time.After(time.Second):
+		t.Errorf("Timeout waiting for retry")
+	}
+}
+
+func TestClientError_NoRetry(t *testing.T) {
+	msgId := "101112"
+	errorBody := `{"error": "invalid request"}`
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(bytes.NewBufferString(errorBody)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan EmbelishedRequestMessage, 1)
+	retryChannel := make(chan RetryMessage, 1)
+	resultChannel := make(chan ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel)
+	deadline := time.Now().Add(time.Second * 100).Unix()
+
+	requestChannel <- EmbelishedRequestMessage{
+		RequestMessage: RequestMessage{
+			Id:              msgId,
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf(("%d"), deadline),
+			Payload:         map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		},
+		RequestURL:  "http://localhost:30800/v1/completions",
+		HttpHeaders: map[string]string{},
+	}
+
+	select {
+	case <-retryChannel:
+		t.Errorf("Should not retry a 4xx client error")
+	case r := <-resultChannel:
+		if r.Id != msgId {
+			t.Errorf("Expected result message id to be %s, got %s", msgId, r.Id)
+		}
+		if r.Payload != errorBody {
+			t.Errorf("Expected payload to be %s, got %s", errorBody, r.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("Timeout waiting for result")
+	}
 }

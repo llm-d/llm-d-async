@@ -117,10 +117,13 @@ func main() {
 	msrv, _ := metricsserver.NewServer(metricsServerOptions, restConfig, httpClient)
 	go msrv.Start(ctx) // nolint:errcheck
 
+	// Create inference client
+	inferenceClient := api.NewHTTPInferenceClient(httpClient)
+
 	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel
 	for w := 1; w <= concurrency; w++ {
 
-		go api.Worker(ctx, impl.Characteristics(), httpClient, requestChannel, impl.RetryChannel(), impl.ResultChannel())
+		go api.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel())
 	}
 
 	impl.Start(ctx)

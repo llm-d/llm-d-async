@@ -1,14 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/rand"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -19,7 +17,7 @@ import (
 
 var baseDelaySeconds = 2
 
-func Worker(ctx context.Context, characteristics Characteristics, httpClient *http.Client, requestChannel chan EmbelishedRequestMessage,
+func Worker(ctx context.Context, characteristics Characteristics, client InferenceClient, requestChannel chan EmbelishedRequestMessage,
 	retryChannel chan RetryMessage, resultChannel chan ResultMessage) {
 
 	logger := log.FromContext(ctx)
@@ -40,45 +38,34 @@ func Worker(ctx context.Context, characteristics Characteristics, httpClient *ht
 
 			// Using a function object for easy boundaries for 'return' and 'defer'!
 			sendInferenceRequest := func() {
-
 				logger.V(logutil.DEBUG).Info("Sending inference request: " + msg.RequestURL)
-				request, err := http.NewRequestWithContext(ctx, "POST", msg.RequestURL, bytes.NewBuffer(payloadBytes))
-				if err != nil {
-					metrics.FailedReqs.Inc()
-					resultChannel <- CreateErrorResultMessage(msg.RequestMessage, fmt.Sprintf("Failed to create request to inference: %s", err.Error()))
+				responseBody, err := client.SendRequest(ctx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
+
+				if err == nil {
+					// Success - got a valid response
+					metrics.SuccessfulReqs.Inc()
+					resultChannel <- ResultMessage{
+						Id:       msg.Id,
+						Payload:  string(responseBody),
+						Metadata: msg.Metadata,
+					}
 					return
 				}
-				for k, v := range msg.HttpHeaders {
-					request.Header.Set(k, v)
-				}
 
-				result, err := httpClient.Do(request)
-				if err != nil {
+				// Check if error implements InferenceError
+				var inferenceErr InferenceError
+				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
+					// Unknown error type or fatal error - fail immediately
 					metrics.FailedReqs.Inc()
 					resultChannel <- CreateErrorResultMessage(msg.RequestMessage, fmt.Sprintf("Failed to send request to inference: %s", err.Error()))
 					return
 				}
-				defer result.Body.Close() // nolint:errcheck
-				// Retrying on too many requests or any server-side error.
-				if result.StatusCode == 429 || result.StatusCode >= 500 && result.StatusCode < 600 {
-					if result.StatusCode == 429 {
-						metrics.SheddedRequests.Inc()
-					}
-					retryMessage(msg, retryChannel, resultChannel)
-				} else {
-					payloadBytes, err := io.ReadAll(result.Body)
-					if err != nil {
-						// Retrying on IO-read error as well.
-						retryMessage(msg, retryChannel, resultChannel)
-					} else {
-						metrics.SuccessfulReqs.Inc()
-						resultChannel <- ResultMessage{
-							Id:       msg.Id,
-							Payload:  string(payloadBytes),
-							Metadata: msg.Metadata,
-						}
-					}
+
+				// Retryable error - check if it's due to rate limiting
+				if inferenceErr.Category().Sheddable() {
+					metrics.SheddedRequests.Inc()
 				}
+				retryMessage(msg, retryChannel, resultChannel)
 			}
 			sendInferenceRequest()
 		}
@@ -133,8 +120,12 @@ func retryMessage(msg EmbelishedRequestMessage, retryChannel chan RetryMessage, 
 
 }
 func CreateErrorResultMessage(msg RequestMessage, errMsg string) ResultMessage {
-	payload := map[string]string{"error": errMsg}
-	payloadBytes, _ := json.Marshal(payload)
+	errorPayload := map[string]string{"error": errMsg}
+	payloadBytes, err := json.Marshal(errorPayload)
+	if err != nil {
+		// Fallback to a simple error message if marshaling fails
+		payloadBytes = []byte(`{"error": "internal error"}`)
+	}
 	return ResultMessage{
 		Id:       msg.Id,
 		Payload:  string(payloadBytes),
