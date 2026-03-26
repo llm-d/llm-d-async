@@ -6,14 +6,12 @@ import "fmt"
 type ErrorCategory string
 
 const (
-	// ErrCategoryRateLimit represents rate limiting errors (429) - retryable and sheddable
-	ErrCategoryRateLimit ErrorCategory = "RATE_LIMIT"
-	// ErrCategoryServer represents server errors (5xx) - retryable but not sheddable
-	ErrCategoryServer ErrorCategory = "SERVER_ERROR"
-	// ErrCategoryNetwork represents network/transport errors - fatal (not retryable)
-	ErrCategoryNetwork ErrorCategory = "NETWORK"
-	// ErrCategoryInvalidReq represents invalid request errors - fatal (not retryable)
-	ErrCategoryInvalidReq ErrorCategory = "INVALID_REQ"
+	ErrCategoryRateLimit  ErrorCategory = "RATE_LIMIT"   // retryable
+	ErrCategoryServer     ErrorCategory = "SERVER_ERROR" // retryable
+	ErrCategoryInvalidReq ErrorCategory = "INVALID_REQ"  // not retryable
+	ErrCategoryAuth       ErrorCategory = "AUTH_ERROR"    // not retryable
+	ErrCategoryParse      ErrorCategory = "PARSE_ERROR"   // not retryable
+	ErrCategoryUnknown    ErrorCategory = "UNKNOWN"       // not retryable
 )
 
 // Fatal returns true if errors in this category should not be retried.

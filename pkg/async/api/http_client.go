@@ -36,7 +36,7 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	result, err := h.client.Do(request)
 	if err != nil {
 		return nil, &ClientError{
-			ErrorCategory: ErrCategoryNetwork,
+			ErrorCategory: ErrCategoryUnknown,
 			Message:       "failed to send request",
 			RawError:      err,
 		}
