@@ -6,7 +6,6 @@ require (
 	cloud.google.com/go/pubsub/v2 v2.5.0
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/go-logr/logr v1.4.3
-	github.com/llm-d-incubation/batch-gateway v0.0.0-test
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
 	github.com/prometheus/client_golang v1.23.2
@@ -54,7 +53,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.2 // indirect
 	github.com/go-openapi/jsonreference v0.21.0 // indirect
 	github.com/go-openapi/swag v0.23.1 // indirect
-	github.com/go-resty/resty/v2 v2.17.2 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/btree v1.1.3 // indirect
