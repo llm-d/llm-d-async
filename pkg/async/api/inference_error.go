@@ -9,9 +9,9 @@ const (
 	ErrCategoryRateLimit  ErrorCategory = "RATE_LIMIT"   // retryable
 	ErrCategoryServer     ErrorCategory = "SERVER_ERROR" // retryable
 	ErrCategoryInvalidReq ErrorCategory = "INVALID_REQ"  // not retryable
-	ErrCategoryAuth       ErrorCategory = "AUTH_ERROR"    // not retryable
-	ErrCategoryParse      ErrorCategory = "PARSE_ERROR"   // not retryable
-	ErrCategoryUnknown    ErrorCategory = "UNKNOWN"       // not retryable
+	ErrCategoryAuth       ErrorCategory = "AUTH_ERROR"   // not retryable
+	ErrCategoryParse      ErrorCategory = "PARSE_ERROR"  // not retryable
+	ErrCategoryUnknown    ErrorCategory = "UNKNOWN"      // not retryable
 )
 
 // Fatal returns true if errors in this category should not be retried.
