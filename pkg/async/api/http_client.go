@@ -62,6 +62,15 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 		}
 	}
 
+	// Check for client errors (4xx, non-429)
+	if result.StatusCode >= 400 && result.StatusCode < 500 {
+		return body, &ClientError{
+			ErrorCategory: ErrCategoryInvalidReq,
+			Message:       fmt.Sprintf("client error: status code %d", result.StatusCode),
+			RawError:      nil,
+		}
+	}
+
 	// Check for server errors (5xx)
 	if result.StatusCode >= 500 && result.StatusCode < 600 {
 		return body, &ClientError{
