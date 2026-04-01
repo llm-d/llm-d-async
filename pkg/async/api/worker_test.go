@@ -298,8 +298,9 @@ func TestClientError_NoRetry(t *testing.T) {
 		if r.Id != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.Id)
 		}
-		if r.Payload != errorBody {
-			t.Errorf("Expected payload to be %s, got %s", errorBody, r.Payload)
+		expectedPayload := `{"error":"Failed to send request to inference: INVALID_REQ: client error: status code 400"}`
+		if r.Payload != expectedPayload {
+			t.Errorf("Expected payload to be %s, got %s", expectedPayload, r.Payload)
 		}
 	case <-time.After(time.Second):
 		t.Errorf("Timeout waiting for result")
