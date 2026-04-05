@@ -263,6 +263,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		sub.ReceiveSettings.NumGoroutines = 1
 		if currBatchSize <= 0 {
 			<-receiveCtx.Done()
+			cancel()
 			continue
 		}
 		err := sub.Receive(receiveCtx, func(ctx context.Context, msg *pubsub.Message) {
@@ -299,6 +300,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 				msg.Ack()
 			}
 		})
+		cancel()
 		// TODO
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Fail to receive messages from request subscription")
