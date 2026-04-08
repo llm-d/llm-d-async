@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const defaultRequestTimeout = 5 * time.Minute
+
 func TestRetryMessage_deadlinePassed(t *testing.T) {
 	retryChannel := make(chan RetryMessage, 1)
 	resultChannel := make(chan ResultMessage, 1)
@@ -102,7 +104,7 @@ func TestSheddedRequest(t *testing.T) {
 	resultChannel := make(chan ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 3*time.Minute)
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- EmbelishedRequestMessage{
@@ -143,7 +145,7 @@ func TestSuccessfulRequest(t *testing.T) {
 	resultChannel := make(chan ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 3*time.Minute)
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
@@ -182,7 +184,7 @@ func TestFatalError_NoRetry(t *testing.T) {
 	resultChannel := make(chan ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 3*time.Minute)
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
@@ -233,7 +235,7 @@ func TestRateLimitRequest(t *testing.T) {
 	resultChannel := make(chan ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 3*time.Minute)
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- EmbelishedRequestMessage{
@@ -319,7 +321,7 @@ func TestClientError_NoRetry(t *testing.T) {
 	resultChannel := make(chan ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 3*time.Minute)
+	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- EmbelishedRequestMessage{
