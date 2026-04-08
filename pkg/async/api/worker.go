@@ -18,7 +18,7 @@ import (
 var baseDelaySeconds = 2
 
 func Worker(ctx context.Context, characteristics Characteristics, client InferenceClient, requestChannel chan EmbelishedRequestMessage,
-	retryChannel chan RetryMessage, resultChannel chan ResultMessage) {
+	retryChannel chan RetryMessage, resultChannel chan ResultMessage, requestTimeout time.Duration) {
 
 	logger := log.FromContext(ctx)
 	for {
@@ -38,8 +38,19 @@ func Worker(ctx context.Context, characteristics Characteristics, client Inferen
 
 			// Using a function object for easy boundaries for 'return' and 'defer'!
 			sendInferenceRequest := func() {
+				// Create a per-request context bounded by both the message deadline
+				// and the configured request timeout, whichever comes first.
+				reqDeadline := time.Now().Add(requestTimeout)
+				if deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64); err == nil {
+					if msgDeadline := time.Unix(deadline, 0); msgDeadline.Before(reqDeadline) {
+						reqDeadline = msgDeadline
+					}
+				}
+				reqCtx, cancel := context.WithDeadline(ctx, reqDeadline)
+				defer cancel()
+
 				logger.V(logutil.DEBUG).Info("Sending inference request: " + msg.RequestURL)
-				responseBody, err := client.SendRequest(ctx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
+				responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
 
 				if err == nil {
 					// Success - got a valid response

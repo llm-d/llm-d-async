@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
@@ -32,6 +33,7 @@ func main() {
 	var metricsEndpointAuth bool
 
 	var concurrency int
+	var requestTimeout time.Duration
 	var requestMergePolicy string
 	var messageQueueImpl string
 
@@ -41,6 +43,7 @@ func main() {
 	flag.BoolVar(&metricsEndpointAuth, "metrics-endpoint-auth", true, "Enables authentication and authorization of the metrics endpoint")
 
 	flag.IntVar(&concurrency, "concurrency", 8, "number of concurrent workers")
+	flag.DurationVar(&requestTimeout, "request-timeout", 3*time.Minute, "timeout for individual inference requests")
 
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
@@ -113,18 +116,23 @@ func main() {
 		}(),
 	}
 	restConfig := ctrl.GetConfigOrDie()
-	httpClient := http.DefaultClient
 
-	msrv, _ := metricsserver.NewServer(metricsServerOptions, restConfig, httpClient)
+	msrv, _ := metricsserver.NewServer(metricsServerOptions, restConfig, http.DefaultClient)
 	go msrv.Start(ctx) // nolint:errcheck
 
-	// Create inference client
-	inferenceClient := api.NewHTTPInferenceClient(httpClient)
+	// Create inference client with a connection pool sized for the worker count.
+	inferenceTransport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: concurrency,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	inferenceHTTPClient := &http.Client{Transport: inferenceTransport}
+	inferenceClient := api.NewHTTPInferenceClient(inferenceHTTPClient)
 
 	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel
 	for w := 1; w <= concurrency; w++ {
 
-		go api.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel())
+		go api.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
 	}
 
 	impl.Start(ctx)
