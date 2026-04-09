@@ -178,6 +178,7 @@ func (r *PubSubMQFlow) Start(ctx context.Context) {
 }
 
 func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChannel chan api.ResultMessage) {
+	logger := log.FromContext(ctx)
 
 	for {
 		select {
@@ -195,7 +196,11 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 			}
 			publishPubSub(ctx, publisher, msgBytes, map[string]string{})
 			pubsubID := msg.Metadata[PUBSUB_ID]
-			value, _ := resultChannels.Load(pubsubID)
+			value, ok := resultChannels.Load(pubsubID)
+			if !ok {
+				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for message", "pubsubID", pubsubID)
+				continue
+			}
 			resultChannel := value.(chan bool)
 			resultChannel <- true
 
@@ -222,7 +227,11 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan api.RetryMessage)
 
 		case msg := <-retryChannel:
 			pubsubID := msg.RequestMessage.Metadata[PUBSUB_ID]
-			value, _ := resultChannels.Load(pubsubID)
+			value, ok := resultChannels.Load(pubsubID)
+			if !ok {
+				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", pubsubID)
+				continue
+			}
 			resultChannel := value.(chan bool)
 			logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", pubsubID)
 			resultChannel <- false
