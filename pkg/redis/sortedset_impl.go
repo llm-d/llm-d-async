@@ -322,13 +322,13 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 			// then drain any additional available messages without blocking.
 			batch := make([]api.ResultMessage, 1, maxResultBatchSize)
 			batch[0] = msg
-		drain:
-			for len(batch) < maxResultBatchSize {
+			done := false
+			for len(batch) < maxResultBatchSize && !done {
 				select {
 				case m := <-r.resultChannel:
 					batch = append(batch, m)
 				default:
-					break drain
+					done = true
 				}
 			}
 
