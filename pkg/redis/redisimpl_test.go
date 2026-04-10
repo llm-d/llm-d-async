@@ -3,6 +3,8 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,5 +111,132 @@ func TestMarshalResultMessage_Fallback(t *testing.T) {
 	}
 	if rm.Id != "ok" {
 		t.Errorf("Expected id 'ok', got %s", rm.Id)
+	}
+}
+
+func TestPubsubResultWorker_ContextCancellation(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+
+	done := make(chan bool)
+	go func() {
+		resultWorker(ctx, rdb, resultCh, "cancel-queue")
+		done <- true
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// Worker stopped gracefully
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Worker did not stop after context cancellation")
+	}
+}
+
+func TestPubsubResultWorker_BatchSizeCap(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	queue := "batch-cap-queue"
+	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+
+	sub := rdb.Subscribe(ctx, queue)
+	defer sub.Close() // nolint:errcheck
+	pubsubCh := sub.Channel()
+
+	// Send more than maxResultBatchSize messages. The worker should still
+	// deliver all of them across multiple pipeline flushes.
+	totalMessages := maxResultBatchSize + 10
+	for i := 0; i < totalMessages; i++ {
+		resultCh <- api.ResultMessage{
+			Id:      "cap-" + strconv.Itoa(i),
+			Payload: "data",
+		}
+	}
+
+	go resultWorker(ctx, rdb, resultCh, queue)
+
+	received := make(map[string]bool)
+	timeout := time.After(3 * time.Second)
+	for len(received) < totalMessages {
+		select {
+		case msg := <-pubsubCh:
+			var rm api.ResultMessage
+			if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
+				t.Fatalf("Failed to unmarshal: %v", err)
+			}
+			received[rm.Id] = true
+		case <-timeout:
+			t.Fatalf("Timeout: received only %d/%d messages", len(received), totalMessages)
+		}
+	}
+}
+
+func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	queue := "concurrent-queue"
+	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+
+	sub := rdb.Subscribe(ctx, queue)
+	defer sub.Close() // nolint:errcheck
+	pubsubCh := sub.Channel()
+
+	go resultWorker(ctx, rdb, resultCh, queue)
+
+	// Simulate multiple inference workers sending results concurrently.
+	numProducers := 8
+	msgsPerProducer := 5
+	totalMessages := numProducers * msgsPerProducer
+
+	var wg sync.WaitGroup
+	for p := 0; p < numProducers; p++ {
+		wg.Add(1)
+		go func(producerID int) {
+			defer wg.Done()
+			for i := 0; i < msgsPerProducer; i++ {
+				resultCh <- api.ResultMessage{
+					Id:      "p" + strconv.Itoa(producerID) + "-" + strconv.Itoa(i),
+					Payload: "data",
+				}
+			}
+		}(p)
+	}
+	wg.Wait()
+
+	received := make(map[string]bool)
+	timeout := time.After(3 * time.Second)
+	for len(received) < totalMessages {
+		select {
+		case msg := <-pubsubCh:
+			var rm api.ResultMessage
+			if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
+				t.Fatalf("Failed to unmarshal: %v", err)
+			}
+			if received[rm.Id] {
+				t.Errorf("Duplicate message: %s", rm.Id)
+			}
+			received[rm.Id] = true
+		case <-timeout:
+			t.Fatalf("Timeout: received only %d/%d messages", len(received), totalMessages)
+		}
 	}
 }
