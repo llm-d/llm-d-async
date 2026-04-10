@@ -20,6 +20,15 @@ import (
 
 const QUEUE_NAME_KEY = "queue_name"
 
+const (
+	// resultChannelBuffer decouples inference workers from the result writer.
+	// Workers can send results without blocking until the buffer is full.
+	resultChannelBuffer = 64
+	// maxResultBatchSize is the maximum number of results flushed in a single
+	// Redis pipeline call.
+	maxResultBatchSize = 32
+)
+
 var (
 	igwBaseURL         = flag.String("redis.igw-base-url", "", "Base URL for IGW. Mutually exclusive with redis.queues-config-file flag.")
 	requestPathURL     = flag.String("redis.request-path-url", "/v1/completions", "request path url. Mutually exclusive with redis.queues-config-file flag.")
@@ -87,7 +96,7 @@ func NewRedisMQFlow() *RedisMQFlow {
 		rdb:             rdb,
 		requestChannels: channels,
 		retryChannel:    make(chan api.RetryMessage),
-		resultChannel:   make(chan api.ResultMessage),
+		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),
 	}
 }
 
@@ -122,6 +131,7 @@ func (r *RedisMQFlow) ResultChannel() chan api.ResultMessage {
 }
 
 // Listening on the results channel and responsible for writing results into Redis.
+// Batches multiple results into a single Redis pipeline call to reduce round-trips.
 func resultWorker(ctx context.Context, rdb *redis.Client, resultChannel chan api.ResultMessage, resultsQueueName string) {
 	logger := log.FromContext(ctx)
 	for {
@@ -130,23 +140,37 @@ func resultWorker(ctx context.Context, rdb *redis.Client, resultChannel chan api
 			return
 
 		case msg := <-resultChannel:
-			bytes, err := json.Marshal(msg)
-			var msgStr string
-			if err != nil {
-				// Safely marshal the fallback error message
-				fallback := map[string]string{"id": msg.Id, "error": "Failed to marshal result to string"}
-				fallbackBytes, _ := json.Marshal(fallback)
-				msgStr = string(fallbackBytes)
-			} else {
-				msgStr = string(bytes)
+			// Collect a batch: start with the message we already received,
+			// then drain any additional available messages without blocking.
+			batch := []api.ResultMessage{msg}
+		drain:
+			for len(batch) < maxResultBatchSize {
+				select {
+				case m := <-resultChannel:
+					batch = append(batch, m)
+				default:
+					break drain
+				}
 			}
-			err = publishRedis(ctx, rdb, resultsQueueName, msgStr)
-			if err != nil {
-				// Not going to retry here. Just log the error.
-				logger.V(logutil.DEFAULT).Error(err, "Failed to publish result message to Redis")
+
+			pipe := rdb.Pipeline()
+			for _, m := range batch {
+				pipe.Publish(ctx, resultsQueueName, marshalResultMessage(m))
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to publish result batch to Redis", "batchSize", len(batch))
 			}
 		}
 	}
+}
+
+func marshalResultMessage(msg api.ResultMessage) string {
+	if bytes, err := json.Marshal(msg); err == nil {
+		return string(bytes)
+	}
+	fallback := map[string]string{"id": msg.Id, "error": "Failed to marshal result to string"}
+	fallbackBytes, _ := json.Marshal(fallback)
+	return string(fallbackBytes)
 }
 
 // pulls from Redis channel and put in the request channel
@@ -265,12 +289,3 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 
 }
 
-func publishRedis(ctx context.Context, rdb *redis.Client, channelId, msg string) error {
-	logger := log.FromContext(ctx)
-	err := rdb.Publish(ctx, channelId, msg).Err()
-	if err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "Error publishing message:%s\n", err.Error())
-		return err
-	}
-	return nil
-}

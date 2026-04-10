@@ -296,6 +296,109 @@ func TestSortedSetFlow_ResultFIFO(t *testing.T) {
 	}
 }
 
+func TestSortedSetFlow_ResultBatch(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "batch-result-queue"
+	origQueue := *ssResultQueueName
+	*ssResultQueueName = queue
+	defer func() { *ssResultQueueName = origQueue }()
+
+	flow := &RedisSortedSetFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
+		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
+		gate:          noopGate(),
+	}
+
+	// Pre-fill the channel before starting the worker so all messages
+	// are available for a single batch drain.
+	numMessages := 10
+	for i := 0; i < numMessages; i++ {
+		flow.resultChannel <- api.ResultMessage{
+			Id:      "batch-" + strconv.Itoa(i),
+			Payload: "data-" + strconv.Itoa(i),
+		}
+	}
+
+	go flow.resultWorker(ctx)
+	time.Sleep(200 * time.Millisecond)
+
+	// All messages should be in Redis
+	length, err := rdb.LLen(ctx, queue).Result()
+	if err != nil {
+		t.Fatalf("LLen error: %v", err)
+	}
+	if length != int64(numMessages) {
+		t.Errorf("Expected %d results in Redis, got %d", numMessages, length)
+	}
+
+	// Verify FIFO order via RPOP
+	for i := 0; i < numMessages; i++ {
+		raw, _ := rdb.RPop(ctx, queue).Result()
+		var msg api.ResultMessage
+		json.Unmarshal([]byte(raw), &msg) // nolint:errcheck
+		expected := "batch-" + strconv.Itoa(i)
+		if msg.Id != expected {
+			t.Errorf("Position %d: expected %s, got %s", i, expected, msg.Id)
+		}
+	}
+}
+
+func TestSortedSetFlow_ResultBatchMultiQueue(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	defaultQueue := "default-result-queue"
+	customQueue := "custom-result-queue"
+	origQueue := *ssResultQueueName
+	*ssResultQueueName = defaultQueue
+	defer func() { *ssResultQueueName = origQueue }()
+
+	flow := &RedisSortedSetFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
+		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
+		gate:          noopGate(),
+	}
+
+	// Send messages targeting different queues in a single batch.
+	flow.resultChannel <- api.ResultMessage{Id: "default-1", Payload: "d1"}
+	flow.resultChannel <- api.ResultMessage{
+		Id:       "custom-1",
+		Payload:  "c1",
+		Metadata: map[string]string{"result_queue": customQueue},
+	}
+	flow.resultChannel <- api.ResultMessage{Id: "default-2", Payload: "d2"}
+	flow.resultChannel <- api.ResultMessage{
+		Id:       "custom-2",
+		Payload:  "c2",
+		Metadata: map[string]string{"result_queue": customQueue},
+	}
+
+	go flow.resultWorker(ctx)
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify default queue
+	defaultLen, _ := rdb.LLen(ctx, defaultQueue).Result()
+	if defaultLen != 2 {
+		t.Errorf("Expected 2 messages in default queue, got %d", defaultLen)
+	}
+
+	// Verify custom queue
+	customLen, _ := rdb.LLen(ctx, customQueue).Result()
+	if customLen != 2 {
+		t.Errorf("Expected 2 messages in custom queue, got %d", customLen)
+	}
+}
+
 func TestSortedSetFlow_NoRaceCondition(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()
