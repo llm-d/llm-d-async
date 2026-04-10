@@ -333,9 +333,10 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 			}
 
 			// Group by target queue and flush via pipeline.
+			defaultQueue := *ssResultQueueName
 			queued := make(map[string][]string)
 			for _, result := range batch {
-				resultQueue := *ssResultQueueName
+				resultQueue := defaultQueue
 				if result.Metadata != nil {
 					if customQueue, ok := result.Metadata["result_queue"]; ok && customQueue != "" {
 						resultQueue = customQueue
