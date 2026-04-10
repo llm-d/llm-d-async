@@ -142,7 +142,8 @@ func resultWorker(ctx context.Context, rdb *redis.Client, resultChannel chan api
 		case msg := <-resultChannel:
 			// Collect a batch: start with the message we already received,
 			// then drain any additional available messages without blocking.
-			batch := []api.ResultMessage{msg}
+			batch := make([]api.ResultMessage, 1, maxResultBatchSize)
+			batch[0] = msg
 		drain:
 			for len(batch) < maxResultBatchSize {
 				select {
