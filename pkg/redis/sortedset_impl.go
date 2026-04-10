@@ -325,8 +325,8 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 			done := false
 			for len(batch) < maxResultBatchSize && !done {
 				select {
-				case m := <-r.resultChannel:
-					batch = append(batch, m)
+				case result := <-r.resultChannel:
+					batch = append(batch, result)
 				default:
 					done = true
 				}
@@ -334,20 +334,20 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 
 			// Group by target queue and flush via pipeline.
 			queued := make(map[string][]string)
-			for _, m := range batch {
+			for _, result := range batch {
 				resultQueue := *ssResultQueueName
-				if m.Metadata != nil {
-					if customQueue, ok := m.Metadata["result_queue"]; ok && customQueue != "" {
+				if result.Metadata != nil {
+					if customQueue, ok := result.Metadata["result_queue"]; ok && customQueue != "" {
 						resultQueue = customQueue
 					}
 				}
-				queued[resultQueue] = append(queued[resultQueue], r.marshalResult(m))
+				queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
 			}
 
 			pipe := r.rdb.Pipeline()
-			for q, msgs := range queued {
+			for queue, msgs := range queued {
 				for _, msgStr := range msgs {
-					pipe.LPush(ctx, q, msgStr)
+					pipe.LPush(ctx, queue, msgStr)
 				}
 			}
 			if _, err := pipe.Exec(ctx); err != nil {

@@ -147,16 +147,16 @@ func resultWorker(ctx context.Context, rdb *redis.Client, resultChannel chan api
 			done := false
 			for len(batch) < maxResultBatchSize && !done {
 				select {
-				case m := <-resultChannel:
-					batch = append(batch, m)
+				case result := <-resultChannel:
+					batch = append(batch, result)
 				default:
 					done = true
 				}
 			}
 
 			pipe := rdb.Pipeline()
-			for _, m := range batch {
-				pipe.Publish(ctx, resultsQueueName, marshalResultMessage(m))
+			for _, result := range batch {
+				pipe.Publish(ctx, resultsQueueName, marshalResultMessage(result))
 			}
 			if _, err := pipe.Exec(ctx); err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to publish result batch to Redis", "batchSize", len(batch))
