@@ -47,8 +47,11 @@ func NewGateFactory(prometheusURL string) *GateFactory {
 // Supported gate types:
 //   - "constant": Always returns budget 1.0 (fully open)
 //   - "redis": Queries Redis for dispatch budget
-//   - "prometheus-saturation": Queries Prometheus for pool saturation metric
-//     Optional params: threshold (default 0.8), fallback (default 0.0)
+//   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
+//     Optional params: pool, threshold (default 0.8), fallback (default 0.0)
+//   - "prometheus-budget": Queries Prometheus for dispatch budget using
+//     D = 1 - (F_SYS + F_EPP + B). Params: pool, max_sys (required),
+//     baseline (default 0.05), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asyncapi.DispatchGate, error) {
@@ -77,44 +80,53 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 			return nil, fmt.Errorf("prometheus-saturation gate type requires --prometheus-url flag to be set")
 		}
 
-		pool := params["pool"]
-
-		threshold := 0.8 // default threshold
-		if thresholdStr := params["threshold"]; thresholdStr != "" {
-			t, err := strconv.ParseFloat(thresholdStr, 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid threshold value '%s': %w", thresholdStr, err)
-			}
-			threshold = t
-		}
-
-		fallback := 0.0 // default fallback saturation
-		if fallbackStr := params["fallback"]; fallbackStr != "" {
-			fb, err := strconv.ParseFloat(fallbackStr, 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid fallback value '%s': %w", fallbackStr, err)
-			}
-			fallback = fb
-		}
-
-		queryExpr := params["query"]
-		if queryExpr == "" {
-			labels := map[string]string{}
-			if pool != "" {
-				labels["inference_pool"] = pool
-			}
-			queryExpr = buildPromQL("inference_extension_flow_control_pool_saturation", labels)
-		}
-
-		source, err := NewPromQLMetricSource(promapi.Config{Address: f.prometheusURL}, queryExpr)
+		threshold, err := parseFloat(params["threshold"], 0.8)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create Prometheus metric source: %w", err)
+			return nil, err
+		}
+		fallback, err := parseFloat(params["fallback"], 0.0)
+		if err != nil {
+			return nil, err
 		}
 
-		return NewSaturationMetricDispatchGateWithSource(source, threshold, fallback), nil
+		promConfig := promapi.Config{Address: f.prometheusURL}
+		source, err := NewSaturationPromQLSourceFromConfig(promConfig, params)
+		if err != nil {
+			return nil, err
+		}
+		return NewSaturationDispatchGate(source, threshold, fallback), nil
+
+	case "prometheus-budget":
+		if f.prometheusURL == "" {
+			return nil, fmt.Errorf("prometheus-budget gate type requires --prometheus-url flag to be set")
+		}
+
+		fallback, err := parseFloat(params["fallback"], 0.0)
+		if err != nil {
+			return nil, err
+		}
+
+		promConfig := promapi.Config{Address: f.prometheusURL}
+		source, err := NewBudgetPromQLSourceFromConfig(promConfig, params)
+		if err != nil {
+			return nil, err
+		}
+		return NewBudgetDispatchGate(source, fallback), nil
 
 	default:
 		// Unknown gate types default to open gate
 		return ConstOpenGate(), nil
 	}
+}
+
+func parseFloat(str string, defaultValue float64) (float64, error) {
+	result := defaultValue
+	if str != "" {
+		v, err := strconv.ParseFloat(str, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid value '%s': %w", str, err)
+		}
+		result = v
+	}
+	return result, nil
 }

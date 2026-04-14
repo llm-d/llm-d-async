@@ -19,9 +19,6 @@ package flowcontrol
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
@@ -67,15 +64,6 @@ func NewPromQLMetricSource(clientConfig api.Config, expr string) (*PromQLMetricS
 	}, nil
 }
 
-// NewPromQLMetricSourceWithURL creates a MetricSource with a simple URL (no auth).
-// Use this for standard Prometheus or when the URL includes authentication details.
-func NewPromQLMetricSourceWithURL(url string) (*PromQLMetricSource, error) {
-	if url == "" {
-		return nil, fmt.Errorf("prometheus URL cannot be empty")
-	}
-	return NewPromQLMetricSource(api.Config{Address: url}, "")
-}
-
 // NewGMPPromQLMetricSource creates a PromQL MetricSource for Google Managed Prometheus.
 func NewGMPPromQLMetricSource(projectID string, expr string) (*PromQLMetricSource, error) {
 	ctx := context.Background()
@@ -91,24 +79,8 @@ func NewGMPPromQLMetricSource(projectID string, expr string) (*PromQLMetricSourc
 	}, expr)
 }
 
-// buildPromQL constructs a PromQL instant vector selector from a metric name and label matchers.
-func buildPromQL(metricName string, labels map[string]string) string {
-	if len(labels) == 0 {
-		return metricName
-	}
-
-	// Sort keys for deterministic output
-	keys := make([]string, 0, len(labels))
-	for k := range labels {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	parts := make([]string, 0, len(labels))
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf(`%s=%s`, k, strconv.Quote(labels[k])))
-	}
-	return fmt.Sprintf(`%s{%s}`, metricName, strings.Join(parts, ","))
+func (s *PromQLMetricSource) Expr() string {
+	return s.expr
 }
 
 // Query executes the preconfigured PromQL expression and returns the result as samples.

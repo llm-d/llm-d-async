@@ -84,7 +84,7 @@ make deploy-ap-on-k8s
 - `message-queue-impl`: Implementation of the queueing system. Options are <u>gcp-pubsub</u> for GCP PubSub, <u>gcp-pubsub-gated</u> for GCP PubSub with per-topic gating, <u>redis-sortedset</u> for Redis Sorted Set (persisted and sorted), and <u>redis-pubsub</u> for ephemeral Redis-based implementation.
 
  - `prometheus-url`: Prometheus server URL for metric-based gates (e.g., http://localhost:9090). For Google Managed Prometheus (GMP), point this to a local proxy or GMP frontend that handles authentication — direct GMP URLs are not supported as the Async Processor does not perform GMP authentication.  
-   This flag is required when using metric-based per-queue gates (e.g., `prometheus-saturation`).
+   This flag is required when using metric-based per-queue gates (e.g., `prometheus-saturation`, `prometheus-budget`).
 
 <i>additional parameters may be specified for concrete message queue implementations</i>
 
@@ -100,7 +100,8 @@ For more fine-grained control, configure gates per queue in your configuration f
 
 - `constant`: Always returns budget 1.0 (fully open) - no throttling.
 - `redis`: Queries Redis for dispatch budget (managed by external system).
-- `prometheus-saturation`: Queries Prometheus for pool saturation metric. Returns 1.0 - saturation if below threshold, 0.0 otherwise.
+- `prometheus-saturation`: Queries Prometheus for pool saturation metric. Returns `1.0 - saturation` if below threshold, `0.0` otherwise.
+- `prometheus-budget`: Queries Prometheus to compute a dispatch budget using the formula `D = 1 - (F_SYS + F_EPP + B)`, where `F_SYS` is pool saturation, `F_EPP` is normalized EPP queue depth, and `B` is a configurable baseline reserve.
 
 **Example Configuration with Per-Queue Gates:**
 
@@ -123,6 +124,17 @@ For more fine-grained control, configure gates per queue in your configuration f
        }
     },
     {
+       "queue_name": "batch_budget_queue",
+       "inference_objective": "batch-task",
+       "request_path_url": "/v1/inference",
+       "gate_type": "prometheus-budget",
+       "gate_params": {
+          "pool": "inference_pool_1",
+          "max_sys": "100",
+          "baseline": "0.05"
+       }
+    },
+    {
        "queue_name": "redis_gated_queue",
        "inference_objective": "gated-task",
        "request_path_url": "/v1/inference",
@@ -142,10 +154,16 @@ For more fine-grained control, configure gates per queue in your configuration f
   - `budget_key` (optional): Redis key to read dispatch budget from. Default is `dispatch-gate-budget`.
 
 - `prometheus-saturation`:
-  - `pool`: The inference pool name to query metrics for.
-  - `threshold`: Saturation threshold (0.0-1.0). When saturation >= threshold, budget is 0.0. Default is 0.8.
-  - `fallback`: Fallback saturation value (0.0-1.0) used when the metric source returns an error or empty data. Default is 0.0.
-  - `query`: Custom PromQL expression to query. If omitted, a default query using `inference_extension_flow_control_pool_saturation` with the `pool` label is used.
+  - `pool` (**required**): The inference pool name to filter metrics by.
+  - `threshold` (optional): Saturation threshold (0.0-1.0). When saturation >= threshold, budget is 0.0. Default is `0.8`.
+  - `fallback` (optional): Fallback saturation value (0.0-1.0) used when the metric source returns an error or empty data. Default is `0.0`.
+
+- `prometheus-budget`: Computes a dispatch budget using the formula `D = 1 - (F_SYS + F_EPP + B)`, where `F_SYS` is pool saturation,
+  `F_EPP` is normalized EPP queue depth, and `B` is a configurable baseline reserve. This is internally translated into a single Prometheus query.
+  - `pool` (**required**): The inference pool name to filter metrics by.
+  - `max_sys` (**required**): Maximum system request capacity, used to normalize the EPP queue depth (`F_EPP = queue_size / max_sys`). Must be a positive number.
+  - `baseline` (optional): Reserved fraction for unexpected traffic bursts. Default is `0.05`.
+  - `fallback` (optional): Fallback budget value (0.0-1.0) returned when metrics are unavailable. Default is `0.0` (fail closed).
 
 ## Request Messages and Consumption
 

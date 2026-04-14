@@ -41,6 +41,8 @@ const (
 	asyncProcessorManifest = "./yaml/async-processor.yaml"
 	// asyncProcessorSaturationManifest is the manifest for the saturation-gated async-processor.
 	asyncProcessorSaturationManifest = "./yaml/async-processor-saturation.yaml"
+	// asyncProcessorBudgetManifest is the manifest for the budget-gated async-processor.
+	asyncProcessorBudgetManifest = "./yaml/async-processor-budget.yaml"
 )
 
 var (
@@ -62,6 +64,7 @@ var (
 	promMockObjects                 []string
 	asyncProcessorObjects           []string
 	asyncProcessorSaturationObjects []string
+	asyncProcessorBudgetObjects     []string
 	createdNameSpace                bool
 
 	rdb         *redis.Client
@@ -225,6 +228,13 @@ func applyManifests() {
 		"${AP_IMAGE}": apImage,
 	})
 	asyncProcessorSaturationObjects = testutils.CreateObjsFromYaml(testConfig, apSatYamls)
+
+	ginkgo.By("Applying async-processor-budget manifest")
+	apBudgetYamls := testutils.ReadYaml(asyncProcessorBudgetManifest)
+	apBudgetYamls = substituteMany(apBudgetYamls, map[string]string{
+		"${AP_IMAGE}": apImage,
+	})
+	asyncProcessorBudgetObjects = testutils.CreateObjsFromYaml(testConfig, apBudgetYamls)
 }
 
 func setupRedisClient() {

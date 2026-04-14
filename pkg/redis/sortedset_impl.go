@@ -30,7 +30,7 @@ var (
 	ssQueuesConfigFile   = flag.String("redis.ss.queues-config-file", "", "Multiple queues config file")
 	ssPollIntervalMs     = flag.Int("redis.ss.poll-interval-ms", 1000, "Poll interval in milliseconds")
 	ssBatchSize          = flag.Int("redis.ss.batch-size", 10, "Number of messages to process per poll")
-	ssGateType           = flag.String("redis.ss.gate-type", "", "Gate type for single-queue mode (e.g. redis, prometheus-saturation)")
+	ssGateType           = flag.String("redis.ss.gate-type", "", "Gate type for single-queue mode (e.g. redis, prometheus-saturation, prometheus-budget)")
 	ssGateParamsJSON     = flag.String("redis.ss.gate-params", "{}", "JSON-encoded gate params map for single-queue mode")
 )
 
