@@ -48,7 +48,7 @@ func NewGateFactory(prometheusURL string) *GateFactory {
 //   - "constant": Always returns budget 1.0 (fully open)
 //   - "redis": Queries Redis for dispatch budget
 //   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
-//     Optional params: pool, threshold (default 0.8), fallback (default 0.0)
+//     Params: pool (required), threshold (default 0.8), fallback (default 0.0)
 //   - "prometheus-budget": Queries Prometheus for dispatch budget using
 //     D = 1 - (F_SYS + F_EPP + B). Params: pool, max_sys (required),
 //     baseline (default 0.05), fallback (default 0.0)
@@ -80,11 +80,11 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 			return nil, fmt.Errorf("prometheus-saturation gate type requires --prometheus-url flag to be set")
 		}
 
-		threshold, err := parseFloat(params["threshold"], 0.8)
+		threshold, err := parseFloat("threshold", params["threshold"], 0.8)
 		if err != nil {
 			return nil, err
 		}
-		fallback, err := parseFloat(params["fallback"], 0.0)
+		fallback, err := parseFloat("fallback", params["fallback"], 0.0)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +101,7 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 			return nil, fmt.Errorf("prometheus-budget gate type requires --prometheus-url flag to be set")
 		}
 
-		fallback, err := parseFloat(params["fallback"], 0.0)
+		fallback, err := parseFloat("fallback", params["fallback"], 0.0)
 		if err != nil {
 			return nil, err
 		}
@@ -119,14 +119,13 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 	}
 }
 
-func parseFloat(str string, defaultValue float64) (float64, error) {
-	result := defaultValue
-	if str != "" {
-		v, err := strconv.ParseFloat(str, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid value '%s': %w", str, err)
-		}
-		result = v
+func parseFloat(name, str string, defaultValue float64) (float64, error) {
+	if str == "" {
+		return defaultValue, nil
 	}
-	return result, nil
+	v, err := strconv.ParseFloat(str, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s value '%s': %w", name, str, err)
+	}
+	return v, nil
 }

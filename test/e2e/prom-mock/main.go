@@ -47,7 +47,7 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	var value string
-	if strings.Contains(query, "queue_size") {
+	if strings.Contains(query, "inference_extension_flow_control_queue_size") {
 		budget, _ := strconv.ParseFloat(s.budget, 64)
 		value = strconv.FormatFloat(1.0-budget, 'f', -1, 64)
 	} else {

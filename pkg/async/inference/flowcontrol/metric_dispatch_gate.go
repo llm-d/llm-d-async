@@ -76,17 +76,17 @@ func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 	}
 
 	if len(samples) == 0 {
-		logger.V(logutil.DEFAULT).Info("No saturation metrics found, using fallback value", "fallback", g.fallback)
+		logger.V(logutil.DEFAULT).Info("No metric samples found, using fallback value", "fallback", g.fallback)
 		return g.fallback
 	}
 
-	saturation := samples[0].Value
-	if math.IsNaN(saturation) || math.IsInf(saturation, 0) {
-		logger.V(logutil.DEFAULT).Info("Invalid saturation value, using fallback value", "fallback", g.fallback, "value", saturation)
+	value := samples[0].Value
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		logger.V(logutil.DEFAULT).Info("Invalid metric value, using fallback value", "fallback", g.fallback, "value", value)
 		return g.fallback
 	}
-	if saturation >= g.threshold {
+	if value >= g.threshold {
 		return 0.0
 	}
-	return math.Min(1.0, math.Max(0.0, 1.0-saturation))
+	return math.Min(1.0, math.Max(0.0, 1.0-value))
 }

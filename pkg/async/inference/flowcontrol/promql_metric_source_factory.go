@@ -27,7 +27,7 @@ import (
 
 // NewSaturationPromQLSourceFromConfig builds a PromQLMetricSource for the saturation use case.
 // It constructs a PromQL query for inference_extension_flow_control_pool_saturation
-// filtered by the "pool" param.
+// filtered by the "pool" param (required).
 func NewSaturationPromQLSourceFromConfig(promConfig promapi.Config, params map[string]string) (*PromQLMetricSource, error) {
 	inferencePool := params["pool"]
 	if inferencePool == "" {
@@ -60,6 +60,9 @@ func NewBudgetPromQLSourceFromConfig(promConfig promapi.Config, params map[strin
 		b, err := strconv.ParseFloat(baselineStr, 64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid baseline value '%s': %w", baselineStr, err)
+		}
+		if b < 0 || b > 1 {
+			return nil, fmt.Errorf("baseline must be in [0, 1], got %g", b)
 		}
 		baseline = b
 	}

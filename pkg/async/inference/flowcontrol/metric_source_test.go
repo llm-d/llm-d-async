@@ -162,3 +162,60 @@ func TestNewPromQLMetricSource_InvalidAddress(t *testing.T) {
 	_, err := NewPromQLMetricSource(api.Config{Address: "://invalid"}, "my_metric")
 	require.Error(t, err)
 }
+
+// PromQL construction tests for budget and saturation source factories
+
+func TestBuildBudgetPromQL_ContainsExpectedMetrics(t *testing.T) {
+	source, err := NewBudgetPromQL(
+		api.Config{Address: "http://localhost:9090"},
+		"my-pool", 100, 0.05,
+	)
+	require.NoError(t, err)
+	require.Contains(t, source.expr, `inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
+	require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool"}`)
+	require.Contains(t, source.expr, "/ 100")
+	require.Contains(t, source.expr, "0.05")
+}
+
+func TestBuildBudgetPromQL_RequiresPool(t *testing.T) {
+	_, err := NewBudgetPromQL(
+		api.Config{Address: "http://localhost:9090"},
+		"", 100, 0.05,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "inference pool name is required")
+}
+
+func TestNewSaturationPromQLSourceFromConfig_DefaultQuery(t *testing.T) {
+	source, err := NewSaturationPromQLSourceFromConfig(
+		api.Config{Address: "http://localhost:9090"},
+		map[string]string{"pool": "my-pool"},
+	)
+	require.NoError(t, err)
+	require.Contains(t, source.expr, `inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
+}
+
+func TestNewSaturationPromQLSourceFromConfig_RequiresPool(t *testing.T) {
+	_, err := NewSaturationPromQLSourceFromConfig(
+		api.Config{Address: "http://localhost:9090"},
+		map[string]string{},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "inference pool name is required")
+}
+
+func TestNewBudgetPromQLSourceFromConfig_ValidatesBaseline(t *testing.T) {
+	_, err := NewBudgetPromQLSourceFromConfig(
+		api.Config{Address: "http://localhost:9090"},
+		map[string]string{"pool": "my-pool", "max_sys": "100", "baseline": "-0.1"},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "baseline must be in [0, 1]")
+
+	_, err = NewBudgetPromQLSourceFromConfig(
+		api.Config{Address: "http://localhost:9090"},
+		map[string]string{"pool": "my-pool", "max_sys": "100", "baseline": "1.5"},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "baseline must be in [0, 1]")
+}

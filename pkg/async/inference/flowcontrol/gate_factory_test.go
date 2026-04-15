@@ -77,7 +77,7 @@ func TestGateFactory_PrometheusGateWithInvalidThreshold(t *testing.T) {
 	})
 	assert.Error(t, err, "should return error when threshold is not a valid float")
 	assert.Nil(t, gate)
-	assert.Contains(t, err.Error(), "invalid value")
+	assert.Contains(t, err.Error(), "invalid threshold value")
 }
 
 func TestGateFactory_PrometheusGateWithInvalidFallback(t *testing.T) {
@@ -87,7 +87,7 @@ func TestGateFactory_PrometheusGateWithInvalidFallback(t *testing.T) {
 	})
 	assert.Error(t, err, "should return error when fallback is not a valid float")
 	assert.Nil(t, gate)
-	assert.Contains(t, err.Error(), "invalid value")
+	assert.Contains(t, err.Error(), "invalid fallback value")
 }
 
 func TestGateFactory_PrometheusGateWithThresholdAndFallback(t *testing.T) {
@@ -148,10 +148,10 @@ func TestGateFactory_BudgetGateWithoutURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "prometheus-budget gate type requires --prometheus-url flag to be set")
 }
 
-func TestGateFactory_BudgetGateMissingMaxSysAndQuery(t *testing.T) {
+func TestGateFactory_BudgetGateMissingMaxSys(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{})
-	assert.Error(t, err, "should return error when neither max_sys nor query is provided")
+	assert.Error(t, err, "should return error when max_sys is not provided")
 	assert.Nil(t, gate)
 	assert.Contains(t, err.Error(), "prometheus-budget gate requires 'max_sys' parameter")
 }
@@ -215,7 +215,7 @@ func TestGateFactory_BudgetGateWithInvalidFallback(t *testing.T) {
 	})
 	assert.Error(t, err, "should return error when fallback is not a valid float")
 	assert.Nil(t, gate)
-	assert.Contains(t, err.Error(), "invalid value")
+	assert.Contains(t, err.Error(), "invalid fallback value")
 }
 
 func TestGateFactory_BudgetGateWithAllParams(t *testing.T) {
