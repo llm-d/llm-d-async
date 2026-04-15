@@ -240,3 +240,146 @@ func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
 		}
 	}
 }
+
+func TestPopDueRetryMessages_PopsDueAndRemovesFromSortedSet(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx := context.Background()
+	queue := "retry-pop-test"
+	now := time.Now().Unix()
+
+	due := api.RequestMessage{
+		Id:       "due",
+		Metadata: map[string]string{QUEUE_NAME_KEY: "request-queue"},
+	}
+	future := api.RequestMessage{
+		Id:       "future",
+		Metadata: map[string]string{QUEUE_NAME_KEY: "request-queue"},
+	}
+
+	dueBytes, err := json.Marshal(due)
+	if err != nil {
+		t.Fatalf("marshal due message: %v", err)
+	}
+	futureBytes, err := json.Marshal(future)
+	if err != nil {
+		t.Fatalf("marshal future message: %v", err)
+	}
+
+	if err := rdb.ZAdd(ctx, queue,
+		redis.Z{Score: float64(now - 1), Member: string(dueBytes)},
+		redis.Z{Score: float64(now + 60), Member: string(futureBytes)},
+	).Err(); err != nil {
+		t.Fatalf("seed retry sorted set: %v", err)
+	}
+
+	items, err := popDueRetryMessages(ctx, rdb, queue, now, 10)
+	if err != nil {
+		t.Fatalf("pop due messages: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one popped message, got %d", len(items))
+	}
+
+	var popped api.RequestMessage
+	if err := json.Unmarshal([]byte(items[0]), &popped); err != nil {
+		t.Fatalf("unmarshal popped message: %v", err)
+	}
+	if popped.Id != "due" {
+		t.Fatalf("expected popped message id 'due', got %q", popped.Id)
+	}
+
+	remaining, err := rdb.ZCard(ctx, queue).Result()
+	if err != nil {
+		t.Fatalf("read remaining queue size: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("expected one remaining future message, got %d", remaining)
+	}
+}
+
+func TestPopDueRetryMessages_ConcurrentCallers_NoDuplicatePops(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx := context.Background()
+	queue := "retry-pop-concurrent-test"
+	now := time.Now().Unix()
+	totalMessages := 40
+
+	for i := 0; i < totalMessages; i++ {
+		msg := api.RequestMessage{
+			Id:       "msg-" + strconv.Itoa(i),
+			Metadata: map[string]string{QUEUE_NAME_KEY: "request-queue"},
+		}
+		msgBytes, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatalf("marshal seed message %d: %v", i, err)
+		}
+		if err := rdb.ZAdd(ctx, queue, redis.Z{
+			Score:  float64(now),
+			Member: string(msgBytes),
+		}).Err(); err != nil {
+			t.Fatalf("seed retry queue: %v", err)
+		}
+	}
+
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		seenID = make(map[string]int, totalMessages)
+	)
+
+	workerCount := 4
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				items, err := popDueRetryMessages(ctx, rdb, queue, now, 3)
+				if err != nil {
+					t.Errorf("pop due retry messages: %v", err)
+					return
+				}
+				if len(items) == 0 {
+					return
+				}
+
+				for _, raw := range items {
+					var msg api.RequestMessage
+					if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+						t.Errorf("unmarshal popped message: %v", err)
+						return
+					}
+					mu.Lock()
+					seenID[msg.Id]++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(seenID) != totalMessages {
+		t.Fatalf("expected %d unique popped messages, got %d", totalMessages, len(seenID))
+	}
+
+	for id, count := range seenID {
+		if count != 1 {
+			t.Fatalf("message %s popped %d times, expected exactly once", id, count)
+		}
+	}
+
+	remaining, err := rdb.ZCard(ctx, queue).Result()
+	if err != nil {
+		t.Fatalf("read remaining queue size: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("expected queue to be empty after concurrent pops, got %d", remaining)
+	}
+}

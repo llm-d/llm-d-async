@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-
-	"strconv"
 	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
@@ -40,6 +38,31 @@ var (
 
 	queuesConfigFile = flag.String("redis.queues-config-file", "", "Queues Configuration file. Mutually exclusive with redis.igw-base-url, redis.request-queue-name, redis.request-path-url and redis.inference-objective flags. See documentation about syntax")
 )
+
+const retryPopBatchSize = 100
+
+// popDueRetryMessagesScript atomically fetches due retry entries (score <= now) and removes them.
+var popDueRetryMessagesScript = redis.NewScript(`
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+
+local items = redis.call("ZRANGEBYSCORE", key, "-inf", now, "LIMIT", 0, limit)
+if #items > 0 then
+  -- Chunk ZREM arguments to avoid Lua unpack stack limits if
+  -- limit is increased significantly in the future.
+  local chunk_size = 1000
+  for i = 1, #items, chunk_size do
+    local last = math.min(i + chunk_size - 1, #items)
+    local chunk = {}
+    for j = i, last do
+      chunk[#chunk + 1] = items[j]
+    end
+    redis.call("ZREM", key, unpack(chunk))
+  end
+end
+return items
+`)
 
 type QueueConfig struct {
 	QueueName          string `json:"queue_name"`
@@ -243,6 +266,7 @@ func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel ch
 
 // Every second polls the sorted set and publishes the messages that need to be retried into the request queue
 func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
+	logger := log.FromContext(ctx)
 	// create a map of queuename to channel based on requestchannels
 	msgChannels := make(map[string]chan api.RequestMessage)
 	for _, channelData := range r.requestChannels {
@@ -255,34 +279,42 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 			return
 
 		default:
-			currentTimeSec := float64(time.Now().Unix())
+			// Keep one fixed cutoff for this drain cycle so we only process
+			// messages due at cycle start, avoiding an ever-expanding window.
+			currentTimeSec := time.Now().Unix()
 
-			results, err := rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
-				Key:     *retryQueueName,
-				Start:   "0",
-				Stop:    strconv.FormatFloat(currentTimeSec, 'f', -1, 64),
-				ByScore: true,
-			}).Result()
-			if err != nil {
-				panic(err)
-			}
-			for _, msg := range results {
-				var message api.RequestMessage
-				err := json.Unmarshal([]byte(msg), &message)
+			for {
+				results, err := popDueRetryMessages(ctx, rdb, *retryQueueName, currentTimeSec, retryPopBatchSize)
 				if err != nil {
-					fmt.Println(err)
-
+					logger.V(logutil.DEFAULT).Error(err, "Failed to atomically pop due retry messages")
+					break
 				}
-				err = rdb.ZRem(ctx, *retryQueueName, msg).Err()
-				if err != nil {
-					fmt.Println(err)
-
+				if len(results) == 0 {
+					break
 				}
-				queueName := message.Metadata[QUEUE_NAME_KEY]
 
-				// TODO: We probably want to write here back to the request queue/channel in Redis. Adding the msg to the
-				// golang channel directly is not that wise as this might be blocking.
-				msgChannels[queueName] <- message
+				for _, msg := range results {
+					var message api.RequestMessage
+					err := json.Unmarshal([]byte(msg), &message)
+					if err != nil {
+						logger.V(logutil.DEFAULT).Error(err, "Failed to unmarshal retry message")
+						continue
+					}
+					queueName := message.Metadata[QUEUE_NAME_KEY]
+					msgChannel, ok := msgChannels[queueName]
+					if !ok {
+						logger.V(logutil.DEFAULT).Info("Unknown retry queue, dropping message", "queueName", queueName, "messageId", message.Id)
+						continue
+					}
+
+					// TODO: We probably want to write here back to the request queue/channel in Redis. Adding the msg to the
+					// golang channel directly is not that wise as this might be blocking.
+					select {
+					case msgChannel <- message:
+					case <-ctx.Done():
+						return
+					}
+				}
 			}
 			time.Sleep(time.Second)
 		}
@@ -290,3 +322,27 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 
 }
 
+// popDueRetryMessages atomically pops up to limit retry messages whose score is <= nowUnixSec.
+// It returns the raw message payloads removed from the sorted set.
+func popDueRetryMessages(ctx context.Context, rdb *redis.Client, key string, nowUnixSec int64, limit int) ([]string, error) {
+	raw, err := popDueRetryMessagesScript.Run(ctx, rdb, []string{key}, nowUnixSec, limit).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected script result type: %T", raw)
+	}
+
+	messages := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		msg, ok := entry.(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected script entry type: %T", entry)
+		}
+		messages = append(messages, msg)
+	}
+
+	return messages, nil
+}
