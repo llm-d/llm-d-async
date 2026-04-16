@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/pkg/async/api"
 	redisgate "github.com/llm-d-incubation/llm-d-async/pkg/redis"
@@ -26,17 +27,30 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// DefaultCacheTTL is the default TTL for cached Prometheus metric sources.
+const DefaultCacheTTL = 5 * time.Second
+
 // GateFactory creates DispatchGate instances based on configuration.
 type GateFactory struct {
 	prometheusURL string
+	cacheTTL      time.Duration
 	redisClients  map[string]*goredis.Client
 }
 
 // NewGateFactory creates a new GateFactory with an optional Prometheus URL.
 // If prometheusURL is empty, Prometheus gates will fail at creation time.
+// Prometheus metric sources are cached with DefaultCacheTTL; use
+// NewGateFactoryWithCacheTTL to override.
 func NewGateFactory(prometheusURL string) *GateFactory {
+	return NewGateFactoryWithCacheTTL(prometheusURL, DefaultCacheTTL)
+}
+
+// NewGateFactoryWithCacheTTL creates a GateFactory with a custom cache TTL
+// for Prometheus metric sources. A TTL of 0 disables caching.
+func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *GateFactory {
 	return &GateFactory{
 		prometheusURL: prometheusURL,
+		cacheTTL:      cacheTTL,
 		redisClients:  make(map[string]*goredis.Client),
 	}
 }
@@ -109,7 +123,12 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 			return nil, fmt.Errorf("failed to create Prometheus metric source: %w", err)
 		}
 
-		return NewSaturationMetricDispatchGateWithSource(source, threshold, fallback), nil
+		var ms MetricSource = source
+		if f.cacheTTL > 0 {
+			ms = NewCachedMetricSource(source, f.cacheTTL)
+		}
+
+		return NewSaturationMetricDispatchGateWithSource(ms, threshold, fallback), nil
 
 	default:
 		// Unknown gate types default to open gate
