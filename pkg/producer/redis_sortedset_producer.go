@@ -12,6 +12,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var _ Producer = (*RedisSortedSetProducer)(nil)
+
 // RedisSortedSetProducer implements Producer using Redis sorted set for requests
 // and Redis list for results.
 type RedisSortedSetProducer struct {

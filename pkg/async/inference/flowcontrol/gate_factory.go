@@ -30,6 +30,8 @@ import (
 // DefaultCacheTTL is the default TTL for cached Prometheus metric sources.
 const DefaultCacheTTL = 5 * time.Second
 
+var _ asyncapi.GateFactory = (*GateFactory)(nil)
+
 // GateFactory creates DispatchGate instances based on configuration.
 type GateFactory struct {
 	prometheusURL string

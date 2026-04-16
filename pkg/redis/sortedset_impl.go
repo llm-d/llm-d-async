@@ -61,6 +61,8 @@ type requestChannelData struct {
 	gate      api.DispatchGate
 }
 
+var _ api.Flow = (*RedisSortedSetFlow)(nil)
+
 type RedisSortedSetFlow struct {
 	rdb             *redis.Client
 	requestChannels []requestChannelData

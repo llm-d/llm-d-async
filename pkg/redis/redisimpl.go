@@ -76,6 +76,8 @@ type RequestChannelData struct {
 	queueName      string
 }
 
+var _ api.Flow = (*RedisMQFlow)(nil)
+
 type RedisMQFlow struct {
 	rdb             *redis.Client
 	requestChannels []RequestChannelData

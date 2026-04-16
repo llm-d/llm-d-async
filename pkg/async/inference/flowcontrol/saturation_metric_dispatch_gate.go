@@ -21,6 +21,7 @@ import (
 	"flag"
 	"math"
 
+	asyncapi "github.com/llm-d-incubation/llm-d-async/pkg/async/api"
 	"github.com/prometheus/client_golang/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -30,6 +31,8 @@ var saturationInferencePool = flag.String("gate.saturation.inference-pool", "", 
 var saturationThreshold = flag.Float64("gate.saturation.threshold", 0.8, "saturation threshold above which budget is zero")
 var saturationFallback = flag.Float64("gate.saturation.fallback", 0.0, "fallback saturation value on error/missing metrics; default 0.0")
 var saturationQueryExpr = flag.String("gate.saturation.query-expr", "", "custom PromQL expression for saturation metric; overrides inference-pool label selector")
+
+var _ asyncapi.DispatchGate = (*SaturationMetricDispatchGate)(nil)
 
 // SaturationMetricDispatchGate implements DispatchGate based on pool saturation.
 // It queries a MetricSource for saturation samples and returns 0.0 if saturation

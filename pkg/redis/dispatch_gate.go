@@ -4,10 +4,13 @@ import (
 	"context"
 	"strconv"
 
+	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
 	goredis "github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
+
+var _ api.DispatchGate = (*RedisDispatchGate)(nil)
 
 // RedisDispatchGate implements api.DispatchGate by reading the budget
 // from a Redis key. This allows external systems to dynamically control

@@ -46,6 +46,8 @@ type MetricSource interface {
 	Query(ctx context.Context) ([]Sample, error)
 }
 
+var _ MetricSource = (*PromQLMetricSource)(nil)
+
 // PromQLMetricSource implements MetricSource by executing a PromQL expression
 // against a Prometheus-compatible API.
 type PromQLMetricSource struct {
