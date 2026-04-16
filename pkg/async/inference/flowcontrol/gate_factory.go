@@ -26,6 +26,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+var _ asyncapi.GateFactory = (*GateFactory)(nil)
+
 // GateFactory creates DispatchGate instances based on configuration.
 type GateFactory struct {
 	prometheusURL string

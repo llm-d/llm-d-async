@@ -43,6 +43,9 @@ type TopicConfig struct {
 	GateType           string            `json:"gate_type"`
 	GateParams         map[string]string `json:"gate_params,omitempty"`
 }
+
+var _ api.Flow = (*PubSubMQFlow)(nil)
+
 type PubSubMQFlow struct {
 	resultTopicID   string
 	requestChannels []RequestChannelData

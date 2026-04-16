@@ -22,6 +22,8 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
 )
 
+var _ api.DispatchGate = DispatchGateFunc(nil)
+
 // DispatchGateFunc is a function type that implements DispatchGate.
 // This allows any function with the signature func(context.Context) float64
 // to be used as a DispatchGate.

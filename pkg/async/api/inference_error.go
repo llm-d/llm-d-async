@@ -31,6 +31,8 @@ type InferenceError interface {
 	Category() ErrorCategory
 }
 
+var _ InferenceError = (*ClientError)(nil)
+
 // ClientError represents an inference client error with category and context.
 type ClientError struct {
 	ErrorCategory ErrorCategory

@@ -41,6 +41,8 @@ type GateFactory interface {
 	CreateGate(gateType string, params map[string]string) (DispatchGate, error)
 }
 
+var _ DispatchGate = DispatchGateFunc(nil)
+
 // DispatchGateFunc is a function type that implements DispatchGate.
 // This allows any function with the signature func(context.Context) float64
 // to be used as a DispatchGate.

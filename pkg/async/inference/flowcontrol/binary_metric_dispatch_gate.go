@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 
+	asyncapi "github.com/llm-d-incubation/llm-d-async/pkg/async/api"
 	"github.com/prometheus/client_golang/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -29,6 +30,8 @@ var isGMP = flag.Bool("gate.pmetric.is-gmp", false, "Is this GMP (Google Managed
 var prometheusURL = flag.String("gate.prometheus.url", "", "Prometheus URL for non GMP metric")
 var gmpProjectID = flag.String("gate.pmetric.gmp.project-id", "", "Project ID for Google Managed Prometheus")
 var prometheusQueryModelName = flag.String("gate.prometheus.model-name", "", "metrics name to use for avg_queue_size")
+
+var _ asyncapi.DispatchGate = (*BinaryMetricDispatchGate)(nil)
 
 // BinaryMetricDispatchGate implements DispatchGate using a MetricSource.
 // It returns 0.0 (no capacity) if the metric value is non-zero,

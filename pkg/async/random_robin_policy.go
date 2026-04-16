@@ -10,6 +10,8 @@ func NewRandomRobinPolicy() api.RequestMergePolicy {
 	return &RandomRobinPolicy{}
 }
 
+var _ api.RequestMergePolicy = (*RandomRobinPolicy)(nil)
+
 type RandomRobinPolicy struct {
 }
 

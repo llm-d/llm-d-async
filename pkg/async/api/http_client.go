@@ -8,6 +8,8 @@ import (
 	"net/http"
 )
 
+var _ InferenceClient = (*HTTPInferenceClient)(nil)
+
 // HTTPInferenceClient is the default HTTP implementation of InferenceClient.
 type HTTPInferenceClient struct {
 	client *http.Client
