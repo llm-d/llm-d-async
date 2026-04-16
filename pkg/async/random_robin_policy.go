@@ -3,7 +3,7 @@ package async
 import (
 	"reflect"
 
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/api"
 )
 
 func NewRandomRobinPolicy() api.RequestMergePolicy {

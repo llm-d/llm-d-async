@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/api"
 )
 
 // Producer is the abstract interface for submitting requests to the async queue

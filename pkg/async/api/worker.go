@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -20,8 +21,8 @@ const (
 	maxDelaySeconds  = 60
 )
 
-func Worker(ctx context.Context, characteristics Characteristics, client InferenceClient, requestChannel chan EmbelishedRequestMessage,
-	retryChannel chan RetryMessage, resultChannel chan ResultMessage, requestTimeout time.Duration) {
+func Worker(ctx context.Context, characteristics asyncapi.Characteristics, client asyncapi.InferenceClient, requestChannel chan asyncapi.EmbelishedRequestMessage,
+	retryChannel chan asyncapi.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration) {
 
 	logger := log.FromContext(ctx)
 	for {
@@ -58,7 +59,7 @@ func Worker(ctx context.Context, characteristics Characteristics, client Inferen
 				if err == nil {
 					// Success - got a valid response
 					metrics.SuccessfulReqs.Inc()
-					resultChannel <- ResultMessage{
+					resultChannel <- asyncapi.ResultMessage{
 						Id:       msg.Id,
 						Payload:  string(responseBody),
 						Metadata: msg.Metadata,
@@ -67,7 +68,7 @@ func Worker(ctx context.Context, characteristics Characteristics, client Inferen
 				}
 
 				// Check if error implements InferenceError
-				var inferenceErr InferenceError
+				var inferenceErr asyncapi.InferenceError
 				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
 					// Unknown error type or fatal error - fail immediately
 					metrics.FailedReqs.Inc()
@@ -87,7 +88,7 @@ func Worker(ctx context.Context, characteristics Characteristics, client Inferen
 }
 
 // parsing and validating payload. On failure puts an error msg on the result-channel and returns nil
-func validateAndMarshall(resultChannel chan ResultMessage, msg RequestMessage) []byte {
+func validateAndMarshall(resultChannel chan asyncapi.ResultMessage, msg asyncapi.RequestMessage) []byte {
 	deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64)
 	if err != nil {
 		metrics.FailedReqs.Inc()
@@ -111,7 +112,7 @@ func validateAndMarshall(resultChannel chan ResultMessage, msg RequestMessage) [
 }
 
 // If it is not after deadline, just publish again.
-func retryMessage(msg EmbelishedRequestMessage, retryChannel chan RetryMessage, resultChannel chan ResultMessage) {
+func retryMessage(msg asyncapi.EmbelishedRequestMessage, retryChannel chan asyncapi.RetryMessage, resultChannel chan asyncapi.ResultMessage) {
 	deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64)
 	if err != nil { // Can't really happen because this was already parsed in the past. But we don't care to have this branch.
 		resultChannel <- CreateErrorResultMessage(msg.RequestMessage, "Failed to parse deadline. Should be in Unix time")
@@ -125,7 +126,7 @@ func retryMessage(msg EmbelishedRequestMessage, retryChannel chan RetryMessage, 
 		msg.RetryCount++
 		finalDuration := expBackoffDuration(msg.RetryCount, int(secondsToDeadline))
 		metrics.Retries.Inc()
-		retryChannel <- RetryMessage{
+		retryChannel <- asyncapi.RetryMessage{
 			EmbelishedRequestMessage: msg,
 			BackoffDurationSeconds:   finalDuration,
 		}
@@ -133,21 +134,21 @@ func retryMessage(msg EmbelishedRequestMessage, retryChannel chan RetryMessage, 
 	}
 
 }
-func CreateErrorResultMessage(msg RequestMessage, errMsg string) ResultMessage {
+func CreateErrorResultMessage(msg asyncapi.RequestMessage, errMsg string) asyncapi.ResultMessage {
 	errorPayload := map[string]string{"error": errMsg}
 	payloadBytes, err := json.Marshal(errorPayload)
 	if err != nil {
 		// Fallback to a simple error message if marshaling fails
 		payloadBytes = []byte(`{"error": "internal error"}`)
 	}
-	return ResultMessage{
+	return asyncapi.ResultMessage{
 		Id:       msg.Id,
 		Payload:  string(payloadBytes),
 		Metadata: msg.Metadata,
 	}
 }
 
-func CreateDeadlineExceededResultMessage(msg RequestMessage) ResultMessage {
+func CreateDeadlineExceededResultMessage(msg asyncapi.RequestMessage) asyncapi.ResultMessage {
 	return CreateErrorResultMessage(msg, "deadline exceeded")
 }
 

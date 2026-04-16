@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strconv"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	redisgate "github.com/llm-d-incubation/llm-d-async/pkg/redis"
 	promapi "github.com/prometheus/client_golang/api"
 	goredis "github.com/redis/go-redis/v9"

@@ -10,15 +10,17 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 )
 
 const defaultRequestTimeout = 5 * time.Minute
 
 func TestRetryMessage_deadlinePassed(t *testing.T) {
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
-	msg := EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              "123",
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
@@ -47,10 +49,10 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 }
 
 func TestRetryMessage_retry(t *testing.T) {
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
-	msg := EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              "123",
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
@@ -100,16 +102,16 @@ func TestSheddedRequest(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan EmbelishedRequestMessage, 1)
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
-	requestChannel <- EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              msgId,
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
@@ -141,17 +143,17 @@ func TestSuccessfulRequest(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan EmbelishedRequestMessage, 1)
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
-	requestChannel <- EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              msgId,
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
@@ -180,17 +182,17 @@ func TestFatalError_NoRetry(t *testing.T) {
 		return nil, fmt.Errorf("network unreachable")
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan EmbelishedRequestMessage, 1)
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
-	requestChannel <- EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              msgId,
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
@@ -231,16 +233,16 @@ func TestRateLimitRequest(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan EmbelishedRequestMessage, 1)
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
-	requestChannel <- EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              msgId,
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
@@ -271,17 +273,17 @@ func TestRequestTimeout(t *testing.T) {
 		return nil, req.Context().Err()
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan EmbelishedRequestMessage, 1)
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
 	// Use a very short request timeout to trigger the deadline.
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 100*time.Millisecond)
+	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 100*time.Millisecond)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
-	requestChannel <- EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              msgId,
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
@@ -410,16 +412,16 @@ func TestClientError_NoRetry(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan EmbelishedRequestMessage, 1)
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
-	requestChannel <- EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              msgId,
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,

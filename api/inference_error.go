@@ -6,7 +6,7 @@ import "fmt"
 type ErrorCategory string
 
 const (
-	ErrCategoryRateLimit  ErrorCategory = "RATE_LIMIT"   // retryable
+	ErrCategoryRateLimit  ErrorCategory = "RATE_LIMIT"  // retryable
 	ErrCategoryServer     ErrorCategory = "SERVER_ERROR" // retryable
 	ErrCategoryInvalidReq ErrorCategory = "INVALID_REQ"  // not retryable
 	ErrCategoryAuth       ErrorCategory = "AUTH_ERROR"   // not retryable

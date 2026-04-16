@@ -2,6 +2,10 @@ module github.com/llm-d-incubation/llm-d-async
 
 go 1.25.0
 
+require github.com/llm-d-incubation/llm-d-async/api v0.0.0
+
+replace github.com/llm-d-incubation/llm-d-async/api => ./api
+
 require (
 	cloud.google.com/go/pubsub/v2 v2.5.1
 	github.com/alicebob/miniredis/v2 v2.37.0
