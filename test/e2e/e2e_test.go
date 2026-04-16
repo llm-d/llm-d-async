@@ -44,9 +44,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 		msg3 := makeRequestMessage("deadline-200", 200*time.Second)
 		msg3.DeadlineUnixSec = fmt.Sprintf("%d", now.Add(200*time.Second).Unix())
 
-		enqueueMessage(ctx, rdb, requestQueue, msg1)
-		enqueueMessage(ctx, rdb, requestQueue, msg2)
-		enqueueMessage(ctx, rdb, requestQueue, msg3)
+		enqueueMessages(ctx, rdb, requestQueue, msg1, msg2, msg3)
 
 		// Wait for all 3 results
 		gomega.Eventually(func() int64 {

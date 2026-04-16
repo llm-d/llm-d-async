@@ -33,6 +33,23 @@ func enqueueMessage(ctx context.Context, rdb *redis.Client, queue string, msg ap
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 }
 
+// enqueueMessages adds all messages to the sorted set in a single Redis
+// pipeline so they become visible atomically. This prevents the processor
+// from dequeuing early messages before the rest are enqueued.
+func enqueueMessages(ctx context.Context, rdb *redis.Client, queue string, msgs ...api.RequestMessage) {
+	pipe := rdb.Pipeline()
+	for _, msg := range msgs {
+		data, err := json.Marshal(msg)
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+		pipe.ZAdd(ctx, queue, redis.Z{
+			Score:  parseDeadline(msg.DeadlineUnixSec),
+			Member: string(data),
+		})
+	}
+	_, err := pipe.Exec(ctx)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
 func parseDeadline(deadline string) float64 {
 	var d float64
 	_, err := fmt.Sscanf(deadline, "%f", &d)
