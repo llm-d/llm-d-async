@@ -15,7 +15,10 @@ import (
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
 
-var baseDelaySeconds = 2
+const (
+	baseDelaySeconds = 2
+	maxDelaySeconds  = 60
+)
 
 func Worker(ctx context.Context, characteristics Characteristics, client InferenceClient, requestChannel chan EmbelishedRequestMessage,
 	retryChannel chan RetryMessage, resultChannel chan ResultMessage, requestTimeout time.Duration) {
@@ -115,7 +118,7 @@ func retryMessage(msg EmbelishedRequestMessage, retryChannel chan RetryMessage, 
 		return
 	}
 	secondsToDeadline := deadline - time.Now().Unix()
-	if secondsToDeadline < 0 {
+	if secondsToDeadline <= 0 {
 		metrics.ExceededDeadlineReqs.Inc()
 		resultChannel <- CreateDeadlineExceededResultMessage(msg.RequestMessage)
 	} else {
@@ -148,15 +151,23 @@ func CreateDeadlineExceededResultMessage(msg RequestMessage) ResultMessage {
 	return CreateErrorResultMessage(msg, "deadline exceeded")
 }
 
+// https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
 func expBackoffDuration(retryCount int, secondsToDeadline int) float64 {
-	backoffDurationSeconds := math.Min(
-		float64(baseDelaySeconds)*(math.Pow(2, float64(retryCount))),
-		float64(secondsToDeadline))
-
-	jitter := rand.Float64() - 0.5
-	finalDuration := backoffDurationSeconds + jitter
-	if finalDuration < 0 {
-		finalDuration = 0
+	if secondsToDeadline <= 0 {
+		return 0
 	}
-	return finalDuration
+
+	capLevel := math.Min(float64(maxDelaySeconds), float64(secondsToDeadline))
+
+	// exponential growth with cap
+	backoff := float64(baseDelaySeconds) * math.Pow(2, float64(retryCount))
+	temp := math.Min(capLevel, backoff)
+
+	if temp <= 0 {
+		return 0
+	}
+
+	// equal jitter: [temp/2, temp)
+	half := temp / 2
+	return half + rand.Float64()*half
 }
