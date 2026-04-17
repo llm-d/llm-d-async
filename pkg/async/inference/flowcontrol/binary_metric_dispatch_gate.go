@@ -20,8 +20,8 @@ import (
 	"context"
 	"flag"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/pkg/async/api"
-	"github.com/prometheus/client_golang/api"
+	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	promapi "github.com/prometheus/client_golang/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -82,7 +82,7 @@ func AverageQueueSizeGate() *BinaryMetricDispatchGate {
 		}
 	} else {
 		var err error
-		source, err = NewPromQLMetricSource(api.Config{
+		source, err = NewPromQLMetricSource(promapi.Config{
 			Address: *prometheusURL,
 		}, expr)
 		if err != nil {

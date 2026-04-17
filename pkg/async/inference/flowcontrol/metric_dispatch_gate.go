@@ -20,7 +20,7 @@ import (
 	"context"
 	"math"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )

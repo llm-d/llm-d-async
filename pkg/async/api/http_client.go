@@ -10,7 +10,7 @@ import (
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 )
 
-var _ InferenceClient = (*HTTPInferenceClient)(nil)
+var _ asyncapi.InferenceClient = (*HTTPInferenceClient)(nil)
 
 // HTTPInferenceClient is the default HTTP implementation of InferenceClient.
 type HTTPInferenceClient struct {

@@ -375,10 +375,10 @@ func TestExpBackoffDuration(t *testing.T) {
 }
 
 func TestRetryMessage_deadlineExact(t *testing.T) {
-	retryChannel := make(chan RetryMessage, 1)
-	resultChannel := make(chan ResultMessage, 1)
-	msg := EmbelishedRequestMessage{
-		RequestMessage: RequestMessage{
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
 			Id:              "exact-deadline",
 			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
 			RetryCount:      0,
