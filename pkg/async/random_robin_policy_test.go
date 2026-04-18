@@ -43,6 +43,88 @@ func TestProcessAllChannels(t *testing.T) {
 	}
 }
 
+func TestEmptyChannelsReturnsClosed(t *testing.T) {
+	policy := NewRandomRobinPolicy()
+	merged := policy.MergeRequestChannels(nil)
+
+	select {
+	case _, ok := <-merged.Channel:
+		if ok {
+			t.Fatal("expected closed channel, but received a message")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("merged channel was not closed")
+	}
+}
+
+func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
+	// Three channels, each with distinct metadata.
+	channels := []api.RequestChannel{
+		{Channel: make(chan api.RequestMessage, 1), IGWBaseURl: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
+		{Channel: make(chan api.RequestMessage, 1), IGWBaseURl: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
+		{Channel: make(chan api.RequestMessage, 1), IGWBaseURl: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
+	}
+	policy := NewRandomRobinPolicy()
+	merged := policy.MergeRequestChannels(channels)
+
+	// Close the middle channel to shift indices.
+	close(channels[1].Channel)
+
+	// Wait until the merge goroutine observes the closure and realigns
+	// channel metadata. This avoids timing flakes from fixed sleeps.
+	realigned := false
+	realignDeadline := time.After(2 * time.Second)
+	for !realigned {
+		select {
+		case <-realignDeadline:
+			t.Fatal("timed out waiting for channel metadata realignment")
+		case channels[2].Channel <- api.RequestMessage{Id: "probe-c"}:
+		}
+
+		select {
+		case <-realignDeadline:
+			t.Fatal("timed out waiting for channel metadata realignment")
+		case msg := <-merged.Channel:
+			if msg.Id != "probe-c" {
+				t.Fatalf("unexpected message id while waiting for realignment: %s", msg.Id)
+			}
+			realigned = msg.RequestURL == "http://c/c" &&
+				msg.HttpHeaders["x-gateway-inference-objective"] == "obj-c"
+		}
+	}
+
+	// Send one message on each remaining channel.
+	channels[0].Channel <- api.RequestMessage{Id: "from-a"}
+	channels[2].Channel <- api.RequestMessage{Id: "from-c"}
+
+	deadline := time.After(2 * time.Second)
+	for range 2 {
+		select {
+		case msg := <-merged.Channel:
+			switch msg.Id {
+			case "from-a":
+				if msg.RequestURL != "http://a/a" {
+					t.Errorf("expected RequestURL http://a/a, got %s", msg.RequestURL)
+				}
+				if msg.HttpHeaders["x-gateway-inference-objective"] != "obj-a" {
+					t.Errorf("expected InferenceObjective obj-a, got %s", msg.HttpHeaders["x-gateway-inference-objective"])
+				}
+			case "from-c":
+				if msg.RequestURL != "http://c/c" {
+					t.Errorf("expected RequestURL http://c/c, got %s", msg.RequestURL)
+				}
+				if msg.HttpHeaders["x-gateway-inference-objective"] != "obj-c" {
+					t.Errorf("expected InferenceObjective obj-c, got %s", msg.HttpHeaders["x-gateway-inference-objective"])
+				}
+			default:
+				t.Fatalf("unexpected message id: %s", msg.Id)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for messages")
+		}
+	}
+}
+
 func TestMergedChannelIsBuffered(t *testing.T) {
 	numChannels := 3
 	channels := make([]api.RequestChannel, numChannels)
