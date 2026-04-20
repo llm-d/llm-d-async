@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 )
@@ -59,10 +61,12 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	// Check for rate limiting / load shedding (429)
 	if result.StatusCode == 429 {
+		retryAfter, _ := parseRetryAfter(result.Header.Get("Retry-After"))
 		return body, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryRateLimit,
 			Message:       fmt.Sprintf("rate limited: status code %d", result.StatusCode),
 			RawError:      nil,
+			RetryAfter:    retryAfter,
 		}
 	}
 
@@ -85,4 +89,26 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	}
 
 	return body, nil
+}
+
+// parseRetryAfter parses a Retry-After header value, which can be either
+// a number of seconds (e.g. "120") or an HTTP-date (e.g. "Thu, 01 Dec 1994 16:00:00 GMT").
+// Returns the parsed duration and true if successful, or (0, false) if empty or unparseable.
+func parseRetryAfter(value string) (time.Duration, bool) {
+	if value == "" {
+		return 0, false
+	}
+	// Try integer seconds first
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second, true
+	}
+	// Try HTTP-date formats (IMF-fixdate, RFC 850, asctime)
+	if t, err := http.ParseTime(value); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			d = 0
+		}
+		return d, true
+	}
+	return 0, false
 }

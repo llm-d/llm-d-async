@@ -1,6 +1,9 @@
 package api
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // ErrorCategory defines the category of an inference client error.
 type ErrorCategory string
@@ -37,7 +40,8 @@ var _ InferenceError = (*ClientError)(nil)
 type ClientError struct {
 	ErrorCategory ErrorCategory
 	Message       string
-	RawError      error // original error if available
+	RawError      error         // original error if available
+	RetryAfter    time.Duration // server-specified retry delay from Retry-After header (0 means not set)
 }
 
 func (e *ClientError) Error() string {

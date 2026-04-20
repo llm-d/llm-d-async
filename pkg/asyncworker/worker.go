@@ -80,7 +80,13 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 				if inferenceErr.Category().Sheddable() {
 					metrics.SheddedRequests.Inc()
 				}
-				retryMessage(msg, retryChannel, resultChannel)
+				// Pass server-specified Retry-After duration if available.
+				var retryAfter time.Duration
+				var clientErr *asyncapi.ClientError
+				if errors.As(err, &clientErr) {
+					retryAfter = clientErr.RetryAfter
+				}
+				retryMessage(msg, retryChannel, resultChannel, retryAfter)
 			}
 			sendInferenceRequest()
 		}
@@ -112,7 +118,7 @@ func validateAndMarshall(resultChannel chan asyncapi.ResultMessage, msg asyncapi
 }
 
 // If it is not after deadline, just publish again.
-func retryMessage(msg asyncapi.EmbelishedRequestMessage, retryChannel chan asyncapi.RetryMessage, resultChannel chan asyncapi.ResultMessage) {
+func retryMessage(msg asyncapi.EmbelishedRequestMessage, retryChannel chan asyncapi.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration) {
 	deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64)
 	if err != nil { // Can't really happen because this was already parsed in the past. But we don't care to have this branch.
 		resultChannel <- CreateErrorResultMessage(msg.RequestMessage, "Failed to parse deadline. Should be in Unix time")
@@ -122,17 +128,28 @@ func retryMessage(msg asyncapi.EmbelishedRequestMessage, retryChannel chan async
 	if secondsToDeadline <= 0 {
 		metrics.ExceededDeadlineReqs.Inc()
 		resultChannel <- CreateDeadlineExceededResultMessage(msg.RequestMessage)
-	} else {
-		msg.RetryCount++
-		finalDuration := expBackoffDuration(msg.RetryCount, int(secondsToDeadline))
-		metrics.Retries.Inc()
-		retryChannel <- asyncapi.RetryMessage{
-			EmbelishedRequestMessage: msg,
-			BackoffDurationSeconds:   finalDuration,
-		}
-
+		return
 	}
 
+	finalDuration := expBackoffDuration(msg.RetryCount+1, int(secondsToDeadline))
+	// Honor server-specified Retry-After when it exceeds the computed backoff,
+	// but never schedule a retry beyond the message deadline.
+	if retryAfterSec := retryAfter.Seconds(); retryAfterSec > finalDuration {
+		finalDuration = retryAfterSec
+	}
+
+	if finalDuration >= float64(secondsToDeadline) {
+		metrics.ExceededDeadlineReqs.Inc()
+		resultChannel <- CreateDeadlineExceededResultMessage(msg.RequestMessage)
+		return
+	}
+
+	msg.RetryCount++
+	metrics.Retries.Inc()
+	retryChannel <- asyncapi.RetryMessage{
+		EmbelishedRequestMessage: msg,
+		BackoffDurationSeconds:   finalDuration,
+	}
 }
 func CreateErrorResultMessage(msg asyncapi.RequestMessage, errMsg string) asyncapi.ResultMessage {
 	errorPayload := map[string]string{"error": errMsg}

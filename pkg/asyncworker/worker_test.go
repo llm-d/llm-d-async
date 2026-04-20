@@ -29,7 +29,7 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 		HttpHeaders: map[string]string{},
 		RequestURL:  "",
 	}
-	retryMessage(msg, retryChannel, resultChannel)
+	retryMessage(msg, retryChannel, resultChannel, 0)
 	if len(retryChannel) > 0 {
 		t.Errorf("Message that its deadline passed should not be retried. Got a message in the retry channel")
 		return
@@ -61,7 +61,7 @@ func TestRetryMessage_retry(t *testing.T) {
 		HttpHeaders: map[string]string{},
 		RequestURL:  "",
 	}
-	retryMessage(msg, retryChannel, resultChannel)
+	retryMessage(msg, retryChannel, resultChannel, 0)
 	if len(resultChannel) > 0 {
 		t.Errorf("Should not have any messages in the result channel")
 		return
@@ -385,7 +385,7 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Unix()), // exactly now
 		},
 	}
-	retryMessage(msg, retryChannel, resultChannel)
+	retryMessage(msg, retryChannel, resultChannel, 0)
 	if len(retryChannel) > 0 {
 		t.Errorf("secondsToDeadline==0 should not produce a retry")
 	}
@@ -398,6 +398,163 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 	json.Unmarshal([]byte(result.Payload), &resultMap) // nolint:errcheck
 	if resultMap["error"] != "deadline exceeded" {
 		t.Errorf("expected 'deadline exceeded', got: %s", resultMap["error"])
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		wantOK   bool
+		wantZero bool
+	}{
+		{name: "integer seconds", value: "120", wantOK: true},
+		{name: "zero seconds", value: "0", wantOK: true, wantZero: true},
+		{name: "HTTP-date future", value: time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat), wantOK: true},
+		{name: "HTTP-date past", value: time.Now().Add(-10 * time.Second).UTC().Format(http.TimeFormat), wantOK: true, wantZero: true},
+		{name: "negative integer", value: "-5", wantOK: false},
+		{name: "invalid value", value: "abc", wantOK: false},
+		{name: "empty string", value: "", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, ok := parseRetryAfter(tt.value)
+			if ok != tt.wantOK {
+				t.Fatalf("parseRetryAfter(%q): ok = %v, want %v", tt.value, ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if tt.wantZero && d != 0 {
+				t.Errorf("expected zero duration, got %v", d)
+			}
+			if !tt.wantZero && d <= 0 {
+				t.Errorf("expected positive duration, got %v", d)
+			}
+		})
+	}
+}
+
+func TestRetryMessage_retryAfterHonored(t *testing.T) {
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
+			Id:              "retry-after-test",
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Add(time.Second*100).Unix()),
+		},
+	}
+
+	// Server says wait 30s; expBackoff for retry 1 would be ~[1,2) seconds,
+	// so the Retry-After value should win.
+	retryMessage(msg, retryChannel, resultChannel, 30*time.Second)
+	if len(retryChannel) != 1 {
+		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
+	}
+	retryMsg := <-retryChannel
+	if retryMsg.BackoffDurationSeconds < 30 {
+		t.Errorf("expected backoff >= 30s (Retry-After), got %f", retryMsg.BackoffDurationSeconds)
+	}
+}
+
+func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
+			Id:              "retry-after-small",
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      5, // high retry count → large expBackoff
+			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Add(time.Second*100).Unix()),
+		},
+	}
+
+	// Server says wait 1s, but expBackoff at retry 5 is much larger.
+	// expBackoff should win.
+	retryMessage(msg, retryChannel, resultChannel, 1*time.Second)
+	if len(retryChannel) != 1 {
+		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
+	}
+	retryMsg := <-retryChannel
+	if retryMsg.BackoffDurationSeconds <= 1.0 {
+		t.Errorf("expected backoff > 1s (expBackoff should dominate), got %f", retryMsg.BackoffDurationSeconds)
+	}
+}
+
+func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
+			Id:              "retry-after-exceeds-deadline",
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Add(5*time.Second).Unix()),
+		},
+	}
+
+	// Server says wait 30s, but deadline is only 5s away → deadline exceeded.
+	retryMessage(msg, retryChannel, resultChannel, 30*time.Second)
+	if len(retryChannel) > 0 {
+		t.Errorf("should not retry when Retry-After exceeds deadline")
+	}
+	if len(resultChannel) != 1 {
+		t.Fatalf("expected deadline-exceeded result, got %d messages", len(resultChannel))
+	}
+	result := <-resultChannel
+	var resultMap map[string]any
+	json.Unmarshal([]byte(result.Payload), &resultMap) // nolint:errcheck
+	if resultMap["error"] != "deadline exceeded" {
+		t.Errorf("expected 'deadline exceeded', got: %s", resultMap["error"])
+	}
+}
+
+func TestRateLimitRequest_WithRetryAfterHeader(t *testing.T) {
+	msgId := "429-with-header"
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Retry-After", "25")
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       nil,
+			Header:     header,
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	deadline := time.Now().Add(time.Second * 100).Unix()
+
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
+			Id:              msgId,
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf("%d", deadline),
+			Payload:         map[string]any{"model": "test", "prompt": "hi"},
+		},
+		RequestURL:  "http://localhost:30800/v1/completions",
+		HttpHeaders: map[string]string{},
+	}
+
+	select {
+	case r := <-retryChannel:
+		if r.Id != msgId {
+			t.Errorf("expected retry message id %s, got %s", msgId, r.Id)
+		}
+		if r.BackoffDurationSeconds < 25 {
+			t.Errorf("expected backoff >= 25s (Retry-After header), got %f", r.BackoffDurationSeconds)
+		}
+	case <-resultChannel:
+		t.Errorf("should not get result from a 429 response, should retry")
+	case <-time.After(time.Second):
+		t.Errorf("timeout waiting for retry")
 	}
 }
 
