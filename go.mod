@@ -2,6 +2,8 @@ module github.com/llm-d-incubation/llm-d-async
 
 go 1.25.0
 
+// TODO(#107): After the first tagged api release, bump the version below
+// from v0.0.0 to that semver (e.g. v0.1.0). Keep the replace line for in-repo development.
 require github.com/llm-d-incubation/llm-d-async/api v0.0.0
 
 replace github.com/llm-d-incubation/llm-d-async/api => ./api
