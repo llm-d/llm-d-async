@@ -31,14 +31,13 @@ func main() {
 }
 
 // handleQuery returns a single Prometheus vector result. If the query contains
-// "queue_size" it is a budget gate query: the mock stores the dispatch budget D and
-// returns 1 - D as the combined saturation (F_SYS + F_EPP + B) that the gate expects.
-// Otherwise it returns the plain saturation value.
+// "queue_size" it is a budget gate query: the mock returns the dispatch budget D
+// directly. Otherwise it returns the plain saturation value (used by the
+// saturation gate, which expects 1 - saturation from its PromQL source).
 //
 // The Prometheus client sends queries as POST form body, so we parse both
 // URL params and form body to find the query expression.
 func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
-	// Prometheus client_golang sends the query as a POST form body.
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
@@ -48,10 +47,10 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	var value string
 	if strings.Contains(query, "inference_extension_flow_control_queue_size") {
-		budget, _ := strconv.ParseFloat(s.budget, 64)
-		value = strconv.FormatFloat(1.0-budget, 'f', -1, 64)
+		value = s.budget
 	} else {
-		value = s.saturation
+		saturation, _ := strconv.ParseFloat(s.saturation, 64)
+		value = strconv.FormatFloat(1.0-saturation, 'f', -1, 64)
 	}
 	s.mu.Unlock()
 
