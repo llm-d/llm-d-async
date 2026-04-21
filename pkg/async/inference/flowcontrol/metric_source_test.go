@@ -171,10 +171,10 @@ func TestBuildBudgetPromQL_ContainsExpectedMetrics(t *testing.T) {
 		"my-pool", 100, 0.05,
 	)
 	require.NoError(t, err)
-	require.Contains(t, source.expr, `inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
+	require.Contains(t, source.expr, `1 - inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
 	require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool"}`)
 	require.Contains(t, source.expr, "/ 100")
-	require.Contains(t, source.expr, "0.05")
+	require.Contains(t, source.expr, "0.95")
 }
 
 func TestBuildBudgetPromQL_RequiresPool(t *testing.T) {
@@ -192,7 +192,7 @@ func TestNewSaturationPromQLSourceFromConfig_DefaultQuery(t *testing.T) {
 		map[string]string{"pool": "my-pool"},
 	)
 	require.NoError(t, err)
-	require.Contains(t, source.expr, `inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
+	require.Contains(t, source.expr, `1 - inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
 }
 
 func TestNewSaturationPromQLSourceFromConfig_RequiresPool(t *testing.T) {

@@ -25,282 +25,116 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- NewSaturationDispatchGate tests (fallback is a saturation value, inverted) ---
+func TestSaturationDispatchGate(t *testing.T) {
+	tests := []struct {
+		name       string
+		saturation float64
+		err        error
+		threshold  float64
+		fallback   float64
+		expected   float64
+	}{
+		{"zero saturation", 0.0, nil, 0.8, 1.0, 1.0},
+		{"partial saturation", 0.3, nil, 0.8, 1.0, 1 - 0.3},
+		{"at threshold", 0.8, nil, 0.8, 1.0, 0.0},
+		{"above threshold", 0.95, nil, 0.8, 1.0, 0.0},
+		{"full saturation", 1.0, nil, 0.8, 1.0, 0.0},
+		{"just below threshold", 0.79, nil, 0.8, 1.0, 1 - 0.79},
+		{"threshold one", 0.99, nil, 1.0, 1.0, 1 - 0.99},
+		{"saturation above one", 1.5, nil, 0.8, 1.0, 0.0},
+		{"saturation above one high threshold", 1.5, nil, 2.0, 1.0, 0.0},
+		{"negative saturation", -0.5, nil, 0.8, 1.0, 1.0},
+		{"error fail closed", 0, errors.New("conn refused"), 0.8, 1.0, 0.0},
+		{"error fail open", 0, errors.New("conn refused"), 0.8, 0.0, 1.0},
+		{"NaN fail open", math.NaN(), nil, 0.8, 0.0, 1.0},
+		{"Inf fail open", math.Inf(-1), nil, 0.8, 0.0, 1.0},
+		{"NaN fail closed", math.NaN(), nil, 0.8, 1.0, 0.0},
+		{"Inf fail closed", math.Inf(-1), nil, 0.8, 1.0, 0.0},
+	}
 
-func TestSaturationDispatchGate_ZeroSaturation(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.0}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_PartialSaturation(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.3}}},
-		0.8, 1.0,
-	)
-	require.InDelta(t, 0.7, gate.Budget(context.Background()), 1e-9)
-}
-
-func TestSaturationDispatchGate_AtThreshold(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.8}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_AboveThreshold(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.95}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_FullSaturation(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 1.0}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_JustBelowThreshold(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.79}}},
-		0.8, 1.0,
-	)
-	require.InDelta(t, 0.21, gate.Budget(context.Background()), 1e-9)
-}
-
-func TestSaturationDispatchGate_Error(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{err: errors.New("connection refused")},
-		0.8, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var source *mockMetricSource
+			if tt.err != nil {
+				source = &mockMetricSource{err: tt.err}
+			} else {
+				source = &mockMetricSource{samples: []Sample{{Value: 1 - tt.saturation}}}
+			}
+			gate := NewSaturationDispatchGate(source, tt.threshold, tt.fallback)
+			require.InDelta(t, tt.expected, gate.Budget(context.Background()), 1e-9)
+		})
+	}
 }
 
 func TestSaturationDispatchGate_EmptySamples(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{}},
-		0.8, 1.0,
-	)
+	source := &mockMetricSource{samples: []Sample{}}
+	gate := NewSaturationDispatchGate(source, 0.8, 1.0)
 	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
 
-func TestSaturationDispatchGate_ThresholdOne(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.99}}},
-		1.0, 1.0,
-	)
-	require.InDelta(t, 0.01, gate.Budget(context.Background()), 1e-9)
-}
-
-func TestSaturationDispatchGate_Error_FailOpen(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{err: errors.New("connection refused")},
-		0.8, 0.0,
-	)
+	gate = NewSaturationDispatchGate(source, 0.8, 0.0)
 	require.Equal(t, 1.0, gate.Budget(context.Background()))
 }
 
-func TestSaturationDispatchGate_EmptySamples_FailOpen(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{}},
-		0.8, 0.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
+func TestBudgetDispatchGate(t *testing.T) {
+	tests := []struct {
+		name     string
+		budget   float64
+		err      error
+		fallback float64
+		expected float64
+	}{
+		{"core formula", 0.5 * 0.9 * 0.95, nil, 0.0, 0.5 * 0.9 * 0.95},
+		{"zero load", 1.0 * 1.0 * 0.95, nil, 0.0, 0.95},
+		{"fully saturated", 0.0, nil, 0.0, 0.0},
+		{"overloaded negative", -0.2 * 0.8 * 0.95, nil, 0.0, 0.0},
+		{"full budget", 1.0, nil, 0.0, 1.0},
+		{"near zero budget", 0.01, nil, 0.0, 0.01},
+		{"NaN", math.NaN(), nil, 0.0, 0.0},
+		{"error fail closed", 0, errors.New("conn refused"), 0.0, 0.0},
+		{"error fail open", 0, errors.New("conn refused"), 1.0, 1.0},
+		{"fallback clamped above one", 0, errors.New("error"), 2.0, 1.0},
+		{"fallback clamped below zero", 0, errors.New("error"), -1.0, 0.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var source *mockMetricSource
+			if tt.err != nil {
+				source = &mockMetricSource{err: tt.err}
+			} else {
+				source = &mockMetricSource{samples: []Sample{{Value: tt.budget}}}
+			}
+			gate := NewBudgetDispatchGate(source, tt.fallback)
+			require.InDelta(t, tt.expected, gate.Budget(context.Background()), 1e-9)
+		})
+	}
 }
 
-func TestSaturationDispatchGate_NaN_FailOpen(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: math.NaN()}}},
-		0.8, 0.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
-}
+func TestMetricDispatchGate(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     float64
+		err       error
+		threshold float64
+		fallback  float64
+		expected  float64
+	}{
+		{"above threshold", 0.5, nil, 0.3, 0.0, 0.5},
+		{"at threshold", 0.3, nil, 0.3, 0.0, 0.0},
+		{"below threshold", 0.2, nil, 0.3, 0.0, 0.0},
+		{"fallback on error", 0, errors.New("error"), 0.8, 0.5, 0.5},
+	}
 
-func TestSaturationDispatchGate_Inf_FailOpen(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: math.Inf(1)}}},
-		0.8, 0.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_NaN_FailClosed(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: math.NaN()}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_Inf_FailClosed(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: math.Inf(1)}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_SaturationAboveOne_AboveThreshold(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 1.5}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_SaturationAboveOne_HighThreshold(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 1.5}}},
-		2.0, 1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestSaturationDispatchGate_NegativeSaturation(t *testing.T) {
-	gate := NewSaturationDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: -0.5}}},
-		0.8, 1.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
-}
-
-// --- NewBudgetDispatchGate tests (threshold=1.0, fallback is direct budget) ---
-
-func TestBudgetDispatchGate_CoreFormula(t *testing.T) {
-	// PromQL returns combined saturation: F_SYS=0.5 + F_EPP=0.1 + B=0.05 = 0.65
-	// Budget = 1 - 0.65 = 0.35
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.65}}},
-		0.0,
-	)
-	require.InDelta(t, 0.35, gate.Budget(context.Background()), 1e-9)
-}
-
-func TestBudgetDispatchGate_ZeroLoad(t *testing.T) {
-	// Combined saturation: 0 + 0 + 0.05 = 0.05 → budget 0.95
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.05}}},
-		0.0,
-	)
-	require.InDelta(t, 0.95, gate.Budget(context.Background()), 1e-9)
-}
-
-func TestBudgetDispatchGate_Overloaded(t *testing.T) {
-	// Combined saturation: 0.8 + 0.2 + 0.05 = 1.05 → budget clamped to 0
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 1.05}}},
-		0.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_Error_FailClosed(t *testing.T) {
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{err: errors.New("connection refused")},
-		0.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_Error_FailOpen(t *testing.T) {
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{err: errors.New("connection refused")},
-		1.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_EmptySamples(t *testing.T) {
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{}},
-		0.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_NaN(t *testing.T) {
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: math.NaN()}}},
-		0.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_ExactlyOne(t *testing.T) {
-	// Combined saturation = 1.0 → at threshold → budget 0.0
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 1.0}}},
-		0.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_JustBelowOne(t *testing.T) {
-	// Combined saturation = 0.99 → budget = 0.01
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.99}}},
-		0.0,
-	)
-	require.InDelta(t, 0.01, gate.Budget(context.Background()), 1e-9)
-}
-
-func TestBudgetDispatchGate_NegativeClamped(t *testing.T) {
-	// Negative combined saturation → budget clamped to 1.0
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: -0.5}}},
-		0.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_FallbackClampedAboveOne(t *testing.T) {
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{err: errors.New("error")},
-		2.0,
-	)
-	require.Equal(t, 1.0, gate.Budget(context.Background()))
-}
-
-func TestBudgetDispatchGate_FallbackClampedBelowZero(t *testing.T) {
-	gate := NewBudgetDispatchGate(
-		&mockMetricSource{err: errors.New("error")},
-		-1.0,
-	)
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-// --- NewMetricDispatchGate tests (generic, fallback is direct budget) ---
-
-func TestMetricDispatchGate_CustomThreshold(t *testing.T) {
-	gate := NewMetricDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.5}}},
-		0.6, 0.0,
-	)
-	// 0.5 < 0.6 threshold → budget = 1 - 0.5 = 0.5
-	require.InDelta(t, 0.5, gate.Budget(context.Background()), 1e-9)
-}
-
-func TestMetricDispatchGate_AtCustomThreshold(t *testing.T) {
-	gate := NewMetricDispatchGate(
-		&mockMetricSource{samples: []Sample{{Value: 0.6}}},
-		0.6, 0.0,
-	)
-	// 0.6 >= 0.6 threshold → budget = 0.0
-	require.Equal(t, 0.0, gate.Budget(context.Background()))
-}
-
-func TestMetricDispatchGate_FallbackDirect(t *testing.T) {
-	gate := NewMetricDispatchGate(
-		&mockMetricSource{err: errors.New("error")},
-		0.8, 0.5,
-	)
-	// Error → returns fallback budget directly (0.5)
-	require.Equal(t, 0.5, gate.Budget(context.Background()))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var source *mockMetricSource
+			if tt.err != nil {
+				source = &mockMetricSource{err: tt.err}
+			} else {
+				source = &mockMetricSource{samples: []Sample{{Value: tt.value}}}
+			}
+			gate := NewMetricDispatchGate(source, tt.threshold, tt.fallback)
+			require.InDelta(t, tt.expected, gate.Budget(context.Background()), 1e-9)
+		})
+	}
 }

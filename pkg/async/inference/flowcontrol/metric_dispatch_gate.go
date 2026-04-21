@@ -28,9 +28,9 @@ import (
 var _ asyncapi.DispatchGate = (*MetricDispatchGate)(nil)
 
 // MetricDispatchGate implements DispatchGate by querying a MetricSource for a
-// saturation-like value and returning max(0, 1 - value), clamped to [0.0, 1.0].
+// budget value and returning it clamped to [0.0, 1.0].
 //
-// If the value is at or above the configured threshold, the gate returns 0.0.
+// If the value is at or below the configured threshold, the gate returns 0.0.
 // On error or missing/invalid data, the gate returns the configured fallback budget.
 type MetricDispatchGate struct {
 	source    MetricSource
@@ -49,18 +49,19 @@ func NewMetricDispatchGate(source MetricSource, threshold float64, fallback floa
 }
 
 // NewSaturationDispatchGate creates a MetricDispatchGate for the saturation use case.
-// The fallback parameter is a saturation value (not a budget value); it is internally
-// converted to a budget via 1 - fallback and clamped to [0.0, 1.0].
+// The source should return a budget value (e.g. 1 - saturation).
+// The threshold and fallback are saturation values; they are internally converted
+// to budget values via 1 - value.
 func NewSaturationDispatchGate(source MetricSource, threshold float64, fallback float64) *MetricDispatchGate {
-	return NewMetricDispatchGate(source, threshold, 1.0-fallback)
+	return NewMetricDispatchGate(source, 1.0-threshold, 1.0-fallback)
 }
 
 // NewBudgetDispatchGate creates a MetricDispatchGate for the dispatch budget use case.
-// The source should return the combined saturation value (e.g. F_SYS + F_EPP + B).
-// The threshold is set to 1.0 (budget is zero only when fully loaded).
+// The source should return the budget value directly: (1 - F_SYS) * (1 - F_EPP) * (1 - B).
+// The threshold is set to 0.0 (gate closes only when budget reaches zero).
 // The fallback parameter is a direct budget value, clamped to [0.0, 1.0].
 func NewBudgetDispatchGate(source MetricSource, fallback float64) *MetricDispatchGate {
-	return NewMetricDispatchGate(source, 1.0, fallback)
+	return NewMetricDispatchGate(source, 0.0, fallback)
 }
 
 // Budget implements DispatchGate.
@@ -85,8 +86,8 @@ func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 		logger.V(logutil.DEFAULT).Info("Invalid metric value, using fallback value", "fallback", g.fallback, "value", value)
 		return g.fallback
 	}
-	if value >= g.threshold {
+	if value <= g.threshold {
 		return 0.0
 	}
-	return math.Min(1.0, math.Max(0.0, 1.0-value))
+	return math.Min(1.0, math.Max(0.0, value))
 }

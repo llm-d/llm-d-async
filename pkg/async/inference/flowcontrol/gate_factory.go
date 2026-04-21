@@ -50,7 +50,7 @@ func NewGateFactory(prometheusURL string) *GateFactory {
 //   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
 //     Params: pool (required), threshold (default 0.8), fallback (default 0.0)
 //   - "prometheus-budget": Queries Prometheus for dispatch budget using
-//     D = 1 - (F_SYS + F_EPP + B). Params: pool, max_sys (required),
+//     D = (1 - F_SYS) * (1 - F_EPP) * (1 - B). Params: pool, max_sys (required),
 //     baseline (default 0.05), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.

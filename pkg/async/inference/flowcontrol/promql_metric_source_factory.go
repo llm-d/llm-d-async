@@ -34,8 +34,9 @@ func NewSaturationPromQLSourceFromConfig(promConfig promapi.Config, params map[s
 		return nil, fmt.Errorf("inference pool name is required for saturation PromQL")
 	}
 
-	return NewPromQLMetricSourceFromLabels(promConfig, "inference_extension_flow_control_pool_saturation",
+	queryExpr := "1 - " + buildPromQL("inference_extension_flow_control_pool_saturation",
 		map[string]string{"inference_pool": inferencePool})
+	return NewPromQLMetricSource(promConfig, queryExpr)
 }
 
 // NewPromQLMetricSourceFromLabels constructs a PromQL instant vector selector from a metric
@@ -81,9 +82,9 @@ func NewBudgetPromQLSourceFromConfig(promConfig promapi.Config, params map[strin
 	return NewBudgetPromQL(promConfig, inferencePoolStr, maxSys, baseline)
 }
 
-// NewBudgetPromQL constructs a PromQL expression for the dispatch budget formula:
+// NewBudgetPromQL constructs a PromQL expression for the multiplicative dispatch budget:
 //
-//	F_SYS + F_EPP + B
+//	(1 - F_SYS) * (1 - F_EPP) * (1 - B)
 //
 // where:
 //   - F_SYS = inference_extension_flow_control_pool_saturation
@@ -94,9 +95,9 @@ func NewBudgetPromQL(promConfig promapi.Config, inferencePool string, maxSys flo
 		return nil, fmt.Errorf("inference pool name is required for budget PromQL")
 	}
 	label := strconv.Quote(inferencePool)
-	query := fmt.Sprintf(`inference_extension_flow_control_pool_saturation{inference_pool=%s}
-			+ on(inference_pool) (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / %g)
-			+ %g`, label, label, maxSys, baseline)
+	query := fmt.Sprintf(`(1 - inference_extension_flow_control_pool_saturation{inference_pool=%s})
+			* on(inference_pool) (1 - sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / %g)
+			* %g`, label, label, maxSys, 1-baseline)
 
 	source, err := NewPromQLMetricSource(promConfig, query)
 	if err != nil {
