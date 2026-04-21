@@ -111,8 +111,10 @@ func TestCachedMetricSource_WorksWithGates(t *testing.T) {
 	require.Equal(t, 1.0, binaryGate.Budget(ctx))
 	require.Equal(t, int32(1), inner.calls.Load())
 
-	satGate := NewSaturationMetricDispatchGateWithSource(cached, 0.8, 0.0)
-	require.Equal(t, 1.0, satGate.Budget(ctx))
+	satGate := NewSaturationDispatchGate(cached, 0.8, 0.0)
+	// Source returns 0.0; NewSaturationDispatchGate converts threshold 0.8 → budget 0.2.
+	// Since 0.0 <= 0.2, the gate returns 0.0 (closed).
+	require.Equal(t, 0.0, satGate.Budget(ctx))
 	// Still only 1 call since the cache hasn't expired.
 	require.Equal(t, int32(1), inner.calls.Load())
 }

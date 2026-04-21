@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async"
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
+	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/pubsub"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
@@ -127,12 +128,12 @@ func main() {
 		IdleConnTimeout:     90 * time.Second,
 	}
 	inferenceHTTPClient := &http.Client{Transport: inferenceTransport}
-	inferenceClient := api.NewHTTPInferenceClient(inferenceHTTPClient)
+	inferenceClient := asyncworker.NewHTTPInferenceClient(inferenceHTTPClient)
 
 	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel
 	for w := 1; w <= concurrency; w++ {
 
-		go api.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
+		go asyncworker.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
 	}
 
 	impl.Start(ctx)

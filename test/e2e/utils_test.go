@@ -13,7 +13,7 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/api"
 )
 
 const (
@@ -30,6 +30,23 @@ func enqueueMessage(ctx context.Context, rdb *redis.Client, queue string, msg ap
 		Score:  parseDeadline(msg.DeadlineUnixSec),
 		Member: string(data),
 	}).Err()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
+// enqueueMessages adds all messages to the sorted set in a single Redis
+// pipeline so they become visible atomically. This prevents the processor
+// from dequeuing early messages before the rest are enqueued.
+func enqueueMessages(ctx context.Context, rdb *redis.Client, queue string, msgs ...api.RequestMessage) {
+	pipe := rdb.Pipeline()
+	for _, msg := range msgs {
+		data, err := json.Marshal(msg)
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+		pipe.ZAdd(ctx, queue, redis.Z{
+			Score:  parseDeadline(msg.DeadlineUnixSec),
+			Member: string(data),
+		})
+	}
+	_, err := pipe.Exec(ctx)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 }
 
@@ -107,14 +124,22 @@ func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
 }
 
 func setPromMockSaturation(promMockURL string, value string) {
+	setPromMockValue(promMockURL+"/admin/saturation", value)
+}
+
+func setPromMockBudget(promMockURL string, value string) {
+	setPromMockValue(promMockURL+"/admin/budget", value)
+}
+
+func setPromMockValue(url string, value string) {
 	body, _ := json.Marshal(map[string]string{"value": value})
-	req, err := http.NewRequest(http.MethodPost, promMockURL+"/admin/saturation", bytes.NewReader(body))
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	gomega.ExpectWithOffset(2, err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	gomega.ExpectWithOffset(2, err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	gomega.ExpectWithOffset(2, resp.StatusCode).To(gomega.Equal(http.StatusOK))
 }
 
 func makeRequestMessage(id string, deadlineOffset time.Duration) api.RequestMessage {

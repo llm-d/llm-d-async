@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

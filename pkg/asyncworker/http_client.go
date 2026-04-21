@@ -1,4 +1,4 @@
-package api
+package asyncworker
 
 import (
 	"bytes"
@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 )
 
-var _ InferenceClient = (*HTTPInferenceClient)(nil)
+var _ asyncapi.InferenceClient = (*HTTPInferenceClient)(nil)
 
 // HTTPInferenceClient is the default HTTP implementation of InferenceClient.
 type HTTPInferenceClient struct {
@@ -24,8 +26,8 @@ func NewHTTPInferenceClient(client *http.Client) *HTTPInferenceClient {
 func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, headers map[string]string, payload []byte) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
 	if err != nil {
-		return nil, &ClientError{
-			ErrorCategory: ErrCategoryInvalidReq,
+		return nil, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryInvalidReq,
 			Message:       "failed to create request",
 			RawError:      err,
 		}
@@ -37,8 +39,8 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	result, err := h.client.Do(request)
 	if err != nil {
-		return nil, &ClientError{
-			ErrorCategory: ErrCategoryUnknown,
+		return nil, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryUnknown,
 			Message:       "failed to send request",
 			RawError:      err,
 		}
@@ -48,8 +50,8 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
 		// Response read errors are retryable as the request may have succeeded
-		return nil, &ClientError{
-			ErrorCategory: ErrCategoryServer,
+		return nil, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       "failed to read response",
 			RawError:      err,
 		}
@@ -57,8 +59,8 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	// Check for rate limiting / load shedding (429)
 	if result.StatusCode == 429 {
-		return body, &ClientError{
-			ErrorCategory: ErrCategoryRateLimit,
+		return body, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryRateLimit,
 			Message:       fmt.Sprintf("rate limited: status code %d", result.StatusCode),
 			RawError:      nil,
 		}
@@ -66,8 +68,8 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	// Check for client errors (4xx, non-429)
 	if result.StatusCode >= 400 && result.StatusCode < 500 {
-		return body, &ClientError{
-			ErrorCategory: ErrCategoryInvalidReq,
+		return body, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryInvalidReq,
 			Message:       fmt.Sprintf("client error: status code %d", result.StatusCode),
 			RawError:      nil,
 		}
@@ -75,8 +77,8 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	// Check for server errors (5xx)
 	if result.StatusCode >= 500 && result.StatusCode < 600 {
-		return body, &ClientError{
-			ErrorCategory: ErrCategoryServer,
+		return body, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       fmt.Sprintf("server error: status code %d", result.StatusCode),
 			RawError:      nil,
 		}

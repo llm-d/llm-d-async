@@ -89,16 +89,19 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: fmt
-fmt: ## Run go fmt against code.
+fmt: ## Run go fmt against root and producer modules.
 	go fmt ./...
+	cd producer && go fmt ./...
 
 .PHONY: vet
-vet: ## Run go vet against code.
+vet: ## Run go vet against root and producer modules.
 	go vet ./...
+	cd producer && go vet ./...
 
 .PHONY: test
-test: fmt vet setup-envtest ## Run tests.
+test: fmt vet setup-envtest ## Run tests (root module and producer submodule).
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	cd producer && go test ./... -coverprofile=cover-producer.out
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node

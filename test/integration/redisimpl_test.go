@@ -10,7 +10,7 @@ import (
 	ap "github.com/llm-d-incubation/llm-d-async/pkg/async"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
 )
 

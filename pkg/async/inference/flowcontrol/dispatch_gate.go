@@ -19,7 +19,7 @@ package flowcontrol
 import (
 	"context"
 
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/api"
+	"github.com/llm-d-incubation/llm-d-async/api"
 )
 
 var _ api.DispatchGate = DispatchGateFunc(nil)
