@@ -26,8 +26,8 @@ import (
 )
 
 // NewSaturationPromQLSourceFromConfig builds a PromQLMetricSource for the saturation use case.
-// It constructs a PromQL query for inference_extension_flow_control_pool_saturation
-// filtered by the "pool" param (required).
+// It returns a budget value (1 - saturation) by constructing a PromQL query of the form
+// "1 - inference_extension_flow_control_pool_saturation{...}", filtered by the "pool" param (required).
 func NewSaturationPromQLSourceFromConfig(promConfig promapi.Config, params map[string]string) (*PromQLMetricSource, error) {
 	inferencePool := params["pool"]
 	if inferencePool == "" {

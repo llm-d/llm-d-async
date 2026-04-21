@@ -32,8 +32,8 @@ func main() {
 
 // handleQuery returns a single Prometheus vector result. If the query contains
 // "queue_size" it is a budget gate query: the mock returns the dispatch budget D
-// directly. Otherwise it returns the plain saturation value (used by the
-// saturation gate, which expects 1 - saturation from its PromQL source).
+// directly. Otherwise it returns the saturation budget (1 - saturation),
+// matching what the saturation gate's PromQL source produces.
 //
 // The Prometheus client sends queries as POST form body, so we parse both
 // URL params and form body to find the query expression.
