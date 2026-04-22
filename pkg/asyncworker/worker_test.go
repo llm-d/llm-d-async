@@ -29,7 +29,7 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 		HttpHeaders: map[string]string{},
 		RequestURL:  "",
 	}
-	retryMessage(msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
 	if len(retryChannel) > 0 {
 		t.Errorf("Message that its deadline passed should not be retried. Got a message in the retry channel")
 		return
@@ -61,7 +61,7 @@ func TestRetryMessage_retry(t *testing.T) {
 		HttpHeaders: map[string]string{},
 		RequestURL:  "",
 	}
-	retryMessage(msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
 	if len(resultChannel) > 0 {
 		t.Errorf("Should not have any messages in the result channel")
 		return
@@ -385,7 +385,7 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Unix()), // exactly now
 		},
 	}
-	retryMessage(msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
 	if len(retryChannel) > 0 {
 		t.Errorf("secondsToDeadline==0 should not produce a retry")
 	}
@@ -449,7 +449,7 @@ func TestRetryMessage_retryAfterHonored(t *testing.T) {
 
 	// Server says wait 30s; expBackoff for retry 1 would be ~[1,2) seconds,
 	// so the Retry-After value should win.
-	retryMessage(msg, retryChannel, resultChannel, 30*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second)
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -473,7 +473,7 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 
 	// Server says wait 1s, but expBackoff at retry 5 is much larger.
 	// expBackoff should win.
-	retryMessage(msg, retryChannel, resultChannel, 1*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 1*time.Second)
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -496,7 +496,7 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	}
 
 	// Server says wait 30s, but deadline is only 5s away → deadline exceeded.
-	retryMessage(msg, retryChannel, resultChannel, 30*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second)
 	if len(retryChannel) > 0 {
 		t.Errorf("should not retry when Retry-After exceeds deadline")
 	}
@@ -555,6 +555,110 @@ func TestRateLimitRequest_WithRetryAfterHeader(t *testing.T) {
 		t.Errorf("should not get result from a 429 response, should retry")
 	case <-time.After(time.Second):
 		t.Errorf("timeout waiting for retry")
+	}
+}
+
+func TestValidateAndMarshal_cancelledCtxDoesNotBlock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Unbuffered channel: without the select guard this would block forever.
+	resultChannel := make(chan asyncapi.ResultMessage)
+
+	msg := asyncapi.RequestMessage{
+		Id:              "cancel-test",
+		DeadlineUnixSec: "not-a-number", // triggers the parse-error send path
+	}
+
+	done := make(chan struct{})
+	go func() {
+		validateAndMarshal(ctx, resultChannel, msg)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Function returned without blocking — test passes.
+	case <-time.After(2 * time.Second):
+		t.Fatal("validateAndMarshal blocked on cancelled ctx with full/unbuffered channel")
+	}
+}
+
+func TestRetryMessage_cancelledCtxDoesNotBlock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Unbuffered channels: sends would block without the select guard.
+	retryChannel := make(chan asyncapi.RetryMessage)
+	resultChannel := make(chan asyncapi.ResultMessage)
+
+	msg := asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
+			Id:              "cancel-retry-test",
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf("%d", time.Now().Add(10*time.Second).Unix()),
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		retryMessage(ctx, msg, retryChannel, resultChannel, 0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retryMessage blocked on cancelled ctx with unbuffered channels")
+	}
+}
+
+func TestWorker_cancelledCtxExitsPromptly(t *testing.T) {
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       nil,
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	// Unbuffered result channel: the worker must not block trying to send.
+	retryChannel := make(chan asyncapi.RetryMessage)
+	resultChannel := make(chan asyncapi.ResultMessage)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(100 * time.Second).Unix()
+	requestChannel <- asyncapi.EmbelishedRequestMessage{
+		RequestMessage: asyncapi.RequestMessage{
+			Id:              "worker-cancel-test",
+			CreatedUnixSec:  fmt.Sprintf("%d", time.Now().Unix()),
+			RetryCount:      0,
+			DeadlineUnixSec: fmt.Sprintf("%d", deadline),
+			Payload:         map[string]any{"model": "test", "prompt": "hi"},
+		},
+		RequestURL:  "http://localhost:30800/v1/completions",
+		HttpHeaders: map[string]string{},
+	}
+
+	// Give the worker a moment to pick up the message and attempt the send,
+	// then cancel so it must exit via the ctx.Done() branch.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker goroutine did not exit after context cancellation")
 	}
 }
 
