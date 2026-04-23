@@ -135,7 +135,7 @@ func (r *RedisMQFlow) Start(ctx context.Context) {
 
 	go r.retryWorker(ctx, r.rdb)
 
-	go resultWorker(ctx, r.rdb, r.resultChannel, *resultQueueName)
+	go r.resultWorker(ctx, *resultQueueName)
 }
 func (r *RedisMQFlow) RequestChannels() []api.RequestChannel {
 
@@ -157,35 +157,59 @@ func (r *RedisMQFlow) ResultChannel() chan api.ResultMessage {
 
 // Listening on the results channel and responsible for writing results into Redis.
 // Batches multiple results into a single Redis pipeline call to reduce round-trips.
-func resultWorker(ctx context.Context, rdb *redis.Client, resultChannel chan api.ResultMessage, resultsQueueName string) {
-	logger := log.FromContext(ctx)
+func (r *RedisMQFlow) resultWorker(ctx context.Context, resultsQueueName string) {
+	processMsg := func(flushCtx context.Context, msg api.ResultMessage) {
+		batch := r.collectResultBatch(msg)
+		r.flushResultBatch(flushCtx, batch, resultsQueueName)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			return
-
-		case msg := <-resultChannel:
-			// Collect a batch: start with the message we already received,
-			// then drain any additional available messages without blocking.
-			batch := make([]api.ResultMessage, 1, maxResultBatchSize)
-			batch[0] = msg
-			done := false
-			for len(batch) < maxResultBatchSize && !done {
+			for {
 				select {
-				case result := <-resultChannel:
-					batch = append(batch, result)
+				case msg := <-r.resultChannel:
+					processMsg(context.Background(), msg)
 				default:
-					done = true
+					return
 				}
 			}
+		case msg := <-r.resultChannel:
+			processMsg(ctx, msg)
+		}
+	}
+}
 
-			pipe := rdb.Pipeline()
-			for _, result := range batch {
-				pipe.Publish(ctx, resultsQueueName, marshalResultMessage(result))
+func (r *RedisMQFlow) collectResultBatch(first api.ResultMessage) []api.ResultMessage {
+	batch := make([]api.ResultMessage, 1, maxResultBatchSize)
+	batch[0] = first
+	for len(batch) < maxResultBatchSize {
+		select {
+		case result := <-r.resultChannel:
+			batch = append(batch, result)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
+
+func (r *RedisMQFlow) flushResultBatch(ctx context.Context, batch []api.ResultMessage, resultsQueueName string) {
+	logger := log.FromContext(ctx)
+	const maxRetries = 3
+	for attempt := range maxRetries {
+		pipe := r.rdb.Pipeline()
+		for _, result := range batch {
+			pipe.Publish(ctx, resultsQueueName, marshalResultMessage(result))
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to publish result batch to Redis",
+				"batchSize", len(batch), "attempt", attempt+1)
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
 			}
-			if _, err := pipe.Exec(ctx); err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to publish result batch to Redis", "batchSize", len(batch))
-			}
+		} else {
+			return
 		}
 	}
 }

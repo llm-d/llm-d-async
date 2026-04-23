@@ -592,6 +592,60 @@ func TestSortedSetFlow_ZeroBudget(t *testing.T) {
 	}
 }
 
+func TestSortedSetFlow_ResultRetryAfterFailure(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "retry-result-queue"
+	origQueue := *ssResultQueueName
+	*ssResultQueueName = queue
+	defer func() { *ssResultQueueName = origQueue }()
+
+	flow := &RedisSortedSetFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
+		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
+		gate:          noopGate(),
+	}
+
+	// Inject an error so the first Exec fails.
+	s.SetError("READONLY simulated failure")
+
+	go flow.resultWorker(ctx)
+
+	flow.resultChannel <- api.ResultMessage{Id: "retry-msg", Payload: "data"}
+
+	// Wait long enough for the first attempt to fail.
+	time.Sleep(150 * time.Millisecond)
+
+	// No results should be in Redis yet.
+	length, _ := rdb.LLen(ctx, queue).Result()
+	if length != 0 {
+		t.Fatalf("Expected 0 results while Redis is failing, got %d", length)
+	}
+
+	// Clear the error so subsequent retries succeed.
+	s.SetError("")
+
+	// Wait for retry to complete.
+	time.Sleep(500 * time.Millisecond)
+
+	length, _ = rdb.LLen(ctx, queue).Result()
+	if length != 1 {
+		t.Fatalf("Expected 1 result after retry, got %d", length)
+	}
+
+	raw, _ := rdb.RPop(ctx, queue).Result()
+	var msg api.ResultMessage
+	json.Unmarshal([]byte(raw), &msg) // nolint:errcheck
+	if msg.Id != "retry-msg" {
+		t.Errorf("Expected retry-msg, got %s", msg.Id)
+	}
+}
+
 func TestSortedSetFlow_PartialBudget(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

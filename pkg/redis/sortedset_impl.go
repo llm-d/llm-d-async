@@ -313,51 +313,71 @@ func (r *RedisSortedSetFlow) retryWorker(ctx context.Context) {
 // Routes results to the queue specified in request metadata, or default queue if not specified.
 // Batches multiple results into a single Redis pipeline call to reduce round-trips.
 func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
-	logger := log.FromContext(ctx)
+	processMsg := func(flushCtx context.Context, msg api.ResultMessage) {
+		batch := r.collectResultBatch(msg)
+		r.flushResultBatch(flushCtx, batch)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case msg := <-r.resultChannel:
-			// Collect a batch: start with the message we already received,
-			// then drain any additional available messages without blocking.
-			batch := make([]api.ResultMessage, 1, maxResultBatchSize)
-			batch[0] = msg
-			done := false
-			for len(batch) < maxResultBatchSize && !done {
+			for {
 				select {
-				case result := <-r.resultChannel:
-					batch = append(batch, result)
+				case msg := <-r.resultChannel:
+					processMsg(context.Background(), msg)
 				default:
-					done = true
+					return
 				}
 			}
+		case msg := <-r.resultChannel:
+			processMsg(ctx, msg)
+		}
+	}
+}
 
-			// Group by target queue and flush via pipeline.
-			defaultQueue := *ssResultQueueName
-			queued := make(map[string][]string)
-			for _, result := range batch {
-				resultQueue := defaultQueue
-				if result.Metadata != nil {
-					if customQueue, ok := result.Metadata["result_queue"]; ok && customQueue != "" {
-						resultQueue = customQueue
-					}
-				}
-				queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
-			}
+func (r *RedisSortedSetFlow) collectResultBatch(first api.ResultMessage) []api.ResultMessage {
+	batch := make([]api.ResultMessage, 1, maxResultBatchSize)
+	batch[0] = first
+	for len(batch) < maxResultBatchSize {
+		select {
+		case result := <-r.resultChannel:
+			batch = append(batch, result)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
 
-			pipe := r.rdb.Pipeline()
-			for queue, msgs := range queued {
-				for _, msgStr := range msgs {
-					pipe.LPush(ctx, queue, msgStr)
-				}
+func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.ResultMessage) {
+	logger := log.FromContext(ctx)
+	defaultQueue := *ssResultQueueName
+	queued := make(map[string][]string)
+	for _, result := range batch {
+		resultQueue := defaultQueue
+		if customQueue := result.Metadata["result_queue"]; customQueue != "" {
+			resultQueue = customQueue
+		}
+		queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
+	}
+
+	const maxRetries = 3
+	for attempt := range maxRetries {
+		pipe := r.rdb.Pipeline()
+		for queue, msgs := range queued {
+			for _, msgStr := range msgs {
+				pipe.LPush(ctx, queue, msgStr)
 			}
-			if _, err := pipe.Exec(ctx); err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to push result batch to Redis", "batchSize", len(batch))
-			} else {
-				logger.V(logutil.DEBUG).Info("Pushed result batch", "batchSize", len(batch))
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to push result batch to Redis",
+				"batchSize", len(batch), "attempt", attempt+1)
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
 			}
+		} else {
+			logger.V(logutil.DEBUG).Info("Pushed result batch", "batchSize", len(batch))
+			return
 		}
 	}
 }

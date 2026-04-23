@@ -13,6 +13,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+func newTestMQFlow(rdb *redis.Client) *RedisMQFlow {
+	return &RedisMQFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
+	}
+}
+
 func TestPubsubResultWorker_BatchPublish(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()
@@ -23,7 +30,7 @@ func TestPubsubResultWorker_BatchPublish(t *testing.T) {
 	defer cancel()
 
 	queue := "result-pubsub-queue"
-	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+	flow := newTestMQFlow(rdb)
 
 	// Subscribe so published messages are captured.
 	sub := rdb.Subscribe(ctx, queue)
@@ -34,13 +41,13 @@ func TestPubsubResultWorker_BatchPublish(t *testing.T) {
 	// so they are all available for a single batch drain.
 	numMessages := 5
 	for i := 0; i < numMessages; i++ {
-		resultCh <- api.ResultMessage{
+		flow.resultChannel <- api.ResultMessage{
 			Id:      "msg-" + string(rune('A'+i)),
 			Payload: "payload-" + string(rune('A'+i)),
 		}
 	}
 
-	go resultWorker(ctx, rdb, resultCh, queue)
+	go flow.resultWorker(ctx, queue)
 
 	received := make(map[string]bool)
 	timeout := time.After(2 * time.Second)
@@ -75,16 +82,16 @@ func TestPubsubResultWorker_SingleMessage(t *testing.T) {
 	defer cancel()
 
 	queue := "result-single-queue"
-	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+	flow := newTestMQFlow(rdb)
 
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
 	pubsubCh := sub.Channel()
 
-	go resultWorker(ctx, rdb, resultCh, queue)
+	go flow.resultWorker(ctx, queue)
 
 	// Send a single message — should be flushed immediately as a batch of 1.
-	resultCh <- api.ResultMessage{Id: "solo", Payload: "data"}
+	flow.resultChannel <- api.ResultMessage{Id: "solo", Payload: "data"}
 
 	select {
 	case msg := <-pubsubCh:
@@ -121,11 +128,11 @@ func TestPubsubResultWorker_ContextCancellation(t *testing.T) {
 	defer rdb.Close() // nolint:errcheck
 
 	ctx, cancel := context.WithCancel(context.Background())
-	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+	flow := newTestMQFlow(rdb)
 
 	done := make(chan bool)
 	go func() {
-		resultWorker(ctx, rdb, resultCh, "cancel-queue")
+		flow.resultWorker(ctx, "cancel-queue")
 		done <- true
 	}()
 
@@ -150,7 +157,7 @@ func TestPubsubResultWorker_BatchSizeCap(t *testing.T) {
 	defer cancel()
 
 	queue := "batch-cap-queue"
-	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+	flow := newTestMQFlow(rdb)
 
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
@@ -160,13 +167,13 @@ func TestPubsubResultWorker_BatchSizeCap(t *testing.T) {
 	// deliver all of them across multiple pipeline flushes.
 	totalMessages := maxResultBatchSize + 10
 	for i := 0; i < totalMessages; i++ {
-		resultCh <- api.ResultMessage{
+		flow.resultChannel <- api.ResultMessage{
 			Id:      "cap-" + strconv.Itoa(i),
 			Payload: "data",
 		}
 	}
 
-	go resultWorker(ctx, rdb, resultCh, queue)
+	go flow.resultWorker(ctx, queue)
 
 	received := make(map[string]bool)
 	timeout := time.After(3 * time.Second)
@@ -194,13 +201,13 @@ func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
 	defer cancel()
 
 	queue := "concurrent-queue"
-	resultCh := make(chan api.ResultMessage, resultChannelBuffer)
+	flow := newTestMQFlow(rdb)
 
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
 	pubsubCh := sub.Channel()
 
-	go resultWorker(ctx, rdb, resultCh, queue)
+	go flow.resultWorker(ctx, queue)
 
 	// Simulate multiple inference workers sending results concurrently.
 	numProducers := 8
@@ -213,7 +220,7 @@ func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
 		go func(producerID int) {
 			defer wg.Done()
 			for i := 0; i < msgsPerProducer; i++ {
-				resultCh <- api.ResultMessage{
+				flow.resultChannel <- api.ResultMessage{
 					Id:      "p" + strconv.Itoa(producerID) + "-" + strconv.Itoa(i),
 					Payload: "data",
 				}
@@ -238,6 +245,49 @@ func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
 		case <-timeout:
 			t.Fatalf("Timeout: received only %d/%d messages", len(received), totalMessages)
 		}
+	}
+}
+
+func TestPubsubResultWorker_RetryAfterFailure(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	queue := "retry-pubsub-queue"
+	flow := newTestMQFlow(rdb)
+
+	sub := rdb.Subscribe(ctx, queue)
+	defer sub.Close() // nolint:errcheck
+	pubsubCh := sub.Channel()
+
+	// Start worker, then inject error so first Exec fails.
+	go flow.resultWorker(ctx, queue)
+	time.Sleep(50 * time.Millisecond)
+
+	s.SetError("READONLY simulated failure")
+	flow.resultChannel <- api.ResultMessage{Id: "retry-msg", Payload: "data"}
+
+	// Wait for the first attempt to fail.
+	time.Sleep(150 * time.Millisecond)
+
+	// Clear error so retry succeeds.
+	s.SetError("")
+
+	select {
+	case msg := <-pubsubCh:
+		var rm api.ResultMessage
+		if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
+			t.Fatalf("Unmarshal error: %v", err)
+		}
+		if rm.Id != "retry-msg" {
+			t.Errorf("Expected retry-msg, got %s", rm.Id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for retried message")
 	}
 }
 
