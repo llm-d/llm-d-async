@@ -22,9 +22,9 @@ const (
 	// resultChannelBuffer decouples inference workers from the result writer.
 	// Workers can send results without blocking until the buffer is full.
 	resultChannelBuffer = 64
-	// maxResultBatchSize is the maximum number of results flushed in a single
+	// maxBatchSize is the maximum number of messages flushed in a single
 	// Redis pipeline call.
-	maxResultBatchSize = 32
+	maxBatchSize = 32
 )
 
 var (
@@ -63,6 +63,20 @@ if #items > 0 then
 end
 return items
 `)
+
+func drainBatch[T any](first T, channel <-chan T, maxBatchSize int) []T {
+	batch := make([]T, 1, maxBatchSize)
+	batch[0] = first
+	for len(batch) < maxBatchSize {
+		select {
+		case item := <-channel:
+			batch = append(batch, item)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
 
 type QueueConfig struct {
 	QueueName          string `json:"queue_name"`
@@ -159,7 +173,7 @@ func (r *RedisMQFlow) ResultChannel() chan api.ResultMessage {
 // Batches multiple results into a single Redis pipeline call to reduce round-trips.
 func (r *RedisMQFlow) resultWorker(ctx context.Context, resultsQueueName string) {
 	processMsg := func(flushCtx context.Context, msg api.ResultMessage) {
-		batch := r.collectResultBatch(msg)
+		batch := drainBatch(msg, r.resultChannel, maxBatchSize)
 		r.flushResultBatch(flushCtx, batch, resultsQueueName)
 	}
 
@@ -178,20 +192,6 @@ func (r *RedisMQFlow) resultWorker(ctx context.Context, resultsQueueName string)
 			processMsg(ctx, msg)
 		}
 	}
-}
-
-func (r *RedisMQFlow) collectResultBatch(first api.ResultMessage) []api.ResultMessage {
-	batch := make([]api.ResultMessage, 1, maxResultBatchSize)
-	batch[0] = first
-	for len(batch) < maxResultBatchSize {
-		select {
-		case result := <-r.resultChannel:
-			batch = append(batch, result)
-		default:
-			return batch
-		}
-	}
-	return batch
 }
 
 func (r *RedisMQFlow) flushResultBatch(ctx context.Context, batch []api.ResultMessage, resultsQueueName string) {
@@ -319,7 +319,7 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 					break
 				}
 
-				for _, msg := range results {
+				for i, msg := range results {
 					var message api.RequestMessage
 					err := json.Unmarshal([]byte(msg), &message)
 					if err != nil {
@@ -333,11 +333,10 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 						continue
 					}
 
-					// TODO: We probably want to write here back to the request queue/channel in Redis. Adding the msg to the
-					// golang channel directly is not that wise as this might be blocking.
 					select {
 					case msgChannel <- message:
 					case <-ctx.Done():
+						r.requeueRetryMessages(rdb, results[i:])
 						return
 					}
 				}
@@ -345,7 +344,32 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 			time.Sleep(time.Second)
 		}
 	}
+}
 
+// requeueRetryMessages puts undelivered messages back into the retry sorted set.
+// Called only after ctx is cancelled, so context.Background() is used for Redis calls.
+func (r *RedisMQFlow) requeueRetryMessages(rdb *redis.Client, messages []string) {
+	if len(messages) == 0 {
+		return
+	}
+	logger := log.FromContext(context.Background())
+	score := float64(time.Now().Unix())
+	const maxRetries = 3
+	for attempt := range maxRetries {
+		pipe := rdb.Pipeline()
+		for _, msg := range messages {
+			pipe.ZAdd(context.Background(), *retryQueueName, redis.Z{Score: score, Member: msg})
+		}
+		if _, err := pipe.Exec(context.Background()); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to requeue retry messages on shutdown",
+				"count", len(messages), "attempt", attempt+1)
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
+			}
+		} else {
+			return
+		}
+	}
 }
 
 // popDueRetryMessages atomically pops up to limit retry messages whose score is <= nowUnixSec.

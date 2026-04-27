@@ -646,6 +646,109 @@ func TestSortedSetFlow_ResultRetryAfterFailure(t *testing.T) {
 	}
 }
 
+func TestSortedSetFlow_RetryWorkerDrainsOnShutdown(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "retry-drain-queue"
+	const totalMessages = maxBatchSize + 10
+	flow := &RedisSortedSetFlow{
+		rdb:          rdb,
+		retryChannel: make(chan api.RetryMessage, totalMessages),
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+	}
+
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		flow.retryWorker(workerCtx)
+		close(done)
+	}()
+
+	// Buffer more messages than maxBatchSize so the drain path
+	// exercises multiple pipeline flushes.
+	for i := 0; i < totalMessages; i++ {
+		flow.retryChannel <- api.RetryMessage{
+			EmbelishedRequestMessage: api.EmbelishedRequestMessage{
+				RequestMessage: api.RequestMessage{
+					Id:              "drain-" + strconv.Itoa(i),
+					CreatedUnixSec:  strconv.FormatInt(time.Now().Unix(), 10),
+					DeadlineUnixSec: "9999999999",
+				},
+				Metadata: map[string]string{SORTEDSET_QUEUE_NAME_KEY: queue},
+			},
+			BackoffDurationSeconds: 0,
+		}
+	}
+	workerCancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retryWorker did not stop after context cancellation")
+	}
+
+	count, err := rdb.ZCard(ctx, queue).Result()
+	if err != nil {
+		t.Fatalf("ZCard error: %v", err)
+	}
+	if int(count) != totalMessages {
+		t.Fatalf("Expected %d retry messages flushed on shutdown, got %d", totalMessages, count)
+	}
+}
+
+func TestSortedSetFlow_RetryBatchAfterFailure(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "retry-batch-queue"
+	flow := &RedisSortedSetFlow{
+		rdb:          rdb,
+		retryChannel: make(chan api.RetryMessage, 10),
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+	}
+
+	// Inject an error so the first pipeline flush fails.
+	s.SetError("READONLY simulated failure")
+	go flow.retryWorker(ctx)
+
+	flow.retryChannel <- api.RetryMessage{
+		EmbelishedRequestMessage: api.EmbelishedRequestMessage{
+			RequestMessage: api.RequestMessage{
+				Id:              "retry-batch-msg",
+				CreatedUnixSec:  strconv.FormatInt(time.Now().Unix(), 10),
+				DeadlineUnixSec: "9999999999",
+			},
+			Metadata: map[string]string{SORTEDSET_QUEUE_NAME_KEY: queue},
+		},
+		BackoffDurationSeconds: 0,
+	}
+
+	// Keep Redis failing long enough for early attempts to fail.
+	time.Sleep(150 * time.Millisecond)
+
+	// Clear the error so the next retry attempt succeeds.
+	s.SetError("")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		count, err := rdb.ZCard(ctx, queue).Result()
+		if err == nil && count == 1 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("Expected retry message to be enqueued after transient Redis failure")
+}
+
 func TestSortedSetFlow_PartialBudget(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

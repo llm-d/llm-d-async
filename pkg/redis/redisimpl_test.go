@@ -163,9 +163,9 @@ func TestPubsubResultWorker_BatchSizeCap(t *testing.T) {
 	defer sub.Close() // nolint:errcheck
 	pubsubCh := sub.Channel()
 
-	// Send more than maxResultBatchSize messages. The worker should still
+	// Send more than maxBatchSize messages. The worker should still
 	// deliver all of them across multiple pipeline flushes.
-	totalMessages := maxResultBatchSize + 10
+	totalMessages := maxBatchSize + 10
 	for i := 0; i < totalMessages; i++ {
 		flow.resultChannel <- api.ResultMessage{
 			Id:      "cap-" + strconv.Itoa(i),
@@ -288,6 +288,73 @@ func TestPubsubResultWorker_RetryAfterFailure(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for retried message")
+	}
+}
+
+func TestMQRetryWorker_RequeuesOnShutdown(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	retryQueue := *retryQueueName
+	queueName := "req-queue"
+
+	// Use a blocking (unbuffered) request channel so the worker blocks on send.
+	reqCh := make(chan api.RequestMessage)
+	flow := &RedisMQFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
+		retryChannel:  make(chan api.RetryMessage),
+		requestChannels: []RequestChannelData{{
+			requestChannel: api.RequestChannel{Channel: reqCh},
+			queueName:      queueName,
+		}},
+	}
+
+	// Seed the retry sorted set with 3 messages that are immediately due.
+	for i := 0; i < 3; i++ {
+		msg := api.RequestMessage{
+			Id:       "retry-" + strconv.Itoa(i),
+			Metadata: map[string]string{QUEUE_NAME_KEY: queueName},
+		}
+		bytes, _ := json.Marshal(msg)
+		rdb.ZAdd(ctx, retryQueue, redis.Z{Score: float64(time.Now().Unix() - 1), Member: string(bytes)})
+	}
+
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		flow.retryWorker(workerCtx, rdb)
+		close(done)
+	}()
+
+	// Consume exactly one message so the worker can pop all three from Redis.
+	select {
+	case <-reqCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for first message")
+	}
+
+	// Cancel while the worker is blocked sending the second message.
+	workerCancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retryWorker did not stop after context cancellation")
+	}
+
+	// The remaining messages should have been requeued to the retry sorted set.
+	count, err := rdb.ZCard(ctx, retryQueue).Result()
+	if err != nil {
+		t.Fatalf("ZCard error: %v", err)
+	}
+	if count == 0 {
+		t.Fatal("Expected requeued retry messages, got 0")
 	}
 }
 

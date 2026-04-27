@@ -283,29 +283,81 @@ func (r *RedisSortedSetFlow) parseMessage(z redis.Z, logger logr.Logger) (api.Re
 
 // Re-queues failed messages with exponential backoff
 func (r *RedisSortedSetFlow) retryWorker(ctx context.Context) {
-	logger := log.FromContext(ctx)
+	processMsg := func(processCtx context.Context, msg api.RetryMessage) {
+		batch := drainBatch(msg, r.retryChannel, maxBatchSize)
+		r.flushRetryBatch(processCtx, batch)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			for {
+				select {
+				case msg := <-r.retryChannel:
+					processMsg(context.Background(), msg)
+				default:
+					return
+				}
+			}
 		case msg := <-r.retryChannel:
-			queueName := msg.Metadata[SORTEDSET_QUEUE_NAME_KEY]
-			if queueName == "" {
-				queueName = *ssRequestQueueName
-			}
-
-			bytes, err := json.Marshal(msg.RequestMessage)
-			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to marshal retry")
-				continue
-			}
-
-			retryScore := float64(time.Now().Unix()) + msg.BackoffDurationSeconds
-			if err := r.rdb.ZAdd(ctx, queueName, redis.Z{Score: retryScore, Member: string(bytes)}).Err(); err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to add retry")
-			}
+			processMsg(ctx, msg)
 		}
+	}
+}
+
+func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []api.RetryMessage) {
+	if len(batch) == 0 {
+		return
+	}
+
+	logger := log.FromContext(ctx)
+	type retryEntry struct {
+		queue string
+		value redis.Z
+	}
+
+	entries := make([]retryEntry, 0, len(batch))
+	for _, msg := range batch {
+		queueName := msg.Metadata[SORTEDSET_QUEUE_NAME_KEY]
+		if queueName == "" {
+			queueName = *ssRequestQueueName
+		}
+
+		bytes, err := json.Marshal(msg.RequestMessage)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to marshal retry")
+			continue
+		}
+
+		retryScore := float64(time.Now().Unix()) + msg.BackoffDurationSeconds
+		entries = append(entries, retryEntry{
+			queue: queueName,
+			value: redis.Z{Score: retryScore, Member: string(bytes)},
+		})
+	}
+
+	const maxRetries = 3
+	for attempt := range maxRetries {
+		execCtx := ctx
+		if execCtx.Err() != nil {
+			execCtx = context.Background()
+		}
+
+		pipe := r.rdb.Pipeline()
+		for _, entry := range entries {
+			pipe.ZAdd(execCtx, entry.queue, entry.value)
+		}
+		if _, err := pipe.Exec(execCtx); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to add retry batch",
+				"batchSize", len(entries), "attempt", attempt+1)
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
+			}
+		} else {
+			logger.V(logutil.DEBUG).Info("Pushed retry batch", "batchSize", len(batch))
+			return
+		}
+
 	}
 }
 
@@ -314,7 +366,7 @@ func (r *RedisSortedSetFlow) retryWorker(ctx context.Context) {
 // Batches multiple results into a single Redis pipeline call to reduce round-trips.
 func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 	processMsg := func(flushCtx context.Context, msg api.ResultMessage) {
-		batch := r.collectResultBatch(msg)
+		batch := drainBatch(msg, r.resultChannel, maxBatchSize)
 		r.flushResultBatch(flushCtx, batch)
 	}
 
@@ -335,20 +387,6 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 	}
 }
 
-func (r *RedisSortedSetFlow) collectResultBatch(first api.ResultMessage) []api.ResultMessage {
-	batch := make([]api.ResultMessage, 1, maxResultBatchSize)
-	batch[0] = first
-	for len(batch) < maxResultBatchSize {
-		select {
-		case result := <-r.resultChannel:
-			batch = append(batch, result)
-		default:
-			return batch
-		}
-	}
-	return batch
-}
-
 func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.ResultMessage) {
 	logger := log.FromContext(ctx)
 	defaultQueue := *ssResultQueueName
@@ -363,13 +401,18 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 
 	const maxRetries = 3
 	for attempt := range maxRetries {
+		execCtx := ctx
+		if execCtx.Err() != nil {
+			execCtx = context.Background()
+		}
+
 		pipe := r.rdb.Pipeline()
 		for queue, msgs := range queued {
 			for _, msgStr := range msgs {
-				pipe.LPush(ctx, queue, msgStr)
+				pipe.LPush(execCtx, queue, msgStr)
 			}
 		}
-		if _, err := pipe.Exec(ctx); err != nil {
+		if _, err := pipe.Exec(execCtx); err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to push result batch to Redis",
 				"batchSize", len(batch), "attempt", attempt+1)
 			if attempt < maxRetries-1 {
