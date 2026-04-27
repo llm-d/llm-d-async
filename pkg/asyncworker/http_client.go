@@ -93,7 +93,7 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 // parseRetryAfter parses a Retry-After header value, which can be either
 // a number of seconds (e.g. "120") or an HTTP-date (e.g. "Thu, 01 Dec 1994 16:00:00 GMT").
-// Returns the parsed duration and true if successful, or (0, false) if empty or unparseable.
+// Returns the parsed duration and true if successful, or (0, false) if empty or unparsable.
 func parseRetryAfter(value string) (time.Duration, bool) {
 	if value == "" {
 		return 0, false
