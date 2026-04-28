@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"strconv"
 	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
@@ -31,11 +30,14 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 			logger.V(logutil.DEFAULT).Info("Worker finishing.")
 			return
 		case msg := <-requestChannel:
+			if msg.InternalRequest == nil || msg.PublicRequest == nil {
+				continue
+			}
 			if msg.RetryCount == 0 {
 				// Only count first attempt as a new request.
 				metrics.AsyncReqs.Inc()
 			}
-			payloadBytes := validateAndMarshal(ctx, resultChannel, msg.RequestMessage)
+			payloadBytes := validateAndMarshal(ctx, resultChannel, msg)
 			if payloadBytes == nil {
 				continue
 			}
@@ -45,8 +47,8 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 				// Create a per-request context bounded by both the message deadline
 				// and the configured request timeout, whichever comes first.
 				reqDeadline := time.Now().Add(requestTimeout)
-				if deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64); err == nil {
-					if msgDeadline := time.Unix(deadline, 0); msgDeadline.Before(reqDeadline) {
+				if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
+					if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
 						reqDeadline = msgDeadline
 					}
 				}
@@ -61,9 +63,10 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 					metrics.SuccessfulReqs.Inc()
 					select {
 					case resultChannel <- asyncapi.ResultMessage{
-						Id:       msg.Id,
+						Id:       msg.PublicRequest.ReqId(),
 						Payload:  string(responseBody),
-						Metadata: msg.Metadata,
+						Routing:  msg.InternalRouting,
+						Metadata: msg.PublicRequest.ReqMetadata(),
 					}:
 					case <-ctx.Done():
 					}
@@ -76,7 +79,7 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 					// Unknown error type or fatal error - fail immediately
 					metrics.FailedReqs.Inc()
 					select {
-					case resultChannel <- CreateErrorResultMessage(msg.RequestMessage, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
+					case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
 					case <-ctx.Done():
 					}
 					return
@@ -100,12 +103,16 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 }
 
 // parsing and validating payload. On failure puts an error msg on the result-channel and returns nil
-func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultMessage, msg asyncapi.RequestMessage) []byte {
-	deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64)
-	if err != nil {
+func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultMessage, msg asyncapi.EmbelishedRequestMessage) []byte {
+	if msg.PublicRequest == nil {
+		return nil
+	}
+	r := msg.PublicRequest
+	deadline := r.ReqDeadline()
+	if deadline <= 0 {
 		metrics.FailedReqs.Inc()
 		select {
-		case resultChannel <- CreateErrorResultMessage(msg, "Failed to parse deadline, should be in Unix seconds."):
+		case resultChannel <- CreateErrorResultMessage(r, msg.InternalRouting, "Failed: deadline is missing or invalid (Unix seconds)."):
 		case <-ctx.Done():
 		}
 		return nil
@@ -114,17 +121,17 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	if deadline < time.Now().Unix() {
 		metrics.ExceededDeadlineReqs.Inc()
 		select {
-		case resultChannel <- CreateDeadlineExceededResultMessage(msg):
+		case resultChannel <- CreateDeadlineExceededResultMessage(r, msg.InternalRouting):
 		case <-ctx.Done():
 		}
 		return nil
 	}
 
-	payloadBytes, err := json.Marshal(msg.Payload)
+	payloadBytes, err := json.Marshal(r.ReqPayload())
 	if err != nil {
 		metrics.FailedReqs.Inc()
 		select {
-		case resultChannel <- CreateErrorResultMessage(msg, fmt.Sprintf("Failed to marshal message's payload: %s", err.Error())):
+		case resultChannel <- CreateErrorResultMessage(r, msg.InternalRouting, fmt.Sprintf("Failed to marshal message's payload: %s", err.Error())):
 		case <-ctx.Done():
 		}
 		return nil
@@ -134,19 +141,15 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 
 // If it is not after deadline, just publish again.
 func retryMessage(ctx context.Context, msg asyncapi.EmbelishedRequestMessage, retryChannel chan asyncapi.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration) {
-	deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64)
-	if err != nil { // Can't really happen because this was already parsed in the past. But we don't care to have this branch.
-		select {
-		case resultChannel <- CreateErrorResultMessage(msg.RequestMessage, "Failed to parse deadline. Should be in Unix time"):
-		case <-ctx.Done():
-		}
+	if msg.PublicRequest == nil {
 		return
 	}
+	deadline := msg.PublicRequest.ReqDeadline()
 	secondsToDeadline := deadline - time.Now().Unix()
 	if secondsToDeadline <= 0 {
 		metrics.ExceededDeadlineReqs.Inc()
 		select {
-		case resultChannel <- CreateDeadlineExceededResultMessage(msg.RequestMessage):
+		case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
 		case <-ctx.Done():
 		}
 		return
@@ -162,7 +165,7 @@ func retryMessage(ctx context.Context, msg asyncapi.EmbelishedRequestMessage, re
 	if finalDuration >= float64(secondsToDeadline) {
 		metrics.ExceededDeadlineReqs.Inc()
 		select {
-		case resultChannel <- CreateDeadlineExceededResultMessage(msg.RequestMessage):
+		case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
 		case <-ctx.Done():
 		}
 		return
@@ -178,22 +181,25 @@ func retryMessage(ctx context.Context, msg asyncapi.EmbelishedRequestMessage, re
 	case <-ctx.Done():
 	}
 }
-func CreateErrorResultMessage(msg asyncapi.RequestMessage, errMsg string) asyncapi.ResultMessage {
+
+// CreateErrorResultMessage builds a ResultMessage using the public request identity;
+// metadata is read directly from req.ReqMetadata().
+func CreateErrorResultMessage(req asyncapi.Request, routing asyncapi.InternalRouting, errMsg string) asyncapi.ResultMessage {
 	errorPayload := map[string]string{"error": errMsg}
 	payloadBytes, err := json.Marshal(errorPayload)
 	if err != nil {
-		// Fallback to a simple error message if marshaling fails
 		payloadBytes = []byte(`{"error": "internal error"}`)
 	}
 	return asyncapi.ResultMessage{
-		Id:       msg.Id,
+		Id:       req.ReqId(),
 		Payload:  string(payloadBytes),
-		Metadata: msg.Metadata,
+		Routing:  routing,
+		Metadata: req.ReqMetadata(),
 	}
 }
 
-func CreateDeadlineExceededResultMessage(msg asyncapi.RequestMessage) asyncapi.ResultMessage {
-	return CreateErrorResultMessage(msg, "deadline exceeded")
+func CreateDeadlineExceededResultMessage(req asyncapi.Request, routing asyncapi.InternalRouting) asyncapi.ResultMessage {
+	return CreateErrorResultMessage(req, routing, "deadline exceeded")
 }
 
 // https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/

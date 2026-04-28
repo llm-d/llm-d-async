@@ -16,8 +16,6 @@ import (
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
 
-const QUEUE_NAME_KEY = "queue_name"
-
 const (
 	// resultChannelBuffer decouples inference workers from the result writer.
 	// Workers can send results without blocking until the buffer is full.
@@ -122,7 +120,7 @@ func NewRedisMQFlow() *RedisMQFlow {
 	var channels []RequestChannelData
 
 	for _, cfg := range configs {
-		ch := make(chan api.RequestMessage)
+		ch := make(chan *api.InternalRequest)
 
 		channels = append(channels, RequestChannelData{api.RequestChannel{
 			Channel:            ch,
@@ -224,7 +222,7 @@ func marshalResultMessage(msg api.ResultMessage) string {
 }
 
 // pulls from Redis channel and put in the request channel
-func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan api.RequestMessage, queueName string) {
+func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string) {
 	logger := log.FromContext(ctx)
 	sub := rdb.Subscribe(ctx, queueName)
 	defer sub.Close() // nolint:errcheck
@@ -236,19 +234,18 @@ func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan api.R
 			return
 
 		case rmsg := <-ch:
-			var msg api.RequestMessage
+			var ir api.InternalRequest
 
-			err := json.Unmarshal([]byte(rmsg.Payload), &msg)
+			err := json.Unmarshal([]byte(rmsg.Payload), &ir)
 			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to unmarshal message from request channel")
 				continue // skip this message
-
 			}
-			if msg.Metadata == nil {
-				msg.Metadata = make(map[string]string)
+			if ir.PublicRequest == nil {
+				continue
 			}
-			msg.Metadata[QUEUE_NAME_KEY] = queueName
-			msgChannel <- msg
+			ir.RequestQueueName = queueName
+			msgChannel <- &ir
 		}
 	}
 
@@ -270,8 +267,11 @@ func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel ch
 			return
 
 		case msg := <-retryChannel:
+			if msg.InternalRequest == nil {
+				continue
+			}
 			score := float64(time.Now().Unix()) + msg.BackoffDurationSeconds
-			bytes, err := json.Marshal(msg.RequestMessage)
+			bytes, err := json.Marshal(msg.InternalRequest)
 			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to marshal message for retry in Redis")
 				continue // skip this message.
@@ -294,7 +294,7 @@ func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel ch
 func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 	logger := log.FromContext(ctx)
 	// create a map of queuename to channel based on requestchannels
-	msgChannels := make(map[string]chan api.RequestMessage)
+	msgChannels := make(map[string]chan *api.InternalRequest)
 	for _, channelData := range r.requestChannels {
 		msgChannels[channelData.queueName] = channelData.requestChannel.Channel
 	}
@@ -320,21 +320,24 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 				}
 
 				for i, msg := range results {
-					var message api.RequestMessage
+					var message api.InternalRequest
 					err := json.Unmarshal([]byte(msg), &message)
 					if err != nil {
 						logger.V(logutil.DEFAULT).Error(err, "Failed to unmarshal retry message")
 						continue
 					}
-					queueName := message.Metadata[QUEUE_NAME_KEY]
+					if message.PublicRequest == nil {
+						continue
+					}
+					queueName := message.RequestQueueName
 					msgChannel, ok := msgChannels[queueName]
 					if !ok {
-						logger.V(logutil.DEFAULT).Info("Unknown retry queue, dropping message", "queueName", queueName, "messageId", message.Id)
+						logger.V(logutil.DEFAULT).Info("Unknown retry queue, dropping message", "queueName", queueName, "messageId", message.PublicRequest.ReqId())
 						continue
 					}
 
 					select {
-					case msgChannel <- message:
+					case msgChannel <- &message:
 					case <-ctx.Done():
 						r.requeueRetryMessages(rdb, results[i:])
 						return

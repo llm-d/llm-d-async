@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -18,8 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
-
-const SORTEDSET_QUEUE_NAME_KEY = "queue_name"
 
 var (
 	ssIGWBaseURL         = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
@@ -125,7 +122,7 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) *RedisSortedSetFlow {
 		}
 
 		ch := api.RequestChannel{
-			Channel:            make(chan api.RequestMessage),
+			Channel:            make(chan *api.InternalRequest),
 			InferenceObjective: cfg.InferenceObjective,
 			RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
 			IGWBaseURl:         util.NormalizeBaseURL(cfg.IGWBaseURl),
@@ -199,7 +196,7 @@ func (r *RedisSortedSetFlow) Characteristics() api.Characteristics {
 }
 
 // Polls sorted set and processes messages by deadline priority (earliest first)
-func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan api.RequestMessage, queueName string) {
+func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string) {
 	logger := log.FromContext(ctx)
 	ticker := time.NewTicker(r.pollInterval)
 	defer ticker.Stop()
@@ -226,7 +223,7 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 	}
 }
 
-func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan api.RequestMessage, queueName string, gate api.DispatchGate, logger logr.Logger) {
+func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, gate api.DispatchGate, logger logr.Logger) {
 	currentTime := float64(time.Now().Unix())
 
 	budget := gate.Budget(ctx)
@@ -242,43 +239,51 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			break
 		}
 
-		msg, deadline, ok := r.parseMessage(results[0], logger)
+		ir, deadline, ok := r.parseMessage(results[0], logger)
 		if !ok {
 			continue
 		}
-
+		if ir == nil {
+			continue
+		}
+		rview := ir.PublicRequest
+		if rview == nil {
+			continue
+		}
 		if deadline < currentTime {
-			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", msg.Id)
+			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", rview.ReqId())
 			continue
 		}
 
-		if msg.Metadata == nil {
-			msg.Metadata = make(map[string]string)
+		if ir.RequestQueueName == "" {
+			ir.RequestQueueName = queueName
 		}
-		msg.Metadata[SORTEDSET_QUEUE_NAME_KEY] = queueName
 
 		select {
-		case msgChannel <- msg:
+		case msgChannel <- ir:
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func (r *RedisSortedSetFlow) parseMessage(z redis.Z, logger logr.Logger) (api.RequestMessage, float64, bool) {
-	var msg api.RequestMessage
-	if err := json.Unmarshal([]byte(z.Member.(string)), &msg); err != nil {
+func (r *RedisSortedSetFlow) parseMessage(z redis.Z, logger logr.Logger) (*api.InternalRequest, float64, bool) {
+	var ir api.InternalRequest
+	if err := json.Unmarshal([]byte(z.Member.(string)), &ir); err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Failed to unmarshal message")
-		return msg, 0, false
+		return nil, 0, false
+	}
+	if ir.PublicRequest == nil {
+		logger.V(logutil.DEFAULT).Error(nil, "Missing specific request in message", "id", z.Member)
+		return nil, 0, false
+	}
+	deadline := ir.PublicRequest.ReqDeadline()
+	if deadline <= 0 {
+		logger.V(logutil.DEFAULT).Error(nil, "Invalid deadline", "id", ir.PublicRequest.ReqId())
+		return &ir, 0, false
 	}
 
-	deadline, err := strconv.ParseInt(msg.DeadlineUnixSec, 10, 64)
-	if err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "Invalid deadline", "id", msg.Id)
-		return msg, 0, false
-	}
-
-	return msg, float64(deadline), true
+	return &ir, float64(deadline), true
 }
 
 // Re-queues failed messages with exponential backoff
@@ -318,12 +323,16 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []api.Re
 
 	entries := make([]retryEntry, 0, len(batch))
 	for _, msg := range batch {
-		queueName := msg.Metadata[SORTEDSET_QUEUE_NAME_KEY]
+		queueName := msg.RequestQueueName
 		if queueName == "" {
 			queueName = *ssRequestQueueName
 		}
 
-		bytes, err := json.Marshal(msg.RequestMessage)
+		if msg.InternalRequest == nil {
+			logger.V(logutil.DEFAULT).Error(nil, "Retry message missing InternalRequest")
+			continue
+		}
+		bytes, err := json.Marshal(msg.InternalRequest)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to marshal retry")
 			continue
@@ -393,8 +402,8 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 	queued := make(map[string][]string)
 	for _, result := range batch {
 		resultQueue := defaultQueue
-		if customQueue := result.Metadata["result_queue"]; customQueue != "" {
-			resultQueue = customQueue
+		if result.Routing.ResultQueueName != "" {
+			resultQueue = result.Routing.ResultQueueName
 		}
 		queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
 	}

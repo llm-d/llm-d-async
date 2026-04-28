@@ -3,7 +3,6 @@ package producer
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"testing"
 	"time"
 
@@ -42,10 +41,10 @@ func TestSubmitRequest(t *testing.T) {
 
 	ctx := context.Background()
 
-	req := api.RequestMessage{
-		Id:              "test-123",
-		CreatedUnixSec:  strconv.FormatInt(time.Now().Unix(), 10),
-		DeadlineUnixSec: strconv.FormatInt(time.Now().Add(1*time.Hour).Unix(), 10),
+	req := &api.RequestMessage{
+		Id:        "test-123",
+		Created:   time.Now().Unix(),
+		Deadline:  time.Now().Add(1 * time.Hour).Unix(),
 		Payload: map[string]interface{}{
 			"model":  "gpt-3.5-turbo",
 			"prompt": "Hello, world!",
@@ -64,15 +63,36 @@ func TestSubmitRequest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, members, 1)
 
-	// Verify the message content
-	var msg api.RequestMessage
-	err = json.Unmarshal([]byte(members[0]), &msg)
+	var ir api.InternalRequest
+	err = json.Unmarshal([]byte(members[0]), &ir)
 	assert.NoError(t, err)
-	assert.Equal(t, "test-123", msg.Id)
+	assert.Equal(t, "test-123", ir.PublicRequest.ReqId())
+	assert.Equal(t, "test-user", ir.PublicRequest.ReqMetadata()["user"])
+	assert.Equal(t, "results:test-tenant:test-result-queue", ir.ResultQueueName)
+}
 
-	// Verify metadata includes result_queue with tenant namespace
-	assert.Equal(t, "test-user", msg.Metadata["user"])
-	assert.Equal(t, "results:test-tenant:test-result-queue", msg.Metadata["result_queue"])
+func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
+	req := &api.PubSubRequest{
+		RequestMessage: api.RequestMessage{
+			Id: "x", Created: 1, Deadline: 2,
+		},
+		PubSubID: "ps-123",
+	}
+	ir := toInternalRequest(req)
+	assert.Equal(t, "ps-123", ir.TransportCorrelationID)
+}
+
+func TestToInternalRequest_RedisQueueFieldsCopyToInternalRouting(t *testing.T) {
+	req := &api.RedisRequest{
+		RequestMessage: api.RequestMessage{
+			Id: "x", Created: 1, Deadline: 2,
+		},
+		RequestQueueName: "req-q",
+		ResultQueueName:  "res-q",
+	}
+	ir := toInternalRequest(req)
+	assert.Equal(t, "req-q", ir.RequestQueueName)
+	assert.Equal(t, "res-q", ir.ResultQueueName)
 }
 
 func TestSubmitRequest_Validation(t *testing.T) {
@@ -82,36 +102,37 @@ func TestSubmitRequest_Validation(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		req     api.RequestMessage
+		req     *api.RequestMessage
 		wantErr string
 	}{
 		{
 			name: "missing ID",
-			req: api.RequestMessage{
-				CreatedUnixSec:  strconv.FormatInt(time.Now().Unix(), 10),
-				DeadlineUnixSec: strconv.FormatInt(time.Now().Unix(), 10),
-				Payload:         map[string]interface{}{},
+			req: &api.RequestMessage{
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Unix(),
+				Payload: map[string]interface{}{},
 			},
 			wantErr: "request ID is required",
 		},
 		{
 			name: "missing deadline",
-			req: api.RequestMessage{
-				Id:             "test",
-				CreatedUnixSec: strconv.FormatInt(time.Now().Unix(), 10),
-				Payload:        map[string]interface{}{},
+			req: &api.RequestMessage{
+				Id:        "test",
+				Created:   time.Now().Unix(),
+				Deadline:  0,
+				Payload:  map[string]interface{}{},
 			},
 			wantErr: "deadline is required",
 		},
 		{
 			name: "invalid deadline",
-			req: api.RequestMessage{
-				Id:              "test",
-				CreatedUnixSec:  strconv.FormatInt(time.Now().Unix(), 10),
-				DeadlineUnixSec: "0",
-				Payload:         map[string]interface{}{},
+			req: &api.RequestMessage{
+				Id:        "test",
+				Created:   time.Now().Unix(),
+				Deadline:  0,
+				Payload:  map[string]interface{}{},
 			},
-			wantErr: "deadline must be a positive Unix timestamp",
+			wantErr: "deadline is required",
 		},
 	}
 
@@ -216,35 +237,35 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 		"Different tenants should have different result queues even with same ResultQueueName")
 
 	// Submit requests from both tenants
-	req1 := api.RequestMessage{
-		Id:              "alice-request",
-		CreatedUnixSec:  strconv.FormatInt(time.Now().Unix(), 10),
-		DeadlineUnixSec: strconv.FormatInt(time.Now().Add(1*time.Hour).Unix(), 10),
-		Payload:         map[string]interface{}{"tenant": "alice"},
+	req1 := &api.RequestMessage{
+		Id:        "alice-request",
+		Created:   time.Now().Unix(),
+		Deadline:  time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  map[string]interface{}{"tenant": "alice"},
 	}
 	err = tenant1Producer.SubmitRequest(ctx, req1)
 	require.NoError(t, err)
 
-	req2 := api.RequestMessage{
-		Id:              "bob-request",
-		CreatedUnixSec:  strconv.FormatInt(time.Now().Unix(), 10),
-		DeadlineUnixSec: strconv.FormatInt(time.Now().Add(1*time.Hour).Unix(), 10),
-		Payload:         map[string]interface{}{"tenant": "bob"},
+	req2 := &api.RequestMessage{
+		Id:        "bob-request",
+		Created:   time.Now().Unix(),
+		Deadline:  time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  map[string]interface{}{"tenant": "bob"},
 	}
 	err = tenant2Producer.SubmitRequest(ctx, req2)
 	require.NoError(t, err)
 
-	// Verify both requests have different result_queue metadata
+	// Verify both requests have different result queue routing
 	members, err := mr.ZMembers("shared-request-queue")
 	require.NoError(t, err)
 	assert.Len(t, members, 2)
 
-	var msg1, msg2 api.RequestMessage
-	require.NoError(t, json.Unmarshal([]byte(members[0]), &msg1))
-	require.NoError(t, json.Unmarshal([]byte(members[1]), &msg2))
+	var ir1, ir2 api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir1))
+	require.NoError(t, json.Unmarshal([]byte(members[1]), &ir2))
 
-	assert.Equal(t, "results:tenant-alice:my-results", msg1.Metadata["result_queue"])
-	assert.Equal(t, "results:tenant-bob:my-results", msg2.Metadata["result_queue"])
+	assert.Equal(t, "results:tenant-alice:my-results", ir1.ResultQueueName)
+	assert.Equal(t, "results:tenant-bob:my-results", ir2.ResultQueueName)
 
 	// Simulate worker routing results to correct tenant queues
 	result1 := api.ResultMessage{

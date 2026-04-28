@@ -304,7 +304,7 @@ func TestMQRetryWorker_RequeuesOnShutdown(t *testing.T) {
 	queueName := "req-queue"
 
 	// Use a blocking (unbuffered) request channel so the worker blocks on send.
-	reqCh := make(chan api.RequestMessage)
+	reqCh := make(chan *api.InternalRequest)
 	flow := &RedisMQFlow{
 		rdb:           rdb,
 		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
@@ -316,12 +316,17 @@ func TestMQRetryWorker_RequeuesOnShutdown(t *testing.T) {
 	}
 
 	// Seed the retry sorted set with 3 messages that are immediately due.
+	now := time.Now().Unix()
 	for i := 0; i < 3; i++ {
-		msg := api.RequestMessage{
-			Id:       "retry-" + strconv.Itoa(i),
-			Metadata: map[string]string{QUEUE_NAME_KEY: queueName},
-		}
-		bytes, _ := json.Marshal(msg)
+		ir := api.NewInternalRequest(
+			api.InternalRouting{RequestQueueName: queueName},
+			&api.RequestMessage{
+				Id:       "retry-" + strconv.Itoa(i),
+				Created:  now,
+				Deadline: now + 3600,
+			},
+		)
+		bytes, _ := json.Marshal(ir)
 		rdb.ZAdd(ctx, retryQueue, redis.Z{Score: float64(time.Now().Unix() - 1), Member: string(bytes)})
 	}
 
@@ -368,14 +373,14 @@ func TestPopDueRetryMessages_PopsDueAndRemovesFromSortedSet(t *testing.T) {
 	queue := "retry-pop-test"
 	now := time.Now().Unix()
 
-	due := api.RequestMessage{
-		Id:       "due",
-		Metadata: map[string]string{QUEUE_NAME_KEY: "request-queue"},
-	}
-	future := api.RequestMessage{
-		Id:       "future",
-		Metadata: map[string]string{QUEUE_NAME_KEY: "request-queue"},
-	}
+	due := api.NewInternalRequest(
+		api.InternalRouting{RequestQueueName: "request-queue"},
+		&api.RequestMessage{Id: "due", Created: 1, Deadline: now + 60},
+	)
+	future := api.NewInternalRequest(
+		api.InternalRouting{RequestQueueName: "request-queue"},
+		&api.RequestMessage{Id: "future", Created: 1, Deadline: now + 120},
+	)
 
 	dueBytes, err := json.Marshal(due)
 	if err != nil {
@@ -401,12 +406,12 @@ func TestPopDueRetryMessages_PopsDueAndRemovesFromSortedSet(t *testing.T) {
 		t.Fatalf("expected exactly one popped message, got %d", len(items))
 	}
 
-	var popped api.RequestMessage
+	var popped api.InternalRequest
 	if err := json.Unmarshal([]byte(items[0]), &popped); err != nil {
 		t.Fatalf("unmarshal popped message: %v", err)
 	}
-	if popped.Id != "due" {
-		t.Fatalf("expected popped message id 'due', got %q", popped.Id)
+	if popped.PublicRequest == nil || popped.PublicRequest.ReqId() != "due" {
+		t.Fatalf("expected popped message id 'due', got %v", popped.PublicRequest)
 	}
 
 	remaining, err := rdb.ZCard(ctx, queue).Result()
@@ -430,11 +435,11 @@ func TestPopDueRetryMessages_ConcurrentCallers_NoDuplicatePops(t *testing.T) {
 	totalMessages := 40
 
 	for i := 0; i < totalMessages; i++ {
-		msg := api.RequestMessage{
-			Id:       "msg-" + strconv.Itoa(i),
-			Metadata: map[string]string{QUEUE_NAME_KEY: "request-queue"},
-		}
-		msgBytes, err := json.Marshal(msg)
+		ir := api.NewInternalRequest(
+			api.InternalRouting{RequestQueueName: "request-queue"},
+			&api.RequestMessage{Id: "msg-" + strconv.Itoa(i), Created: 1, Deadline: now + 300},
+		)
+		msgBytes, err := json.Marshal(ir)
 		if err != nil {
 			t.Fatalf("marshal seed message %d: %v", i, err)
 		}
@@ -468,13 +473,17 @@ func TestPopDueRetryMessages_ConcurrentCallers_NoDuplicatePops(t *testing.T) {
 				}
 
 				for _, raw := range items {
-					var msg api.RequestMessage
+					var msg api.InternalRequest
 					if err := json.Unmarshal([]byte(raw), &msg); err != nil {
 						t.Errorf("unmarshal popped message: %v", err)
 						return
 					}
+					if msg.PublicRequest == nil {
+						t.Errorf("empty request")
+						return
+					}
 					mu.Lock()
-					seenID[msg.Id]++
+					seenID[msg.PublicRequest.ReqId()]++
 					mu.Unlock()
 				}
 			}

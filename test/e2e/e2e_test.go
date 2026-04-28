@@ -36,13 +36,13 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 
 		// Enqueue 3 messages with different deadlines (out of order)
 		msg1 := makeRequestMessage("deadline-300", 300*time.Second)
-		msg1.DeadlineUnixSec = fmt.Sprintf("%d", now.Add(300*time.Second).Unix())
+		msg1.Deadline = now.Add(300 * time.Second).Unix()
 
 		msg2 := makeRequestMessage("deadline-100", 100*time.Second)
-		msg2.DeadlineUnixSec = fmt.Sprintf("%d", now.Add(100*time.Second).Unix())
+		msg2.Deadline = now.Add(100 * time.Second).Unix()
 
 		msg3 := makeRequestMessage("deadline-200", 200*time.Second)
-		msg3.DeadlineUnixSec = fmt.Sprintf("%d", now.Add(200*time.Second).Unix())
+		msg3.Deadline = now.Add(200 * time.Second).Unix()
 
 		enqueueMessages(ctx, rdb, requestQueue, msg1, msg2, msg3)
 
@@ -107,7 +107,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 
 		for _, id := range ids {
 			msg := makeRequestMessage(id, 5*time.Minute)
-			msg.DeadlineUnixSec = fmt.Sprintf("%d", deadline.Unix())
+			msg.Deadline = deadline.Unix()
 			enqueueMessage(ctx, rdb, requestQueue, msg)
 		}
 

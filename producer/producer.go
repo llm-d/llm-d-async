@@ -12,7 +12,7 @@ import (
 type Producer interface {
 	// SubmitRequest adds a request to the processing queue.
 	// Returns error if submission fails.
-	SubmitRequest(ctx context.Context, req api.RequestMessage) error
+	SubmitRequest(ctx context.Context, req api.Request) error
 
 	// GetResult retrieves a result from the result queue.
 	// Blocks until a result is available or context is cancelled.

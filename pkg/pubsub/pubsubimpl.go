@@ -18,8 +18,6 @@ import (
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
 
-const PUBSUB_ID = "pubsub-id"
-
 var pubSubClient *pubsub.Client
 
 var (
@@ -124,7 +122,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			gate = api.ConstOpenGate()
 		}
 
-		ch := make(chan api.RequestMessage)
+		ch := make(chan *api.InternalRequest)
 		p.requestChannels = append(p.requestChannels, RequestChannelData{
 			requestChannel: api.RequestChannel{
 				Channel:            ch,
@@ -198,10 +196,9 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 				msgBytes = bytes
 			}
 			publishPubSub(ctx, publisher, msgBytes, map[string]string{})
-			pubsubID := msg.Metadata[PUBSUB_ID]
-			value, ok := resultChannels.Load(pubsubID)
+			value, ok := resultChannels.Load(msg.Routing.TransportCorrelationID)
 			if !ok {
-				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for message", "pubsubID", pubsubID)
+				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for message", "pubsubID", msg.Routing.TransportCorrelationID)
 				continue
 			}
 			resultChannel := value.(chan bool)
@@ -229,14 +226,13 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan api.RetryMessage)
 			return
 
 		case msg := <-retryChannel:
-			pubsubID := msg.RequestMessage.Metadata[PUBSUB_ID]
-			value, ok := resultChannels.Load(pubsubID)
+			value, ok := resultChannels.Load(msg.InternalRouting.TransportCorrelationID)
 			if !ok {
-				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", pubsubID)
+				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", msg.InternalRouting.TransportCorrelationID)
 				continue
 			}
 			resultChannel := value.(chan bool)
-			logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", pubsubID)
+			logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", msg.InternalRouting.TransportCorrelationID)
 			resultChannel <- false
 
 		}
@@ -244,7 +240,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan api.RetryMessage)
 
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, ch chan api.RequestMessage, gate api.DispatchGate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, ch chan *api.InternalRequest, gate api.DispatchGate) {
 	logger := log.FromContext(ctx)
 
 	sub := pubSubClient.Subscriber(subscriberID)
@@ -282,27 +278,25 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 			deliveryAttempt := msg.DeliveryAttempt
 
-			var msgObj api.RequestMessage
-			err := json.Unmarshal(msg.Data, &msgObj)
+			var body api.RequestMessage
+			err := json.Unmarshal(msg.Data, &body)
 			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to unmarshal message from request queue")
 				msg.Ack()
 				return
 			}
 
+			irout := api.InternalRouting{TransportCorrelationID: msg.ID}
+			if deliveryAttempt != nil {
+				irout.RetryCount = *deliveryAttempt - 1
+			}
+			ir := api.NewInternalRequest(irout, &body)
+
 			resultsChannel := make(chan bool, 1)
 			resultChannels.Store(msg.ID, resultsChannel)
 			defer resultChannels.Delete(msg.ID)
 
-			if msgObj.Metadata == nil {
-				msgObj.Metadata = make(map[string]string)
-			}
-			msgObj.Metadata[PUBSUB_ID] = msg.ID
-			if deliveryAttempt != nil {
-				msgObj.RetryCount = *deliveryAttempt - 1
-			}
-
-			ch <- msgObj
+			ch <- ir
 
 			result := <-resultsChannel
 			if !result {

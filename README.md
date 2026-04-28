@@ -75,7 +75,7 @@ make deploy-ap-on-k8s
     - Publishing a request:
     ```bash
        export REDIS_IP=....
-       kubectl run --rm -i -t publishmsgbox --image=redis --restart=Never -- /usr/local/bin/redis-cli -h $REDIS_IP PUBLISH request-queue '{"id" : "testmsg", "payload":{ "model":"food-review-1", "prompt":"Hi, good morning "}, "deadline" :"23472348233323" }'
+       kubectl run --rm -i -t publishmsgbox --image=redis --restart=Never -- /usr/local/bin/redis-cli -h $REDIS_IP PUBLISH request-queue '{"id" : "testmsg", "payload":{ "model":"food-review-1", "prompt":"Hi, good morning "}, "deadline" :23472348233323 }'
      ```
 
 ## Command line parameters
@@ -171,23 +171,36 @@ The async processor expects request messages to have the following format:
 
 ```json
 {
-    "id" : "unique identifier for result mapping",
+    "id": "unique identifier for result mapping",
     "created": "created timestamp in Unix seconds",
-    "deadline" : "deadline in Unix seconds",
-    "payload" : {regular inference payload as a byte array}
+    "deadline": "deadline in Unix seconds",
+    "payload": {"regular inference payload"}
 }
 ```
 
-Example:
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique identifier for result mapping (required) |
+| `created` | int64 | Created timestamp in Unix seconds |
+| `deadline` | int64 | Deadline in Unix seconds (required, must be positive) |
+| `payload` | object | Inference request payload |
+| `metadata` | map[string]string | Optional caller-supplied pass-through data (e.g. tracing IDs, user labels) |
+
+**Example:**
 
 ```json
 {
-    "id" : "19933123533434",
-    "created": "1764044000",
-    "deadline" : "1764045130",
-    "payload": byte[]({"model":"food-review","prompt":"hi", "max_tokens":10,"temperature":0})
+    "id": "19933123533434",
+    "created": 1764044000,
+    "deadline": 1764045130,
+    "payload": {"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+    "metadata": {"user": "batch-job-42"}
 }
 ```
+
+Producers handle wrapping these into the internal wire format used for persistence and routing.
 
 ### Request Merge Policy
 
@@ -364,8 +377,8 @@ Then, in a new terminal window register a subscriber:
 kubectl exec -n redis redis-master-0 -- redis-cli SUBSCRIBE result-queue
 ```
 
-Publish a message for async processing:
+Publish a message for async processing (uses internal wire format since this bypasses the producer):
 
 ```bash
-kubectl exec -n redis redis-master-0 -- redis-cli PUBLISH request-queue '{"id" : "testmsg", "payload":{ "model":"unsloth/Meta-Llama-3.1-8B", "prompt":"hi"}, "deadline" :"9999999999" }'
+kubectl exec -n redis redis-master-0 -- redis-cli PUBLISH request-queue '{"request_kind":"plain","data":{"id":"testmsg","created":1764044000,"deadline":9999999999,"payload":{"model":"unsloth/Meta-Llama-3.1-8B","prompt":"hi"}}}'
 ```

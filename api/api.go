@@ -61,19 +61,60 @@ type RequestMergePolicy interface {
 	MergeRequestChannels(channels []RequestChannel) EmbelishedRequestChannel
 }
 
-// TODO: Consider per-message metadata map[string]string
-// add endpoint to message level.
-type RequestMessage struct {
-	Id              string            `json:"id"`
-	CreatedUnixSec  string            `json:"created"`               // Unix seconds
-	RetryCount      int               `json:"retry_count,omitempty"` // TODO: Consider
-	DeadlineUnixSec string            `json:"deadline"`              // TODO: check about using int64, change name to timeout
-	Payload         map[string]any    `json:"payload"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+// Request is the public interface for submitting requests to the async queue.
+// It exposes only the caller-visible fields. Concrete types like RequestMessage,
+// RedisRequest, and PubSubRequest satisfy this interface.
+type Request interface {
+	ReqId() string
+	ReqCreated() int64
+	ReqDeadline() int64
+	ReqPayload() map[string]any
+	ReqMetadata() map[string]string
 }
 
+// RequestMessage contains the caller-visible fields of a request. Metadata is reserved
+// for opaque, caller-supplied pass-through data (e.g. tracing IDs, user labels).
+// The system does not read or write Metadata for its own routing or correlation.
+// Request interface accessors use the Req prefix (e.g. ReqPayload) to avoid
+// colliding with the struct's exported field names used for JSON serialization.
+type RequestMessage struct {
+	Id       string            `json:"id"`
+	Created  int64             `json:"created"`  // Unix seconds
+	Deadline int64             `json:"deadline"` // Unix seconds
+	Payload  map[string]any    `json:"payload"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+func (r *RequestMessage) ReqId() string                  { return r.Id }
+func (r *RequestMessage) ReqCreated() int64               { return r.Created }
+func (r *RequestMessage) ReqDeadline() int64       { return r.Deadline }
+func (r *RequestMessage) ReqPayload() map[string]any      { return r.Payload }
+func (r *RequestMessage) ReqMetadata() map[string]string   { return r.Metadata }
+
+// RedisRequest is the concrete Request implementation for Redis-based flows.
+// Per-message queue fields here override producer defaults; producers merge them
+// into InternalRouting on InternalRequest before enqueue.
+type RedisRequest struct {
+	RequestMessage
+	RequestQueueName string `json:"request_queue_name,omitempty"`
+	ResultQueueName  string `json:"result_queue_name,omitempty"`
+}
+
+// PubSubRequest is the concrete Request implementation for GCP Pub/Sub flows.
+// Optional PubSubID is merged into InternalRouting.TransportCorrelationID in producers.
+type PubSubRequest struct {
+	RequestMessage
+	PubSubID string `json:"pubsub_id,omitempty"`
+}
+
+var (
+	_ Request = (*RequestMessage)(nil)
+	_ Request = (*RedisRequest)(nil)
+	_ Request = (*PubSubRequest)(nil)
+)
+
 type RequestChannel struct {
-	Channel            chan RequestMessage
+	Channel            chan *InternalRequest
 	IGWBaseURl         string
 	InferenceObjective string
 	RequestPathURL     string
@@ -84,21 +125,27 @@ type EmbelishedRequestChannel struct {
 	Channel chan EmbelishedRequestMessage
 }
 
+// EmbelishedRequestMessage decorates an InternalRequest with HTTP dispatch context.
+// The embedded InternalRequest must be non-nil in normal use.
+// Caller-supplied metadata lives on the embedded Request (via GetMetadata());
+// there is no separate Metadata field here to avoid ambiguity.
 type EmbelishedRequestMessage struct {
-	RequestMessage
+	*InternalRequest
 	HttpHeaders map[string]string
 	RequestURL  string
-	Metadata    map[string]string
 }
 
+// RetryMessage carries an embellished request and backoff for re-queueing.
 type RetryMessage struct {
 	EmbelishedRequestMessage
 	BackoffDurationSeconds float64
 }
 
-// optional field of httpstatus, golang error?
+// ResultMessage is the async inference result returned to callers. Id and Payload are
+// JSON fields; Routing and Metadata are infrastructure pass-through (json:"-").
 type ResultMessage struct {
 	Id       string            `json:"id"`
 	Payload  string            `json:"payload"`
+	Routing  InternalRouting   `json:"-"`
 	Metadata map[string]string `json:"-"`
 }

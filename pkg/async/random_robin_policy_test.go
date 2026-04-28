@@ -7,19 +7,27 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/api"
 )
 
+func irID(id string) *api.InternalRequest {
+	return api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
+		Id:       id,
+		Created:  1,
+		Deadline: 9999999999,
+	})
+}
+
 func TestProcessAllChannels(t *testing.T) {
 	msgsPerChannel := 5
 	channels := []api.RequestChannel{
-		{Channel: make(chan api.RequestMessage, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
-		{Channel: make(chan api.RequestMessage, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
-		{Channel: make(chan api.RequestMessage, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
 	}
 	policy := NewRandomRobinPolicy()
 
 	// Send messages to each channel
 	for i, ch := range channels {
 		for range msgsPerChannel {
-			ch.Channel <- api.RequestMessage{Id: string(rune('A' + i))}
+			ch.Channel <- irID(string(rune('A' + i)))
 		}
 	}
 	mergedChannel := policy.MergeRequestChannels(channels).Channel
@@ -31,7 +39,10 @@ func TestProcessAllChannels(t *testing.T) {
 	totalMessages := msgsPerChannel * 3
 	for range totalMessages {
 		msg := <-mergedChannel
-		counts[msg.Id]++
+		if msg.PublicRequest == nil {
+			t.Fatal("expected PublicRequest")
+		}
+		counts[msg.PublicRequest.ReqId()]++
 
 	}
 
@@ -60,9 +71,9 @@ func TestEmptyChannelsReturnsClosed(t *testing.T) {
 func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 	// Three channels, each with distinct metadata.
 	channels := []api.RequestChannel{
-		{Channel: make(chan api.RequestMessage, 1), IGWBaseURl: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
-		{Channel: make(chan api.RequestMessage, 1), IGWBaseURl: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
-		{Channel: make(chan api.RequestMessage, 1), IGWBaseURl: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
+		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
+		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
+		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
 	}
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(channels)
@@ -78,15 +89,18 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 		select {
 		case <-realignDeadline:
 			t.Fatal("timed out waiting for channel metadata realignment")
-		case channels[2].Channel <- api.RequestMessage{Id: "probe-c"}:
+		case channels[2].Channel <- irID("probe-c"):
 		}
 
 		select {
 		case <-realignDeadline:
 			t.Fatal("timed out waiting for channel metadata realignment")
 		case msg := <-merged.Channel:
-			if msg.Id != "probe-c" {
-				t.Fatalf("unexpected message id while waiting for realignment: %s", msg.Id)
+			if msg.PublicRequest == nil {
+				t.Fatal("nil request")
+			}
+			if msg.PublicRequest.ReqId() != "probe-c" {
+				t.Fatalf("unexpected message id while waiting for realignment: %s", msg.PublicRequest.ReqId())
 			}
 			realigned = msg.RequestURL == "http://c/c" &&
 				msg.HttpHeaders["x-gateway-inference-objective"] == "obj-c"
@@ -94,14 +108,17 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 	}
 
 	// Send one message on each remaining channel.
-	channels[0].Channel <- api.RequestMessage{Id: "from-a"}
-	channels[2].Channel <- api.RequestMessage{Id: "from-c"}
+	channels[0].Channel <- irID("from-a")
+	channels[2].Channel <- irID("from-c")
 
 	deadline := time.After(2 * time.Second)
 	for range 2 {
 		select {
 		case msg := <-merged.Channel:
-			switch msg.Id {
+			if msg.PublicRequest == nil {
+				t.Fatal("nil request")
+			}
+			switch msg.PublicRequest.ReqId() {
 			case "from-a":
 				if msg.RequestURL != "http://a/a" {
 					t.Errorf("expected RequestURL http://a/a, got %s", msg.RequestURL)
@@ -117,7 +134,7 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 					t.Errorf("expected InferenceObjective obj-c, got %s", msg.HttpHeaders["x-gateway-inference-objective"])
 				}
 			default:
-				t.Fatalf("unexpected message id: %s", msg.Id)
+				t.Fatalf("unexpected message id: %s", msg.PublicRequest.ReqId())
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for messages")
@@ -129,14 +146,14 @@ func TestMergedChannelIsBuffered(t *testing.T) {
 	numChannels := 3
 	channels := make([]api.RequestChannel, numChannels)
 	for i := range numChannels {
-		channels[i] = api.RequestChannel{Channel: make(chan api.RequestMessage, 1)}
+		channels[i] = api.RequestChannel{Channel: make(chan *api.InternalRequest, 1)}
 	}
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(channels)
 
 	// Send one message per input channel.
 	for i, ch := range channels {
-		ch.Channel <- api.RequestMessage{Id: string(rune('A' + i))}
+		ch.Channel <- irID(string(rune('A' + i)))
 	}
 
 	// The merge goroutine should be able to forward all messages into the

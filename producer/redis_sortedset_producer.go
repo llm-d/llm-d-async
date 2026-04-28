@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
@@ -97,45 +96,80 @@ func NewRedisSortedSetProducer(config RedisSortedSetConfig) (*RedisSortedSetProd
 	}, nil
 }
 
+// toInternalRequest builds an InternalRequest with routing merged from the concrete
+// *RedisRequest / *PubSubRequest, or a *RequestMessage / default Request message view.
+func toInternalRequest(req api.Request) *api.InternalRequest {
+	ir := &api.InternalRequest{InternalRouting: api.InternalRouting{}}
+	switch v := req.(type) {
+	case *api.RequestMessage:
+		cp := *v
+		ir.PublicRequest = &cp
+		return ir
+	case *api.RedisRequest:
+		ir2 := *v
+		if ir2.RequestQueueName != "" {
+			ir.RequestQueueName = ir2.RequestQueueName
+		}
+		if ir2.ResultQueueName != "" {
+			ir.ResultQueueName = ir2.ResultQueueName
+		}
+		ir.PublicRequest = &ir2
+		return ir
+	case *api.PubSubRequest:
+		ir2 := *v
+		if ir2.PubSubID != "" {
+			ir.TransportCorrelationID = ir2.PubSubID
+		}
+		ir.PublicRequest = &ir2
+		return ir
+	default:
+		ir.PublicRequest = &api.RequestMessage{
+			Id:         req.ReqId(),
+			Created:    req.ReqCreated(),
+			Deadline:   req.ReqDeadline(),
+			Payload:    req.ReqPayload(),
+			Metadata:   req.ReqMetadata(),
+		}
+		return ir
+	}
+}
+
 // SubmitRequest adds a request to the Redis sorted set.
 // The score is the deadline, ensuring earlier deadlines are processed first.
-// The request metadata includes the result queue name so workers know where to send results.
-func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.RequestMessage) error {
-	if req.Id == "" {
+func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Request) error {
+	ir := toInternalRequest(req)
+	r := ir.PublicRequest
+	if r == nil {
+		return errors.New("request is required")
+	}
+
+	if r.ReqId() == "" {
 		return errors.New("request ID is required")
 	}
 
-	if req.DeadlineUnixSec == "" {
-		return errors.New("deadline is required")
-	}
-
-	// Parse deadline to validate and get score
-	deadline, err := strconv.ParseInt(req.DeadlineUnixSec, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid deadline format: %w", err)
-	}
-
+	deadline := r.ReqDeadline()
 	if deadline <= 0 {
-		return errors.New("deadline must be a positive Unix timestamp")
+		return errors.New("deadline is required and must be a positive Unix timestamp")
 	}
 
-	// Initialize metadata if not present
-	if req.Metadata == nil {
-		req.Metadata = make(map[string]string)
+	// Apply producer-level defaults for queue routing if not set by caller
+	if ir.ResultQueueName == "" {
+		ir.ResultQueueName = p.resultQueueName
 	}
 
-	// Add result queue name to metadata so worker knows where to send the result
-	req.Metadata["result_queue"] = p.resultQueueName
+	if ir.RequestQueueName == "" {
+		ir.RequestQueueName = p.requestQueueName
+	}
 
-	// Marshal request message to JSON
-	msgBytes, err := json.Marshal(req)
+	msgBytes, err := json.Marshal(ir)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	// Add to sorted set with deadline as score
+	targetQueue := ir.RequestQueueName
 	score := float64(deadline)
-	if err := p.client.ZAdd(ctx, p.requestQueueName, redis.Z{
+	if err := p.client.ZAdd(ctx, targetQueue, redis.Z{
 		Score:  score,
 		Member: string(msgBytes),
 	}).Err(); err != nil {

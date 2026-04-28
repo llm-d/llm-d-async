@@ -44,16 +44,17 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []api.RequestChannel) 
 					break
 				}
 			} else {
-				rm := val.Interface().(api.RequestMessage)
+				ir, ok := val.Interface().(*api.InternalRequest)
+				if !ok || ir == nil {
+					continue
+				}
 				erm := api.EmbelishedRequestMessage{
-					RequestMessage: rm,
-					// TODO: move from here
+					InternalRequest: ir,
 					HttpHeaders: map[string]string{
 						"Content-Type":                  "application/json",
 						"x-gateway-inference-objective": meta[i1].InferenceObjective,
 					},
 					RequestURL: meta[i1].IGWBaseURl + meta[i1].RequestPathURL,
-					Metadata:   rm.Metadata,
 				}
 				mergedChannel <- erm
 			}
