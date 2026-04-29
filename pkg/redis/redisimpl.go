@@ -62,6 +62,33 @@ end
 return items
 `)
 
+const maxRetries = 3
+
+func retryRedisOp(ctx context.Context, fn func(ctx context.Context) error) error {
+	var lastErr error
+	for attempt := range maxRetries {
+		execCtx := ctx
+		if execCtx.Err() != nil {
+			execCtx = context.Background()
+		}
+		if err := fn(execCtx); err != nil {
+			lastErr = err
+			if attempt == maxRetries-1 {
+				break
+			}
+			// On shutdown (ctx cancelled), skip backoff and retry immediately
+			// to maximize the chance of flushing data before SIGKILL.
+			select {
+			case <-time.After(time.Duration(1<<attempt) * 100 * time.Millisecond):
+			case <-ctx.Done():
+			}
+		} else {
+			return nil
+		}
+	}
+	return lastErr
+}
+
 func drainBatch[T any](first T, channel <-chan T, maxBatchSize int) []T {
 	batch := make([]T, 1, maxBatchSize)
 	batch[0] = first
@@ -194,21 +221,15 @@ func (r *RedisMQFlow) resultWorker(ctx context.Context, resultsQueueName string)
 
 func (r *RedisMQFlow) flushResultBatch(ctx context.Context, batch []api.ResultMessage, resultsQueueName string) {
 	logger := log.FromContext(ctx)
-	const maxRetries = 3
-	for attempt := range maxRetries {
+	if err := retryRedisOp(ctx, func(ctx context.Context) error {
 		pipe := r.rdb.Pipeline()
 		for _, result := range batch {
 			pipe.Publish(ctx, resultsQueueName, marshalResultMessage(result))
 		}
-		if _, err := pipe.Exec(ctx); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "Failed to publish result batch to Redis",
-				"batchSize", len(batch), "attempt", attempt+1)
-			if attempt < maxRetries-1 {
-				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
-			}
-		} else {
-			return
-		}
+		_, err := pipe.Exec(ctx)
+		return err
+	}); err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "Failed to publish result batch to Redis", "batchSize", len(batch))
 	}
 }
 
@@ -357,21 +378,15 @@ func (r *RedisMQFlow) requeueRetryMessages(rdb *redis.Client, messages []string)
 	}
 	logger := log.FromContext(context.Background())
 	score := float64(time.Now().Unix())
-	const maxRetries = 3
-	for attempt := range maxRetries {
+	if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
 		pipe := rdb.Pipeline()
 		for _, msg := range messages {
-			pipe.ZAdd(context.Background(), *retryQueueName, redis.Z{Score: score, Member: msg})
+			pipe.ZAdd(ctx, *retryQueueName, redis.Z{Score: score, Member: msg})
 		}
-		if _, err := pipe.Exec(context.Background()); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "Failed to requeue retry messages on shutdown",
-				"count", len(messages), "attempt", attempt+1)
-			if attempt < maxRetries-1 {
-				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
-			}
-		} else {
-			return
-		}
+		_, err := pipe.Exec(ctx)
+		return err
+	}); err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "Failed to requeue retry messages on shutdown", "count", len(messages))
 	}
 }
 

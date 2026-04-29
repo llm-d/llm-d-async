@@ -800,3 +800,85 @@ func TestSortedSetFlow_PartialBudget(t *testing.T) {
 		t.Errorf("Expected 7 messages remaining with 30%% budget (3 pulled), got %d remaining", remaining)
 	}
 }
+
+func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "requeue-shutdown-queue"
+	// Unbuffered channel with no reader: the worker's channel send will block
+	// indefinitely, so ctx.Done() is the only way to unblock the select.
+	// This guarantees the re-queue path is exercised deterministically.
+	msgChan := make(chan *api.InternalRequest)
+
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{{
+			channel:   api.RequestChannel{Channel: msgChan},
+			queueName: queue,
+			gate:      noopGate(),
+		}},
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+	}
+
+	ir := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
+		ID:       "requeue-1",
+		Created:  time.Now().Unix(),
+		Deadline: 9999999999,
+		Payload:  map[string]any{"key": "value"},
+	})
+	msgBytes, _ := json.Marshal(ir)
+	score := float64(time.Now().Unix())
+	rdb.ZAdd(ctx, queue, redis.Z{Score: score, Member: string(msgBytes)})
+
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		flow.requestWorker(workerCtx, msgChan, queue)
+		close(done)
+	}()
+
+	// Wait until the message has been popped from Redis (queue becomes empty)
+	// before cancelling. This proves re-queue, not just "message was never popped".
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cnt, _ := rdb.ZCard(ctx, queue).Result(); cnt == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cnt, _ := rdb.ZCard(ctx, queue).Result(); cnt != 0 {
+		t.Fatal("Message was never popped from Redis")
+	}
+
+	workerCancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("requestWorker did not stop after context cancellation")
+	}
+
+	// The message should be back in Redis.
+	count, err := rdb.ZCard(ctx, queue).Result()
+	if err != nil {
+		t.Fatalf("ZCard error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected message to be re-queued on shutdown, got count=%d", count)
+	}
+
+	results, _ := rdb.ZRangeWithScores(ctx, queue, 0, -1).Result()
+	if results[0].Score != score {
+		t.Errorf("Expected re-queued score %f, got %f", score, results[0].Score)
+	}
+	var restored api.InternalRequest
+	json.Unmarshal([]byte(results[0].Member.(string)), &restored) // nolint:errcheck
+	if restored.PublicRequest.ReqID() != "requeue-1" {
+		t.Errorf("Expected re-queued message id requeue-1, got %s", restored.PublicRequest.ReqID())
+	}
+}

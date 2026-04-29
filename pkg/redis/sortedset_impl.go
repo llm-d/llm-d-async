@@ -262,6 +262,14 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		select {
 		case msgChannel <- ir:
 		case <-ctx.Done():
+			if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
+				return r.rdb.ZAdd(ctx, queueName, redis.Z{
+					Score:  results[0].Score,
+					Member: results[0].Member,
+				}).Err()
+			}); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to re-queue message on shutdown", "id", rview.ReqID())
+			}
 			return
 		}
 	}
@@ -344,28 +352,15 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []api.Re
 		})
 	}
 
-	const maxRetries = 3
-	for attempt := range maxRetries {
-		execCtx := ctx
-		if execCtx.Err() != nil {
-			execCtx = context.Background()
-		}
-
+	if err := retryRedisOp(ctx, func(ctx context.Context) error {
 		pipe := r.rdb.Pipeline()
 		for _, entry := range entries {
-			pipe.ZAdd(execCtx, entry.queue, entry.value)
+			pipe.ZAdd(ctx, entry.queue, entry.value)
 		}
-		if _, err := pipe.Exec(execCtx); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "Failed to add retry batch",
-				"batchSize", len(entries), "attempt", attempt+1)
-			if attempt < maxRetries-1 {
-				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
-			}
-		} else {
-			logger.V(logutil.DEBUG).Info("Pushed retry batch", "batchSize", len(batch))
-			return
-		}
-
+		_, err := pipe.Exec(ctx)
+		return err
+	}); err == nil {
+		logger.V(logutil.DEBUG).Info("Pushed retry batch", "batchSize", len(batch))
 	}
 }
 
@@ -407,29 +402,17 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 		queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
 	}
 
-	const maxRetries = 3
-	for attempt := range maxRetries {
-		execCtx := ctx
-		if execCtx.Err() != nil {
-			execCtx = context.Background()
-		}
-
+	if err := retryRedisOp(ctx, func(ctx context.Context) error {
 		pipe := r.rdb.Pipeline()
 		for queue, msgs := range queued {
 			for _, msgStr := range msgs {
-				pipe.LPush(execCtx, queue, msgStr)
+				pipe.LPush(ctx, queue, msgStr)
 			}
 		}
-		if _, err := pipe.Exec(execCtx); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "Failed to push result batch to Redis",
-				"batchSize", len(batch), "attempt", attempt+1)
-			if attempt < maxRetries-1 {
-				time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
-			}
-		} else {
-			logger.V(logutil.DEBUG).Info("Pushed result batch", "batchSize", len(batch))
-			return
-		}
+		_, err := pipe.Exec(ctx)
+		return err
+	}); err == nil {
+		logger.V(logutil.DEBUG).Info("Pushed result batch", "batchSize", len(batch))
 	}
 }
 
