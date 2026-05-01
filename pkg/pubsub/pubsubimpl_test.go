@@ -22,11 +22,6 @@ func (m *mockAttributeGate) Acquire(ctx context.Context, attrs map[string]string
 	return m.allowed, func() { m.releaseCalled = true }, nil
 }
 
-type mockAckNacker struct {
-	acked  bool
-	nacked bool
-}
-
 func TestProcessMessages_QuotaGating(t *testing.T) {
 	flow := &PubSubMQFlow{}
 	ch := make(chan api.RequestMessage, 1)

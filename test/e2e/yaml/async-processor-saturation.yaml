@@ -40,6 +40,7 @@ spec:
           args:
             - "--message-queue-impl=redis-sortedset"
             - "--prometheus-url=http://prom-mock.e2e-test.svc.cluster.local:9090"
+            - "--prometheus-cache-ttl=0s"
             - "--redis.ss.gate-type=prometheus-saturation"
             - "--redis.ss.gate-params={\"pool\":\"e2e-pool\",\"threshold\":\"0.8\"}"
             - "--redis.ss.igw-base-url=http://igw-mock.e2e-test.svc.cluster.local:80"

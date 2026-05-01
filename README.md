@@ -85,6 +85,7 @@ make deploy-ap-on-k8s
 
  - `prometheus-url`: Prometheus server URL for metric-based gates (e.g., http://localhost:9090). For Google Managed Prometheus (GMP), point this to a local proxy or GMP frontend that handles authentication — direct GMP URLs are not supported as the Async Processor does not perform GMP authentication.  
    This flag is required when using metric-based per-queue gates (e.g., `prometheus-saturation`, `prometheus-budget`).
+ - `prometheus-cache-ttl`: TTL for cached Prometheus metric sources (e.g. 1m, 0s to disable). Default is 5s. Increasing this reduces Prometheus load but also reduces the responsiveness of dispatch gates to metric changes.
 
 <i>additional parameters may be specified for concrete message queue implementations</i>
 

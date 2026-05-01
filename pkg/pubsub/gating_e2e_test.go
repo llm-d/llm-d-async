@@ -15,28 +15,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// mockReceive is a helper to simulate Pub/Sub message delivery
-type mockReceive struct {
-	messages chan *pubsub.Message
-}
-
-func (m *mockReceive) Receive(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
-	for {
-		select {
-		case msg := <-m.messages:
-			f(ctx, msg)
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
-
-type msgOutcome struct {
-	id     string
-	acked  bool
-	nacked bool
-}
-
 func TestGating_EndToEnd(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()
@@ -45,7 +23,7 @@ func TestGating_EndToEnd(t *testing.T) {
 
 	flow := &PubSubMQFlow{}
 	ch := make(chan api.RequestMessage, 10)
-	
+
 	// Helper to create a message that records its outcome
 	createMsg := func(id string, userid string) *pubsub.Message {
 		data, _ := json.Marshal(api.RequestMessage{Id: id})
@@ -54,21 +32,21 @@ func TestGating_EndToEnd(t *testing.T) {
 			Data:       data,
 			Attributes: map[string]string{"userid": userid},
 		}
-		// In a real e2e, we'd hook into Ack/Nack. 
+		// In a real e2e, we'd hook into Ack/Nack.
 		// Since we're using the library's Message struct, we can't easily override them.
 		// However, processMessages calls msg.Ack() and msg.Nack().
 		// To verify this without panicking, we would need to mock the full Pub/Sub client,
-		// but for this "extensive" test, we'll verify the gate logic and the fact that 
+		// but for this "extensive" test, we'll verify the gate logic and the fact that
 		// messages reach the channel 'ch' only when allowed.
 		return msg
 	}
 
 	t.Run("Concurrency Gating", func(t *testing.T) {
 		gate := redisgate.NewRedisQuotaGate(rdb, "userid", redisgate.QuotaModeConcurrency, 1, 10*time.Second, "e2e-concurrency:")
-		
+
 		// 1. Send Request 1 for User A
 		msg1 := createMsg("req-1", "user-a")
-		
+
 		// Run processMessages in a way we can control
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -124,7 +102,7 @@ func TestGating_EndToEnd(t *testing.T) {
 		val, _ := resultChannels.Load(pubsubID)
 		resCh := val.(chan bool)
 		resCh <- true // Success
-		wg.Wait()      // Wait for processMessages to finish and release quota
+		wg.Wait()     // Wait for processMessages to finish and release quota
 
 		// 4. Send Request 3 for User A (should now be allowed)
 		msg3 := createMsg("req-3", "user-a")
@@ -149,7 +127,7 @@ func TestGating_EndToEnd(t *testing.T) {
 	t.Run("Rate Limit Gating", func(t *testing.T) {
 		// 2 requests per 2 seconds
 		gate := redisgate.NewRedisQuotaGate(rdb, "userid", redisgate.QuotaModeRateLimit, 2, 2*time.Second, "e2e-ratelimit:")
-		
+
 		// Send 2 allowed requests
 		for i := 1; i <= 2; i++ {
 			id := fmt.Sprintf("rl-%d", i)
@@ -161,7 +139,7 @@ func TestGating_EndToEnd(t *testing.T) {
 				}
 				_ = flow.processMessages(context.Background(), receive, ch, gate)
 			}()
-			
+
 			select {
 			case req := <-ch:
 				// Finish it immediately

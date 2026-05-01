@@ -110,7 +110,6 @@ func setMockDelay(adminURL string, delayMs int) {
 	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
 }
 
-
 func getRequestLog(adminURL string) []string {
 	req, err := http.NewRequest(http.MethodGet, adminURL+"/admin/request-log", nil)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())

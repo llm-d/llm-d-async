@@ -15,9 +15,9 @@ var _ = ginkgo.Describe("Attribute Gating E2E", func() {
 		ctx = context.Background()
 		cleanupQueues(ctx, rdb)
 		resetMock(adminURL)
-		
+
 		// Ensure redis quota keys are clean for the user we use in tests
-		rdb.Del(ctx, "quota:userid:user-a").Err()
+		rdb.Del(ctx, "quota:userid:user-a").Err() // nolint:errcheck
 	})
 
 	ginkgo.It("enforces per-user concurrency limit", func() {
@@ -63,7 +63,7 @@ var _ = ginkgo.Describe("Attribute Gating E2E", func() {
 			return getRequestLog(adminURL)
 		}, 30*time.Second, 1*time.Second).Should(gomega.ContainElement("quota-2"))
 	})
-	
+
 	// I will implement a "pseudo" E2E that verifies the logic if I can.
 	// Actually, I'll provide a real test that assumes the 'redis-quota' gate is active.
 })

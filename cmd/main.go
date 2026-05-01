@@ -50,6 +50,7 @@ func main() {
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
 
 	var prometheusURL = flag.String("prometheus-url", "", "Prometheus server URL for metric-based gates (e.g., http://localhost:9090)")
+	var prometheusCacheTTL = flag.Duration("prometheus-cache-ttl", flowcontrol.DefaultCacheTTL, "TTL for cached Prometheus metric sources (e.g. 1m, 0s to disable)")
 
 	opts := zap.Options{
 		Development: true,
@@ -68,7 +69,7 @@ func main() {
 
 	printAllFlags(setupLog)
 	// Create Gate Factory for per-queue gate instantiation
-	gateFactory := flowcontrol.NewGateFactory(*prometheusURL)
+	gateFactory := flowcontrol.NewGateFactoryWithCacheTTL(*prometheusURL, *prometheusCacheTTL)
 
 	var policy api.RequestMergePolicy
 	switch requestMergePolicy {
