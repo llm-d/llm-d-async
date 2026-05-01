@@ -323,14 +323,13 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []api.Re
 
 	entries := make([]retryEntry, 0, len(batch))
 	for _, msg := range batch {
-		queueName := msg.RequestQueueName
-		if queueName == "" {
-			queueName = *ssRequestQueueName
-		}
-
 		if msg.InternalRequest == nil {
 			logger.V(logutil.DEFAULT).Error(nil, "Retry message missing InternalRequest")
 			continue
+		}
+		queueName := msg.RequestQueueName
+		if queueName == "" {
+			queueName = *ssRequestQueueName
 		}
 		bytes, err := json.Marshal(msg.InternalRequest)
 		if err != nil {
