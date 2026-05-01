@@ -19,10 +19,10 @@ package flowcontrol
 import (
 	"context"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
-var _ api.DispatchGate = DispatchGateFunc(nil)
+var _ pipeline.DispatchGate = DispatchGateFunc(nil)
 
 // DispatchGateFunc is a function type that implements DispatchGate.
 // This allows any function with the signature func(context.Context) float64
@@ -34,6 +34,6 @@ func (f DispatchGateFunc) Budget(ctx context.Context) float64 {
 	return f(ctx)
 }
 
-func ConstOpenGate() api.DispatchGate {
+func ConstOpenGate() pipeline.DispatchGate {
 	return DispatchGateFunc(func(ctx context.Context) float64 { return 1.0 })
 }

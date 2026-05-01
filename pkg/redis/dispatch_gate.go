@@ -4,15 +4,15 @@ import (
 	"context"
 	"strconv"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	goredis "github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
 
-var _ asyncapi.DispatchGate = (*RedisDispatchGate)(nil)
+var _ pipeline.DispatchGate = (*RedisDispatchGate)(nil)
 
-// RedisDispatchGate implements asyncapi.DispatchGate by reading the budget
+// RedisDispatchGate implements pipeline.DispatchGate by reading the budget
 // from a Redis key. This allows external systems to dynamically control
 // the dispatch rate. If the key does not exist or is invalid, it defaults
 // to full capacity (1.0).

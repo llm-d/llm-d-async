@@ -10,6 +10,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
 )
 
@@ -26,8 +27,8 @@ func TestRedisImpl(t *testing.T) {
 	flow := redis.NewRedisMQFlow()
 	flow.Start(ctx)
 
-	flow.RetryChannel() <- api.RetryMessage{
-		EmbelishedRequestMessage: api.EmbelishedRequestMessage{
+	flow.RetryChannel() <- pipeline.RetryMessage{
+		EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
 			InternalRequest: api.NewInternalRequest(
 				api.InternalRouting{RequestQueueName: "request-queue"},
 				&api.RequestMessage{

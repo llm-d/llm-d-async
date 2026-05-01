@@ -12,16 +12,17 @@ import (
 	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
 const defaultRequestTimeout = 5 * time.Minute
 
 // newEmb wraps a RequestMessage in a minimal InternalRequest for tests.
-func newEmb(rm asyncapi.RequestMessage, requestURL string, h map[string]string) asyncapi.EmbelishedRequestMessage {
+func newEmb(rm asyncapi.RequestMessage, requestURL string, h map[string]string) pipeline.EmbelishedRequestMessage {
 	if h == nil {
 		h = map[string]string{}
 	}
-	return asyncapi.EmbelishedRequestMessage{
+	return pipeline.EmbelishedRequestMessage{
 		InternalRequest: asyncapi.NewInternalRequest(asyncapi.InternalRouting{}, &rm),
 		HttpHeaders:     h,
 		RequestURL:      requestURL,
@@ -29,11 +30,11 @@ func newEmb(rm asyncapi.RequestMessage, requestURL string, h map[string]string) 
 }
 
 // newEmbR uses explicit internal routing (e.g. retry count) for tests.
-func newEmbR(routing asyncapi.InternalRouting, rm asyncapi.RequestMessage, requestURL string, h map[string]string) asyncapi.EmbelishedRequestMessage {
+func newEmbR(routing asyncapi.InternalRouting, rm asyncapi.RequestMessage, requestURL string, h map[string]string) pipeline.EmbelishedRequestMessage {
 	if h == nil {
 		h = map[string]string{}
 	}
-	return asyncapi.EmbelishedRequestMessage{
+	return pipeline.EmbelishedRequestMessage{
 		InternalRequest: asyncapi.NewInternalRequest(routing, &rm),
 		HttpHeaders:     h,
 		RequestURL:      requestURL,
@@ -41,7 +42,7 @@ func newEmbR(routing asyncapi.InternalRouting, rm asyncapi.RequestMessage, reque
 }
 
 func TestRetryMessage_deadlinePassed(t *testing.T) {
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
 		ID:       "123",
@@ -68,7 +69,7 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 }
 
 func TestRetryMessage_retry(t *testing.T) {
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
 		ID:       "123",
@@ -116,12 +117,12 @@ func TestSheddedRequest(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
@@ -152,12 +153,12 @@ func TestSuccessfulRequest(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
@@ -186,12 +187,12 @@ func TestFatalError_NoRetry(t *testing.T) {
 		return nil, fmt.Errorf("network unreachable")
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
@@ -232,12 +233,12 @@ func TestRateLimitRequest(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
@@ -267,13 +268,13 @@ func TestRequestTimeout(t *testing.T) {
 		return nil, req.Context().Err()
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
 	// Use a very short request timeout to trigger the deadline.
-	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 100*time.Millisecond)
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 100*time.Millisecond)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
@@ -364,7 +365,7 @@ func TestExpBackoffDuration(t *testing.T) {
 }
 
 func TestRetryMessage_deadlineExact(t *testing.T) {
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	now := time.Now().Unix()
 	msg := newEmb(asyncapi.RequestMessage{
@@ -423,7 +424,7 @@ func TestParseRetryAfter(t *testing.T) {
 }
 
 func TestRetryMessage_retryAfterHonored(t *testing.T) {
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
 		ID:       "retry-after-test",
@@ -444,7 +445,7 @@ func TestRetryMessage_retryAfterHonored(t *testing.T) {
 }
 
 func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmbR(asyncapi.InternalRouting{RetryCount: 5}, asyncapi.RequestMessage{
 		ID:       "retry-after-small",
@@ -465,7 +466,7 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 }
 
 func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
 		ID:       "retry-after-exceeds-deadline",
@@ -501,12 +502,12 @@ func TestRateLimitRequest_WithRetryAfterHeader(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
@@ -563,7 +564,7 @@ func TestRetryMessage_cancelledCtxDoesNotBlock(t *testing.T) {
 	cancel()
 
 	// Unbuffered channels: sends would block without the select guard.
-	retryChannel := make(chan asyncapi.RetryMessage)
+	retryChannel := make(chan pipeline.RetryMessage)
 	resultChannel := make(chan asyncapi.ResultMessage)
 
 	msg := newEmb(asyncapi.RequestMessage{
@@ -595,16 +596,16 @@ func TestWorker_cancelledCtxExitsPromptly(t *testing.T) {
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
 	// Unbuffered result channel: the worker must not block trying to send.
-	retryChannel := make(chan asyncapi.RetryMessage)
+	retryChannel := make(chan pipeline.RetryMessage)
 	resultChannel := make(chan asyncapi.ResultMessage)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan struct{})
 	go func() {
-		Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+		Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 		close(done)
 	}()
 
@@ -639,12 +640,12 @@ func TestClientError_NoRetry(t *testing.T) {
 		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
-	requestChannel := make(chan asyncapi.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan asyncapi.RetryMessage, 1)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	ctx := context.Background()
 
-	go Worker(ctx, asyncapi.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{

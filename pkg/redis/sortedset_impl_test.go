@@ -12,12 +12,13 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/redis/go-redis/v9"
 )
 
 // noopGate returns a gate that always returns full budget (1.0)
-func noopGate() api.DispatchGate {
-	return api.ConstOpenGate()
+func noopGate() pipeline.DispatchGate {
+	return pipeline.ConstOpenGate()
 }
 
 // Test helper to create test flow and Redis
@@ -45,7 +46,7 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   api.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
@@ -142,7 +143,7 @@ func TestSortedSetFlow_ExpiredMessages(t *testing.T) {
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   api.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
@@ -179,7 +180,7 @@ func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   api.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
@@ -226,7 +227,7 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 	queue := "retry-queue"
 	flow := &RedisSortedSetFlow{
 		rdb:          rdb,
-		retryChannel: make(chan api.RetryMessage, 1),
+		retryChannel: make(chan pipeline.RetryMessage, 1),
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
 		gate:         noopGate(),
@@ -234,8 +235,8 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 
 	go flow.retryWorker(ctx)
 
-	retryMsg := api.RetryMessage{
-		EmbelishedRequestMessage: api.EmbelishedRequestMessage{
+	retryMsg := pipeline.RetryMessage{
+		EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
 			InternalRequest: api.NewInternalRequest(
 				api.InternalRouting{RetryCount: 1, RequestQueueName: queue},
 				&api.RequestMessage{
@@ -468,7 +469,7 @@ func TestSortedSetFlow_ContextCancellation(t *testing.T) {
 	queue := "cancel-queue"
 	flow := &RedisSortedSetFlow{
 		rdb:           rdb,
-		retryChannel:  make(chan api.RetryMessage),
+		retryChannel:  make(chan pipeline.RetryMessage),
 		resultChannel: make(chan api.ResultMessage),
 		pollInterval:  50 * time.Millisecond,
 		batchSize:     10,
@@ -539,14 +540,14 @@ func TestSortedSetFlow_ZeroBudget(t *testing.T) {
 	var budgetValue atomic.Uint64 // Store as bits to represent float64
 
 	budgetValue.Store(math.Float64bits(0.0))
-	gate := api.DispatchGateFunc(func(ctx context.Context) float64 {
+	gate := pipeline.DispatchGateFunc(func(ctx context.Context) float64 {
 		return math.Float64frombits(budgetValue.Load())
 	})
 
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   api.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
@@ -657,7 +658,7 @@ func TestSortedSetFlow_RetryWorkerDrainsOnShutdown(t *testing.T) {
 	const totalMessages = maxBatchSize + 10
 	flow := &RedisSortedSetFlow{
 		rdb:          rdb,
-		retryChannel: make(chan api.RetryMessage, totalMessages),
+		retryChannel: make(chan pipeline.RetryMessage, totalMessages),
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
 		gate:         noopGate(),
@@ -673,8 +674,8 @@ func TestSortedSetFlow_RetryWorkerDrainsOnShutdown(t *testing.T) {
 	// Buffer more messages than maxBatchSize so the drain path
 	// exercises multiple pipeline flushes.
 	for i := 0; i < totalMessages; i++ {
-		flow.retryChannel <- api.RetryMessage{
-			EmbelishedRequestMessage: api.EmbelishedRequestMessage{
+		flow.retryChannel <- pipeline.RetryMessage{
+			EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
 				InternalRequest: api.NewInternalRequest(
 					api.InternalRouting{RequestQueueName: queue},
 					&api.RequestMessage{
@@ -713,7 +714,7 @@ func TestSortedSetFlow_RetryBatchAfterFailure(t *testing.T) {
 	queue := "retry-batch-queue"
 	flow := &RedisSortedSetFlow{
 		rdb:          rdb,
-		retryChannel: make(chan api.RetryMessage, 10),
+		retryChannel: make(chan pipeline.RetryMessage, 10),
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
 		gate:         noopGate(),
@@ -723,8 +724,8 @@ func TestSortedSetFlow_RetryBatchAfterFailure(t *testing.T) {
 	s.SetError("READONLY simulated failure")
 	go flow.retryWorker(ctx)
 
-	flow.retryChannel <- api.RetryMessage{
-		EmbelishedRequestMessage: api.EmbelishedRequestMessage{
+	flow.retryChannel <- pipeline.RetryMessage{
+		EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
 			InternalRequest: api.NewInternalRequest(
 				api.InternalRouting{RequestQueueName: queue},
 				&api.RequestMessage{
@@ -763,14 +764,14 @@ func TestSortedSetFlow_PartialBudget(t *testing.T) {
 	queue := "partial-budget-queue"
 
 	// Gate with 30% budget - should process floor(10*0.3)=3 messages per cycle
-	gate := api.DispatchGateFunc(func(ctx context.Context) float64 {
+	gate := pipeline.DispatchGateFunc(func(ctx context.Context) float64 {
 		return 0.3
 	})
 
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   api.RequestChannel{Channel: make(chan *api.InternalRequest, 20)},
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 20)},
 			queueName: queue,
 		}},
 		pollInterval: 200 * time.Millisecond,

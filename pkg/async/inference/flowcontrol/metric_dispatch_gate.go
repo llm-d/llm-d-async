@@ -20,12 +20,12 @@ import (
 	"context"
 	"math"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
 
-var _ asyncapi.DispatchGate = (*MetricDispatchGate)(nil)
+var _ pipeline.DispatchGate = (*MetricDispatchGate)(nil)
 
 // MetricDispatchGate implements DispatchGate by querying a MetricSource for a
 // budget value and returning it clamped to [0.0, 1.0].

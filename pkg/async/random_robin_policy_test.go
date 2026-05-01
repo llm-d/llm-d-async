@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
 func irID(id string) *api.InternalRequest {
@@ -17,7 +18,7 @@ func irID(id string) *api.InternalRequest {
 
 func TestProcessAllChannels(t *testing.T) {
 	msgsPerChannel := 5
-	channels := []api.RequestChannel{
+	channels := []pipeline.RequestChannel{
 		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
 		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
 		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
@@ -70,7 +71,7 @@ func TestEmptyChannelsReturnsClosed(t *testing.T) {
 
 func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 	// Three channels, each with distinct metadata.
-	channels := []api.RequestChannel{
+	channels := []pipeline.RequestChannel{
 		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
 		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
 		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
@@ -144,9 +145,9 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 
 func TestMergedChannelIsBuffered(t *testing.T) {
 	numChannels := 3
-	channels := make([]api.RequestChannel, numChannels)
+	channels := make([]pipeline.RequestChannel, numChannels)
 	for i := range numChannels {
-		channels[i] = api.RequestChannel{Channel: make(chan *api.InternalRequest, 1)}
+		channels[i] = pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 1)}
 	}
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(channels)

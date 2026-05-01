@@ -12,6 +12,7 @@ import (
 
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -42,20 +43,20 @@ type TopicConfig struct {
 	GateParams         map[string]string `json:"gate_params,omitempty"`
 }
 
-var _ api.Flow = (*PubSubMQFlow)(nil)
+var _ pipeline.Flow = (*PubSubMQFlow)(nil)
 
 type PubSubMQFlow struct {
 	resultTopicID   string
 	requestChannels []RequestChannelData
-	retryChannel    chan api.RetryMessage
+	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
-	gate            api.DispatchGate
-	gateFactory     api.GateFactory
+	gate            pipeline.DispatchGate
+	gateFactory     pipeline.GateFactory
 }
 type RequestChannelData struct {
-	requestChannel api.RequestChannel
+	requestChannel pipeline.RequestChannel
 	subscriberID   string
-	gate           api.DispatchGate
+	gate           pipeline.DispatchGate
 }
 
 // PubSubOption is a functional option for configuring PubSubMQFlow
@@ -63,7 +64,7 @@ type PubSubOption func(*PubSubMQFlow)
 
 // WithGateFactory sets a GateFactory for per-topic gate instantiation.
 // When set, gates are created per topic from config, overriding any global gate.
-func WithGateFactory(factory api.GateFactory) PubSubOption {
+func WithGateFactory(factory pipeline.GateFactory) PubSubOption {
 	return func(p *PubSubMQFlow) {
 		p.gateFactory = factory
 	}
@@ -94,7 +95,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 	p := &PubSubMQFlow{
 		resultTopicID:   *resultTopicID,
 		requestChannels: make([]RequestChannelData, 0, len(configs)),
-		retryChannel:    make(chan api.RetryMessage),
+		retryChannel:    make(chan pipeline.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage),
 	}
 
@@ -106,7 +107,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 	// Create per-topic channels with gates
 	for _, cfg := range configs {
 		// Determine gate for this topic
-		var gate api.DispatchGate
+		var gate pipeline.DispatchGate
 		if p.gateFactory != nil && cfg.GateType != "" {
 			// Use factory to create per-topic gate
 			var err error
@@ -119,12 +120,12 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			gate = p.gate
 		} else {
 			// Default to always-open gate
-			gate = api.ConstOpenGate()
+			gate = pipeline.ConstOpenGate()
 		}
 
 		ch := make(chan *api.InternalRequest)
 		p.requestChannels = append(p.requestChannels, RequestChannelData{
-			requestChannel: api.RequestChannel{
+			requestChannel: pipeline.RequestChannel{
 				Channel:            ch,
 				IGWBaseURl:         util.NormalizeBaseURL(cfg.IGWBaseURl),
 				InferenceObjective: cfg.InferenceObjective,
@@ -138,13 +139,13 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 
 	// Set default gate if not already set
 	if p.gate == nil {
-		p.gate = api.ConstOpenGate()
+		p.gate = pipeline.ConstOpenGate()
 	}
 
 	return p
 }
 
-func (r *PubSubMQFlow) RetryChannel() chan api.RetryMessage {
+func (r *PubSubMQFlow) RetryChannel() chan pipeline.RetryMessage {
 	return r.retryChannel
 }
 
@@ -152,16 +153,16 @@ func (r *PubSubMQFlow) ResultChannel() chan api.ResultMessage {
 	return r.resultChannel
 }
 
-func (r *PubSubMQFlow) Characteristics() api.Characteristics {
-	return api.Characteristics{
+func (r *PubSubMQFlow) Characteristics() pipeline.Characteristics {
+	return pipeline.Characteristics{
 		HasExternalBackoff:     true,
 		SupportsMessageLatency: true,
 	}
 }
 
-func (r *PubSubMQFlow) RequestChannels() []api.RequestChannel {
+func (r *PubSubMQFlow) RequestChannels() []pipeline.RequestChannel {
 
-	var channels []api.RequestChannel
+	var channels []pipeline.RequestChannel
 	for _, channelData := range r.requestChannels {
 		channels = append(channels, channelData.requestChannel)
 	}
@@ -217,7 +218,7 @@ func publishPubSub(ctx context.Context, publisher *pubsub.Publisher, msg []byte,
 
 }
 
-func addMsgToRetryQueue(ctx context.Context, retryChannel chan api.RetryMessage) {
+func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMessage) {
 	logger := log.FromContext(ctx)
 
 	for {
@@ -243,7 +244,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan api.RetryMessage)
 
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, ch chan *api.InternalRequest, gate api.DispatchGate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) {
 	logger := log.FromContext(ctx)
 
 	sub := pubSubClient.Subscriber(subscriberID)

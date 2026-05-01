@@ -6,7 +6,11 @@ go 1.25.0
 // from v0.0.0 to that semver (e.g. v0.1.0). Keep the replace line for in-repo development.
 require github.com/llm-d-incubation/llm-d-async/api v0.0.0
 
+require github.com/llm-d-incubation/llm-d-async/pipeline v0.0.0
+
 replace github.com/llm-d-incubation/llm-d-async/api => ./api
+
+replace github.com/llm-d-incubation/llm-d-async/pipeline => ./pipeline
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.6.0

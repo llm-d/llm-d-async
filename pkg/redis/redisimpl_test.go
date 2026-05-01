@@ -10,6 +10,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -308,9 +309,9 @@ func TestMQRetryWorker_RequeuesOnShutdown(t *testing.T) {
 	flow := &RedisMQFlow{
 		rdb:           rdb,
 		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
-		retryChannel:  make(chan api.RetryMessage),
+		retryChannel:  make(chan pipeline.RetryMessage),
 		requestChannels: []RequestChannelData{{
-			requestChannel: api.RequestChannel{Channel: reqCh},
+			requestChannel: pipeline.RequestChannel{Channel: reqCh},
 			queueName:      queueName,
 		}},
 	}

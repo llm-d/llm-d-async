@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"time"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	redisgate "github.com/llm-d-incubation/llm-d-async/pkg/redis"
 	promapi "github.com/prometheus/client_golang/api"
 	goredis "github.com/redis/go-redis/v9"
@@ -30,7 +30,7 @@ import (
 // DefaultCacheTTL is the default TTL for cached Prometheus metric sources.
 const DefaultCacheTTL = 5 * time.Second
 
-var _ asyncapi.GateFactory = (*GateFactory)(nil)
+var _ pipeline.GateFactory = (*GateFactory)(nil)
 
 // GateFactory creates DispatchGate instances based on configuration.
 type GateFactory struct {
@@ -68,7 +68,7 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 //     baseline (default 0.05), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
-func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asyncapi.DispatchGate, error) {
+func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pipeline.DispatchGate, error) {
 	switch gateType {
 	case "constant":
 		return ConstOpenGate(), nil

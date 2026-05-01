@@ -10,6 +10,7 @@ import (
 	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -20,8 +21,8 @@ const (
 	maxDelaySeconds  = 60
 )
 
-func Worker(ctx context.Context, characteristics asyncapi.Characteristics, client asyncapi.InferenceClient, requestChannel chan asyncapi.EmbelishedRequestMessage,
-	retryChannel chan asyncapi.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration) {
+func Worker(ctx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
+	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration) {
 
 	logger := log.FromContext(ctx)
 	for {
@@ -103,7 +104,7 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 }
 
 // parsing and validating payload. On failure puts an error msg on the result-channel and returns nil
-func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultMessage, msg asyncapi.EmbelishedRequestMessage) []byte {
+func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultMessage, msg pipeline.EmbelishedRequestMessage) []byte {
 	if msg.PublicRequest == nil {
 		return nil
 	}
@@ -140,7 +141,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 }
 
 // If it is not after deadline, just publish again.
-func retryMessage(ctx context.Context, msg asyncapi.EmbelishedRequestMessage, retryChannel chan asyncapi.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration) {
+func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration) {
 	if msg.PublicRequest == nil {
 		return
 	}
@@ -174,7 +175,7 @@ func retryMessage(ctx context.Context, msg asyncapi.EmbelishedRequestMessage, re
 	msg.RetryCount++
 	metrics.Retries.Inc()
 	select {
-	case retryChannel <- asyncapi.RetryMessage{
+	case retryChannel <- pipeline.RetryMessage{
 		EmbelishedRequestMessage: msg,
 		BackoffDurationSeconds:   finalDuration,
 	}:

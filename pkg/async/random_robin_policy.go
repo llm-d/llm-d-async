@@ -4,29 +4,30 @@ import (
 	"reflect"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
-func NewRandomRobinPolicy() api.RequestMergePolicy {
+func NewRandomRobinPolicy() pipeline.RequestMergePolicy {
 	return &RandomRobinPolicy{}
 }
 
-var _ api.RequestMergePolicy = (*RandomRobinPolicy)(nil)
+var _ pipeline.RequestMergePolicy = (*RandomRobinPolicy)(nil)
 
 type RandomRobinPolicy struct {
 }
 
-func (r *RandomRobinPolicy) MergeRequestChannels(channels []api.RequestChannel) api.EmbelishedRequestChannel {
-	mergedChannel := make(chan api.EmbelishedRequestMessage, len(channels))
+func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChannel) pipeline.EmbelishedRequestChannel {
+	mergedChannel := make(chan pipeline.EmbelishedRequestMessage, len(channels))
 
 	// reflect.Select blocks forever on an empty cases slice, so return
 	// a closed channel immediately to avoid goroutine leaks.
 	if len(channels) == 0 {
 		close(mergedChannel)
-		return api.EmbelishedRequestChannel{Channel: mergedChannel}
+		return pipeline.EmbelishedRequestChannel{Channel: mergedChannel}
 	}
 
 	cases := make([]reflect.SelectCase, len(channels)) //nolint:staticcheck
-	meta := make([]api.RequestChannel, len(channels))
+	meta := make([]pipeline.RequestChannel, len(channels))
 	for i, ch := range channels {
 		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.Channel)}
 		meta[i] = ch
@@ -48,7 +49,7 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []api.RequestChannel) 
 				if !ok || ir == nil {
 					continue
 				}
-				erm := api.EmbelishedRequestMessage{
+				erm := pipeline.EmbelishedRequestMessage{
 					InternalRequest: ir,
 					HttpHeaders: map[string]string{
 						"Content-Type":                  "application/json",
@@ -62,7 +63,7 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []api.RequestChannel) 
 		}
 	}()
 
-	return api.EmbelishedRequestChannel{
+	return pipeline.EmbelishedRequestChannel{
 		Channel: mergedChannel,
 	}
 }
