@@ -31,9 +31,9 @@ func TestRedisImpl(t *testing.T) {
 			InternalRequest: api.NewInternalRequest(
 				api.InternalRouting{RequestQueueName: "request-queue"},
 				&api.RequestMessage{
-					Id:        "test-id",
-					Created:   time.Now().Unix(),
-					Deadline:  time.Now().Add(time.Minute).Unix(),
+					Id:       "test-id",
+					Created:  time.Now().Unix(),
+					Deadline: time.Now().Add(time.Minute).Unix(),
 					Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 				},
 			),

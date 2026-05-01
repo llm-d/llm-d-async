@@ -138,9 +138,9 @@ func setPromMockValue(url string, value string) {
 func makeRequestMessage(id string, deadlineOffset time.Duration) api.RequestMessage {
 	deadline := time.Now().Add(deadlineOffset)
 	return api.RequestMessage{
-		Id:         id,
-		Created:    time.Now().Unix(),
-		Deadline:   deadline.Unix(),
-		Payload:   map[string]any{"model": id, "prompt": "test"},
+		Id:       id,
+		Created:  time.Now().Unix(),
+		Deadline: deadline.Unix(),
+		Payload:  map[string]any{"model": id, "prompt": "test"},
 	}
 }

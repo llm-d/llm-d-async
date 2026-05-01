@@ -42,9 +42,9 @@ func TestSubmitRequest(t *testing.T) {
 	ctx := context.Background()
 
 	req := &api.RequestMessage{
-		Id:        "test-123",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(1 * time.Hour).Unix(),
+		Id:       "test-123",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
 		Payload: map[string]interface{}{
 			"model":  "gpt-3.5-turbo",
 			"prompt": "Hello, world!",
@@ -110,16 +110,16 @@ func TestSubmitRequest_Validation(t *testing.T) {
 			req: &api.RequestMessage{
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Unix(),
-				Payload: map[string]interface{}{},
+				Payload:  map[string]interface{}{},
 			},
 			wantErr: "request ID is required",
 		},
 		{
 			name: "missing deadline",
 			req: &api.RequestMessage{
-				Id:        "test",
-				Created:   time.Now().Unix(),
-				Deadline:  0,
+				Id:       "test",
+				Created:  time.Now().Unix(),
+				Deadline: 0,
 				Payload:  map[string]interface{}{},
 			},
 			wantErr: "deadline is required",
@@ -127,9 +127,9 @@ func TestSubmitRequest_Validation(t *testing.T) {
 		{
 			name: "invalid deadline",
 			req: &api.RequestMessage{
-				Id:        "test",
-				Created:   time.Now().Unix(),
-				Deadline:  0,
+				Id:       "test",
+				Created:  time.Now().Unix(),
+				Deadline: 0,
 				Payload:  map[string]interface{}{},
 			},
 			wantErr: "deadline is required",
@@ -238,18 +238,18 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 
 	// Submit requests from both tenants
 	req1 := &api.RequestMessage{
-		Id:        "alice-request",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(1 * time.Hour).Unix(),
+		Id:       "alice-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
 		Payload:  map[string]interface{}{"tenant": "alice"},
 	}
 	err = tenant1Producer.SubmitRequest(ctx, req1)
 	require.NoError(t, err)
 
 	req2 := &api.RequestMessage{
-		Id:        "bob-request",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(1 * time.Hour).Unix(),
+		Id:       "bob-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
 		Payload:  map[string]interface{}{"tenant": "bob"},
 	}
 	err = tenant2Producer.SubmitRequest(ctx, req2)

@@ -44,9 +44,9 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:        "123",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(-10 * time.Second).Unix(),
+		Id:       "123",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(-10 * time.Second).Unix(),
 	}, "", map[string]string{})
 	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
 	if len(retryChannel) > 0 {
@@ -71,9 +71,9 @@ func TestRetryMessage_retry(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:        "123",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(10 * time.Second).Unix(),
+		Id:       "123",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(10 * time.Second).Unix(),
 	}, "", map[string]string{})
 	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
 	if len(resultChannel) > 0 {
@@ -125,9 +125,9 @@ func TestSheddedRequest(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        msgId,
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -162,9 +162,9 @@ func TestSuccessfulRequest(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        msgId,
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -196,9 +196,9 @@ func TestFatalError_NoRetry(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        msgId,
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -241,9 +241,9 @@ func TestRateLimitRequest(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        msgId,
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -277,9 +277,9 @@ func TestRequestTimeout(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        msgId,
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -368,9 +368,9 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	now := time.Now().Unix()
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:        "exact-deadline",
-		Created:   now,
-		Deadline:  now, // same second → no time left to retry
+		Id:       "exact-deadline",
+		Created:  now,
+		Deadline: now, // same second → no time left to retry
 	}, "", nil)
 	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
 	if len(retryChannel) > 0 {
@@ -426,9 +426,9 @@ func TestRetryMessage_retryAfterHonored(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:        "retry-after-test",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(100 * time.Second).Unix(),
+		Id:       "retry-after-test",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
 	}, "", nil)
 
 	// Server says wait 30s; expBackoff for retry 1 would be ~[1,2) seconds,
@@ -447,9 +447,9 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmbR(asyncapi.InternalRouting{RetryCount: 5}, asyncapi.RequestMessage{
-		Id:        "retry-after-small",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(100 * time.Second).Unix(),
+		Id:       "retry-after-small",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
 	}, "", nil)
 
 	// Server says wait 1s, but expBackoff at retry 5 is much larger.
@@ -468,9 +468,9 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:        "retry-after-exceeds-deadline",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(5 * time.Second).Unix(),
+		Id:       "retry-after-exceeds-deadline",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(5 * time.Second).Unix(),
 	}, "", nil)
 
 	// Server says wait 30s, but deadline is only 5s away → deadline exceeded.
@@ -510,9 +510,9 @@ func TestRateLimitRequest_WithRetryAfterHeader(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        msgId,
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -567,9 +567,9 @@ func TestRetryMessage_cancelledCtxDoesNotBlock(t *testing.T) {
 	resultChannel := make(chan asyncapi.ResultMessage)
 
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:        "cancel-retry-test",
-		Created:   time.Now().Unix(),
-		Deadline:  time.Now().Add(10 * time.Second).Unix(),
+		Id:       "cancel-retry-test",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(10 * time.Second).Unix(),
 	}, "", nil)
 
 	done := make(chan struct{})
@@ -610,9 +610,9 @@ func TestWorker_cancelledCtxExitsPromptly(t *testing.T) {
 
 	deadline := time.Now().Add(100 * time.Second).Unix()
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        "worker-cancel-test",
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       "worker-cancel-test",
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -648,9 +648,9 @@ func TestClientError_NoRetry(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:        msgId,
-		Created:   time.Now().Unix(),
-		Deadline:  deadline,
+		Id:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 

@@ -55,10 +55,10 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 
 	// Add message with valid deadline
 	msg := api.RequestMessage{
-		Id:         "msg-1",
-		Created:    time.Now().Unix(),
-		Deadline:   9999999999,
-		Payload:   map[string]any{"test": "data"},
+		Id:       "msg-1",
+		Created:  time.Now().Unix(),
+		Deadline: 9999999999,
+		Payload:  map[string]any{"test": "data"},
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
@@ -556,9 +556,9 @@ func TestSortedSetFlow_ZeroBudget(t *testing.T) {
 
 	// Add message with valid deadline
 	msg := api.RequestMessage{
-		Id:        "test-zero-budget",
-		Created:   time.Now().Unix(),
-		Deadline:  9999999999,
+		Id:       "test-zero-budget",
+		Created:  time.Now().Unix(),
+		Deadline: 9999999999,
 		Payload:  map[string]any{"test": "data"},
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
@@ -781,9 +781,9 @@ func TestSortedSetFlow_PartialBudget(t *testing.T) {
 	// Add 10 messages
 	for i := 0; i < 10; i++ {
 		msg := api.RequestMessage{
-			Id:        "msg-" + strconv.Itoa(i),
-			Created:   time.Now().Unix(),
-			Deadline:  9999999999,
+			Id:       "msg-" + strconv.Itoa(i),
+			Created:  time.Now().Unix(),
+			Deadline: 9999999999,
 		}
 		rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix() + int64(i)), Member: envelopeJSON(msg)})
 	}

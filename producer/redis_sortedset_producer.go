@@ -124,11 +124,11 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 		return ir
 	default:
 		ir.PublicRequest = &api.RequestMessage{
-			Id:         req.ReqId(),
-			Created:    req.ReqCreated(),
-			Deadline:   req.ReqDeadline(),
-			Payload:    req.ReqPayload(),
-			Metadata:   req.ReqMetadata(),
+			Id:       req.ReqId(),
+			Created:  req.ReqCreated(),
+			Deadline: req.ReqDeadline(),
+			Payload:  req.ReqPayload(),
+			Metadata: req.ReqMetadata(),
 		}
 		return ir
 	}
