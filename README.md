@@ -103,6 +103,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `redis`: Queries Redis for dispatch budget (managed by external system).
 - `prometheus-saturation`: Queries Prometheus for pool saturation metric. Returns `1.0 - saturation` if below threshold, `0.0` otherwise.
 - `prometheus-budget`: Queries Prometheus to compute a dispatch budget using the formula `D = 1 - (F_SYS + F_EPP + B)`, where `F_SYS` is pool saturation, `F_EPP` is normalized EPP queue depth, and `B` is a configurable baseline reserve.
+- `composite`: Combines multiple gates. Returns the minimum budget across all inner dispatch gates and acquires quota across all inner attribute gates (all or nothing).
 
 **Example Configuration with Per-Queue Gates:**
 
@@ -144,11 +145,23 @@ For more fine-grained control, configure gates per queue in your configuration f
           "address": "localhost:6379",
           "budget_key": "my-budget-key"
        }
+    },
+    {
+       "queue_name": "composite_gated_queue",
+       "inference_objective": "composite-task",
+       "request_path_url": "/v1/inference",
+       "gate_type": "composite",
+       "gate_params": {
+          "gates": "[{\"gate_type\":\"prometheus-saturation\",\"gate_params\":{\"pool\":\"inference_pool_1\"}},{\"gate_type\":\"redis-quota\",\"gate_params\":{\"address\":\"localhost:6379\",\"limit\":\"100\"}}]"
+       }
     }
 ]
 ```
 
 **Gate Parameters:**
+
+- `composite`:
+  - `gates` (**required**): A JSON array of gate configurations. Each configuration is an object with `gate_type` and `gate_params`.
 
 - `redis`:
   - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.

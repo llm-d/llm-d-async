@@ -15,6 +15,7 @@ var _ = ginkgo.Describe("Attribute Gating E2E", func() {
 		ctx = context.Background()
 		cleanupQueues(ctx, rdb)
 		resetMock(adminURL)
+		setMockDelay(adminURL, 0)
 
 		// Ensure redis quota keys are clean for the user we use in tests
 		rdb.Del(ctx, "quota:userid:user-a").Err() // nolint:errcheck
@@ -50,18 +51,23 @@ var _ = ginkgo.Describe("Attribute Gating E2E", func() {
 		}, 3*time.Second, 1*time.Second).ShouldNot(gomega.ContainElement("quota-2"))
 
 		// 4. Complete Request 1
-		// Since we added a 5s delay, Request 1 should complete soon. We wait for it.
-		// NOTE: By default, results go to resultQueue ("result-list") unless specified otherwise,
-		// but since we didn't specify "result_queue" in metadata, it goes to the default result queue of the processor.
-		// Wait, the default result queue is 'result-list'. Let's verify it gets there.
 		gomega.Eventually(func() int64 {
 			return getResultCount(ctx, rdb, resultQueue)
 		}, 30*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
+		result1 := popResult(ctx, rdb, resultQueue)
+		gomega.Expect(result1.Id).To(gomega.Equal("quota-1"))
 
 		// 5. Verify Request 2 is now processed
 		gomega.Eventually(func() []string {
 			return getRequestLog(adminURL)
 		}, 30*time.Second, 1*time.Second).Should(gomega.ContainElement("quota-2"))
+
+		// 6. Complete Request 2
+		gomega.Eventually(func() int64 {
+			return getResultCount(ctx, rdb, resultQueue)
+		}, 30*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
+		result2 := popResult(ctx, rdb, resultQueue)
+		gomega.Expect(result2.Id).To(gomega.Equal("quota-2"))
 	})
 
 	// I will implement a "pseudo" E2E that verifies the logic if I can.

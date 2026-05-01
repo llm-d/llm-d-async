@@ -45,6 +45,8 @@ const (
 	asyncProcessorBudgetManifest = "./yaml/async-processor-budget.yaml"
 	// asyncProcessorQuotaManifest is the manifest for the quota-gated async-processor.
 	asyncProcessorQuotaManifest = "./yaml/async-processor-quota.yaml"
+	// asyncProcessorCompositeManifest is the manifest for the composite-gated async-processor.
+	asyncProcessorCompositeManifest = "./yaml/async-processor-composite.yaml"
 )
 
 var (
@@ -68,6 +70,7 @@ var (
 	asyncProcessorSaturationObjects []string
 	asyncProcessorBudgetObjects     []string
 	asyncProcessorQuotaObjects      []string
+	asyncProcessorCompositeObjects  []string
 	createdNameSpace                bool
 
 	rdb         *redis.Client
@@ -244,6 +247,13 @@ func applyManifests() {
 		"${AP_IMAGE}": apImage,
 	})
 	asyncProcessorQuotaObjects = testutils.CreateObjsFromYaml(testConfig, apQuotaYamls)
+
+	ginkgo.By("Applying async-processor-composite manifest")
+	apCompositeYamls := testutils.ReadYaml(asyncProcessorCompositeManifest)
+	apCompositeYamls = substituteMany(apCompositeYamls, map[string]string{
+		"${AP_IMAGE}": apImage,
+	})
+	asyncProcessorCompositeObjects = testutils.CreateObjsFromYaml(testConfig, apCompositeYamls)
 }
 
 func setupRedisClient() {

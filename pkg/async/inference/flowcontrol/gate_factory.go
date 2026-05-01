@@ -17,6 +17,7 @@ limitations under the License.
 package flowcontrol
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -63,6 +64,7 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 //   - "redis": Queries Redis for dispatch budget
 //   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
 //     Params: pool (required), threshold (default 0.8), fallback (default 0.0)
+//   - "composite": Combines multiple gates. Params: gates (JSON array of gate configurations)
 //   - "prometheus-budget": Queries Prometheus for dispatch budget using
 //     D = (1 - F_SYS) * (1 - F_EPP) * (1 - B). Params: pool, max_sys (required),
 //     baseline (default 0.05), fallback (default 0.0)
@@ -70,6 +72,33 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asyncapi.DispatchGate, error) {
 	switch gateType {
+	case "composite":
+		gatesJSON := params["gates"]
+		if gatesJSON == "" {
+			return nil, fmt.Errorf("composite gate requires 'gates' parameter with JSON array of gate configurations")
+		}
+
+		type gateConfig struct {
+			GateType   string            `json:"gate_type"`
+			GateParams map[string]string `json:"gate_params"`
+		}
+
+		var configs []gateConfig
+		if err := json.Unmarshal([]byte(gatesJSON), &configs); err != nil {
+			return nil, fmt.Errorf("composite gate failed to parse 'gates' parameter: %w", err)
+		}
+
+		var innerGates []asyncapi.DispatchGate
+		for _, cfg := range configs {
+			gate, err := f.CreateGate(cfg.GateType, cfg.GateParams)
+			if err != nil {
+				return nil, fmt.Errorf("composite gate failed to create inner gate %q: %w", cfg.GateType, err)
+			}
+			innerGates = append(innerGates, gate)
+		}
+
+		return NewCompositeGate(innerGates...), nil
+
 	case "constant":
 		return ConstOpenGate(), nil
 
