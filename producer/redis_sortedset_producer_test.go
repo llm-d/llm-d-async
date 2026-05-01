@@ -42,7 +42,7 @@ func TestSubmitRequest(t *testing.T) {
 	ctx := context.Background()
 
 	req := &api.RequestMessage{
-		Id:       "test-123",
+		ID:       "test-123",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
 		Payload: map[string]interface{}{
@@ -66,7 +66,7 @@ func TestSubmitRequest(t *testing.T) {
 	var ir api.InternalRequest
 	err = json.Unmarshal([]byte(members[0]), &ir)
 	assert.NoError(t, err)
-	assert.Equal(t, "test-123", ir.PublicRequest.ReqId())
+	assert.Equal(t, "test-123", ir.PublicRequest.ReqID())
 	assert.Equal(t, "test-user", ir.PublicRequest.ReqMetadata()["user"])
 	assert.Equal(t, "results:test-tenant:test-result-queue", ir.ResultQueueName)
 }
@@ -74,7 +74,7 @@ func TestSubmitRequest(t *testing.T) {
 func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
 	req := &api.PubSubRequest{
 		RequestMessage: api.RequestMessage{
-			Id: "x", Created: 1, Deadline: 2,
+			ID: "x", Created: 1, Deadline: 2,
 		},
 		PubSubID: "ps-123",
 	}
@@ -85,7 +85,7 @@ func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
 func TestToInternalRequest_RedisQueueFieldsCopyToInternalRouting(t *testing.T) {
 	req := &api.RedisRequest{
 		RequestMessage: api.RequestMessage{
-			Id: "x", Created: 1, Deadline: 2,
+			ID: "x", Created: 1, Deadline: 2,
 		},
 		RequestQueueName: "req-q",
 		ResultQueueName:  "res-q",
@@ -117,7 +117,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 		{
 			name: "missing deadline",
 			req: &api.RequestMessage{
-				Id:       "test",
+				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: 0,
 				Payload:  map[string]interface{}{},
@@ -127,7 +127,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 		{
 			name: "invalid deadline",
 			req: &api.RequestMessage{
-				Id:       "test",
+				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: 0,
 				Payload:  map[string]interface{}{},
@@ -153,7 +153,7 @@ func TestGetResult(t *testing.T) {
 
 	// Push a result to the namespaced list
 	resultMsg := api.ResultMessage{
-		Id:      "test-123",
+		ID:      "test-123",
 		Payload: `{"response": "Hello!"}`,
 	}
 	resultJSON, _ := json.Marshal(resultMsg)
@@ -163,7 +163,7 @@ func TestGetResult(t *testing.T) {
 	// Get the result
 	result, err := producer.GetResult(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "test-123", result.Id)
+	assert.Equal(t, "test-123", result.ID)
 	assert.Contains(t, result.Payload, "Hello!")
 }
 
@@ -181,7 +181,7 @@ func TestGetResultWithTimeout(t *testing.T) {
 	t.Run("get result before timeout", func(t *testing.T) {
 		// Push a result to namespaced queue
 		resultMsg := api.ResultMessage{
-			Id:      "test-456",
+			ID:      "test-456",
 			Payload: "test response",
 		}
 		resultJSON, _ := json.Marshal(resultMsg)
@@ -191,7 +191,7 @@ func TestGetResultWithTimeout(t *testing.T) {
 		result, err := producer.GetResultWithTimeout(ctx, 1*time.Second)
 		require.NoError(t, err)
 		assert.NotNil(t, result)
-		assert.Equal(t, "test-456", result.Id)
+		assert.Equal(t, "test-456", result.ID)
 	})
 }
 
@@ -238,7 +238,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 
 	// Submit requests from both tenants
 	req1 := &api.RequestMessage{
-		Id:       "alice-request",
+		ID:       "alice-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
 		Payload:  map[string]interface{}{"tenant": "alice"},
@@ -247,7 +247,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	require.NoError(t, err)
 
 	req2 := &api.RequestMessage{
-		Id:       "bob-request",
+		ID:       "bob-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
 		Payload:  map[string]interface{}{"tenant": "bob"},
@@ -269,7 +269,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 
 	// Simulate worker routing results to correct tenant queues
 	result1 := api.ResultMessage{
-		Id:      "alice-request",
+		ID:      "alice-request",
 		Payload: `{"response": "alice result"}`,
 	}
 	result1JSON, _ := json.Marshal(result1)
@@ -277,7 +277,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	require.NoError(t, err)
 
 	result2 := api.ResultMessage{
-		Id:      "bob-request",
+		ID:      "bob-request",
 		Payload: `{"response": "bob result"}`,
 	}
 	result2JSON, _ := json.Marshal(result2)
@@ -288,13 +288,13 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	res1, err := tenant1Producer.GetResultWithTimeout(ctx, 1*time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, res1)
-	assert.Equal(t, "alice-request", res1.Id)
+	assert.Equal(t, "alice-request", res1.ID)
 	assert.Contains(t, res1.Payload, "alice result")
 
 	res2, err := tenant2Producer.GetResultWithTimeout(ctx, 1*time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, res2)
-	assert.Equal(t, "bob-request", res2.Id)
+	assert.Equal(t, "bob-request", res2.ID)
 	assert.Contains(t, res2.Payload, "bob result")
 }
 

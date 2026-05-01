@@ -39,7 +39,7 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
 
 		result := popResult(ctx, rdb, budgetResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("budget-positive"))
+		gomega.Expect(result.ID).To(gomega.Equal("budget-positive"))
 	})
 
 	ginkgo.It("pauses processing when dispatch budget is zero", func() {
@@ -63,7 +63,7 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
 
 		result := popResult(ctx, rdb, budgetResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("budget-zero"))
+		gomega.Expect(result.ID).To(gomega.Equal("budget-zero"))
 	})
 
 	ginkgo.It("resumes processing when dispatch budget is restored", func() {

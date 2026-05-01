@@ -31,7 +31,7 @@ func TestRedisImpl(t *testing.T) {
 			InternalRequest: api.NewInternalRequest(
 				api.InternalRouting{RequestQueueName: "request-queue"},
 				&api.RequestMessage{
-					Id:       "test-id",
+					ID:       "test-id",
 					Created:  time.Now().Unix(),
 					Deadline: time.Now().Add(time.Minute).Unix(),
 					Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
@@ -61,7 +61,7 @@ func TestRedisImpl(t *testing.T) {
 
 	select {
 	case req := <-mergedChannel.Channel:
-		if req.PublicRequest == nil || req.PublicRequest.ReqId() != "test-id" {
+		if req.PublicRequest == nil || req.PublicRequest.ReqID() != "test-id" {
 			t.Errorf("Expected message id to be test-id, got %v", req.PublicRequest)
 		}
 	case <-time.After(2 * time.Second):
@@ -84,7 +84,7 @@ func TestRedisImplWithAuth(t *testing.T) {
 
 	// Publish a result message
 	flow.ResultChannel() <- api.ResultMessage{
-		Id: "test-auth-id",
+		ID: "test-auth-id",
 	}
 
 	// Wait for processing

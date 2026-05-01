@@ -38,7 +38,7 @@ var _ = ginkgo.Describe("Saturation Metric Dispatch Gate E2E", func() {
 
 		result := popResult(ctx, rdb, saturationResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("sat-below-threshold"))
+		gomega.Expect(result.ID).To(gomega.Equal("sat-below-threshold"))
 	})
 
 	ginkgo.It("pauses processing when saturation is at or above threshold", func() {
@@ -63,7 +63,7 @@ var _ = ginkgo.Describe("Saturation Metric Dispatch Gate E2E", func() {
 
 		result := popResult(ctx, rdb, saturationResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("sat-above-threshold"))
+		gomega.Expect(result.ID).To(gomega.Equal("sat-above-threshold"))
 	})
 
 	ginkgo.It("resumes processing when saturation drops below threshold", func() {

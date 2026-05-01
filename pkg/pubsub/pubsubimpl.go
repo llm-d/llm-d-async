@@ -190,7 +190,7 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 			bytes, err := json.Marshal(msg)
 			var msgBytes []byte
 			if err != nil {
-				fallback := map[string]string{"id": msg.Id, "error": "Failed to marshal result to string"}
+				fallback := map[string]string{"id": msg.ID, "error": "Failed to marshal result to string"}
 				msgBytes, _ = json.Marshal(fallback)
 			} else {
 				msgBytes = bytes

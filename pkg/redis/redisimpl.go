@@ -216,7 +216,7 @@ func marshalResultMessage(msg api.ResultMessage) string {
 	if bytes, err := json.Marshal(msg); err == nil {
 		return string(bytes)
 	}
-	fallback := map[string]string{"id": msg.Id, "error": "Failed to marshal result to string"}
+	fallback := map[string]string{"id": msg.ID, "error": "Failed to marshal result to string"}
 	fallbackBytes, _ := json.Marshal(fallback)
 	return string(fallbackBytes)
 }
@@ -332,7 +332,7 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 					queueName := message.RequestQueueName
 					msgChannel, ok := msgChannels[queueName]
 					if !ok {
-						logger.V(logutil.DEFAULT).Info("Unknown retry queue, dropping message", "queueName", queueName, "messageId", message.PublicRequest.ReqId())
+						logger.V(logutil.DEFAULT).Info("Unknown retry queue, dropping message", "queueName", queueName, "messageId", message.PublicRequest.ReqID())
 						continue
 					}
 

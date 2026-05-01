@@ -9,7 +9,7 @@ import (
 
 func irID(id string) *api.InternalRequest {
 	return api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
-		Id:       id,
+		ID:       id,
 		Created:  1,
 		Deadline: 9999999999,
 	})
@@ -42,7 +42,7 @@ func TestProcessAllChannels(t *testing.T) {
 		if msg.PublicRequest == nil {
 			t.Fatal("expected PublicRequest")
 		}
-		counts[msg.PublicRequest.ReqId()]++
+		counts[msg.PublicRequest.ReqID()]++
 
 	}
 
@@ -99,8 +99,8 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 			if msg.PublicRequest == nil {
 				t.Fatal("nil request")
 			}
-			if msg.PublicRequest.ReqId() != "probe-c" {
-				t.Fatalf("unexpected message id while waiting for realignment: %s", msg.PublicRequest.ReqId())
+			if msg.PublicRequest.ReqID() != "probe-c" {
+				t.Fatalf("unexpected message id while waiting for realignment: %s", msg.PublicRequest.ReqID())
 			}
 			realigned = msg.RequestURL == "http://c/c" &&
 				msg.HttpHeaders["x-gateway-inference-objective"] == "obj-c"
@@ -118,7 +118,7 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 			if msg.PublicRequest == nil {
 				t.Fatal("nil request")
 			}
-			switch msg.PublicRequest.ReqId() {
+			switch msg.PublicRequest.ReqID() {
 			case "from-a":
 				if msg.RequestURL != "http://a/a" {
 					t.Errorf("expected RequestURL http://a/a, got %s", msg.RequestURL)
@@ -134,7 +134,7 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 					t.Errorf("expected InferenceObjective obj-c, got %s", msg.HttpHeaders["x-gateway-inference-objective"])
 				}
 			default:
-				t.Fatalf("unexpected message id: %s", msg.PublicRequest.ReqId())
+				t.Fatalf("unexpected message id: %s", msg.PublicRequest.ReqID())
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for messages")

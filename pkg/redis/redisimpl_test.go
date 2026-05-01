@@ -42,7 +42,7 @@ func TestPubsubResultWorker_BatchPublish(t *testing.T) {
 	numMessages := 5
 	for i := 0; i < numMessages; i++ {
 		flow.resultChannel <- api.ResultMessage{
-			Id:      "msg-" + string(rune('A'+i)),
+			ID:      "msg-" + string(rune('A'+i)),
 			Payload: "payload-" + string(rune('A'+i)),
 		}
 	}
@@ -58,7 +58,7 @@ func TestPubsubResultWorker_BatchPublish(t *testing.T) {
 			if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
 				t.Fatalf("Failed to unmarshal: %v", err)
 			}
-			received[rm.Id] = true
+			received[rm.ID] = true
 		case <-timeout:
 			t.Fatalf("Timeout: received only %d/%d messages", len(received), numMessages)
 		}
@@ -91,7 +91,7 @@ func TestPubsubResultWorker_SingleMessage(t *testing.T) {
 	go flow.resultWorker(ctx, queue)
 
 	// Send a single message — should be flushed immediately as a batch of 1.
-	flow.resultChannel <- api.ResultMessage{Id: "solo", Payload: "data"}
+	flow.resultChannel <- api.ResultMessage{ID: "solo", Payload: "data"}
 
 	select {
 	case msg := <-pubsubCh:
@@ -99,8 +99,8 @@ func TestPubsubResultWorker_SingleMessage(t *testing.T) {
 		if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
 			t.Fatalf("Unmarshal error: %v", err)
 		}
-		if rm.Id != "solo" {
-			t.Errorf("Expected id 'solo', got %s", rm.Id)
+		if rm.ID != "solo" {
+			t.Errorf("Expected id 'solo', got %s", rm.ID)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for single message")
@@ -109,15 +109,15 @@ func TestPubsubResultWorker_SingleMessage(t *testing.T) {
 
 func TestMarshalResultMessage_Fallback(t *testing.T) {
 	// A normal message should marshal fine.
-	msg := api.ResultMessage{Id: "ok", Payload: "data"}
+	msg := api.ResultMessage{ID: "ok", Payload: "data"}
 	result := marshalResultMessage(msg)
 
 	var rm api.ResultMessage
 	if err := json.Unmarshal([]byte(result), &rm); err != nil {
 		t.Fatalf("Failed to unmarshal: %v", err)
 	}
-	if rm.Id != "ok" {
-		t.Errorf("Expected id 'ok', got %s", rm.Id)
+	if rm.ID != "ok" {
+		t.Errorf("Expected id 'ok', got %s", rm.ID)
 	}
 }
 
@@ -168,7 +168,7 @@ func TestPubsubResultWorker_BatchSizeCap(t *testing.T) {
 	totalMessages := maxBatchSize + 10
 	for i := 0; i < totalMessages; i++ {
 		flow.resultChannel <- api.ResultMessage{
-			Id:      "cap-" + strconv.Itoa(i),
+			ID:      "cap-" + strconv.Itoa(i),
 			Payload: "data",
 		}
 	}
@@ -184,7 +184,7 @@ func TestPubsubResultWorker_BatchSizeCap(t *testing.T) {
 			if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
 				t.Fatalf("Failed to unmarshal: %v", err)
 			}
-			received[rm.Id] = true
+			received[rm.ID] = true
 		case <-timeout:
 			t.Fatalf("Timeout: received only %d/%d messages", len(received), totalMessages)
 		}
@@ -221,7 +221,7 @@ func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < msgsPerProducer; i++ {
 				flow.resultChannel <- api.ResultMessage{
-					Id:      "p" + strconv.Itoa(producerID) + "-" + strconv.Itoa(i),
+					ID:      "p" + strconv.Itoa(producerID) + "-" + strconv.Itoa(i),
 					Payload: "data",
 				}
 			}
@@ -238,10 +238,10 @@ func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
 			if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
 				t.Fatalf("Failed to unmarshal: %v", err)
 			}
-			if received[rm.Id] {
-				t.Errorf("Duplicate message: %s", rm.Id)
+			if received[rm.ID] {
+				t.Errorf("Duplicate message: %s", rm.ID)
 			}
-			received[rm.Id] = true
+			received[rm.ID] = true
 		case <-timeout:
 			t.Fatalf("Timeout: received only %d/%d messages", len(received), totalMessages)
 		}
@@ -269,7 +269,7 @@ func TestPubsubResultWorker_RetryAfterFailure(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	s.SetError("READONLY simulated failure")
-	flow.resultChannel <- api.ResultMessage{Id: "retry-msg", Payload: "data"}
+	flow.resultChannel <- api.ResultMessage{ID: "retry-msg", Payload: "data"}
 
 	// Wait for the first attempt to fail.
 	time.Sleep(150 * time.Millisecond)
@@ -283,8 +283,8 @@ func TestPubsubResultWorker_RetryAfterFailure(t *testing.T) {
 		if err := json.Unmarshal([]byte(msg.Payload), &rm); err != nil {
 			t.Fatalf("Unmarshal error: %v", err)
 		}
-		if rm.Id != "retry-msg" {
-			t.Errorf("Expected retry-msg, got %s", rm.Id)
+		if rm.ID != "retry-msg" {
+			t.Errorf("Expected retry-msg, got %s", rm.ID)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for retried message")
@@ -321,7 +321,7 @@ func TestMQRetryWorker_RequeuesOnShutdown(t *testing.T) {
 		ir := api.NewInternalRequest(
 			api.InternalRouting{RequestQueueName: queueName},
 			&api.RequestMessage{
-				Id:       "retry-" + strconv.Itoa(i),
+				ID:       "retry-" + strconv.Itoa(i),
 				Created:  now,
 				Deadline: now + 3600,
 			},
@@ -375,11 +375,11 @@ func TestPopDueRetryMessages_PopsDueAndRemovesFromSortedSet(t *testing.T) {
 
 	due := api.NewInternalRequest(
 		api.InternalRouting{RequestQueueName: "request-queue"},
-		&api.RequestMessage{Id: "due", Created: 1, Deadline: now + 60},
+		&api.RequestMessage{ID: "due", Created: 1, Deadline: now + 60},
 	)
 	future := api.NewInternalRequest(
 		api.InternalRouting{RequestQueueName: "request-queue"},
-		&api.RequestMessage{Id: "future", Created: 1, Deadline: now + 120},
+		&api.RequestMessage{ID: "future", Created: 1, Deadline: now + 120},
 	)
 
 	dueBytes, err := json.Marshal(due)
@@ -410,7 +410,7 @@ func TestPopDueRetryMessages_PopsDueAndRemovesFromSortedSet(t *testing.T) {
 	if err := json.Unmarshal([]byte(items[0]), &popped); err != nil {
 		t.Fatalf("unmarshal popped message: %v", err)
 	}
-	if popped.PublicRequest == nil || popped.PublicRequest.ReqId() != "due" {
+	if popped.PublicRequest == nil || popped.PublicRequest.ReqID() != "due" {
 		t.Fatalf("expected popped message id 'due', got %v", popped.PublicRequest)
 	}
 
@@ -437,7 +437,7 @@ func TestPopDueRetryMessages_ConcurrentCallers_NoDuplicatePops(t *testing.T) {
 	for i := 0; i < totalMessages; i++ {
 		ir := api.NewInternalRequest(
 			api.InternalRouting{RequestQueueName: "request-queue"},
-			&api.RequestMessage{Id: "msg-" + strconv.Itoa(i), Created: 1, Deadline: now + 300},
+			&api.RequestMessage{ID: "msg-" + strconv.Itoa(i), Created: 1, Deadline: now + 300},
 		)
 		msgBytes, err := json.Marshal(ir)
 		if err != nil {
@@ -483,7 +483,7 @@ func TestPopDueRetryMessages_ConcurrentCallers_NoDuplicatePops(t *testing.T) {
 						return
 					}
 					mu.Lock()
-					seenID[msg.PublicRequest.ReqId()]++
+					seenID[msg.PublicRequest.ReqID()]++
 					mu.Unlock()
 				}
 			}

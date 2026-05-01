@@ -65,7 +65,7 @@ type RequestMergePolicy interface {
 // It exposes only the caller-visible fields. Concrete types like RequestMessage,
 // RedisRequest, and PubSubRequest satisfy this interface.
 type Request interface {
-	ReqId() string
+	ReqID() string
 	ReqCreated() int64
 	ReqDeadline() int64
 	ReqPayload() map[string]any
@@ -78,14 +78,14 @@ type Request interface {
 // Request interface accessors use the Req prefix (e.g. ReqPayload) to avoid
 // colliding with the struct's exported field names used for JSON serialization.
 type RequestMessage struct {
-	Id       string            `json:"id"`
+	ID       string            `json:"id"`
 	Created  int64             `json:"created"`  // Unix seconds
 	Deadline int64             `json:"deadline"` // Unix seconds
 	Payload  map[string]any    `json:"payload"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-func (r *RequestMessage) ReqId() string                  { return r.Id }
+func (r *RequestMessage) ReqID() string                  { return r.ID }
 func (r *RequestMessage) ReqCreated() int64               { return r.Created }
 func (r *RequestMessage) ReqDeadline() int64       { return r.Deadline }
 func (r *RequestMessage) ReqPayload() map[string]any      { return r.Payload }
@@ -127,7 +127,7 @@ type EmbelishedRequestChannel struct {
 
 // EmbelishedRequestMessage decorates an InternalRequest with HTTP dispatch context.
 // The embedded InternalRequest must be non-nil in normal use.
-// Caller-supplied metadata lives on the embedded Request (via GetMetadata());
+// Caller-supplied metadata lives on the embedded Request (via ReqMetadata());
 // there is no separate Metadata field here to avoid ambiguity.
 type EmbelishedRequestMessage struct {
 	*InternalRequest
@@ -141,10 +141,10 @@ type RetryMessage struct {
 	BackoffDurationSeconds float64
 }
 
-// ResultMessage is the async inference result returned to callers. Id and Payload are
+// ResultMessage is the async inference result returned to callers. ID and Payload are
 // JSON fields; Routing and Metadata are infrastructure pass-through (json:"-").
 type ResultMessage struct {
-	Id       string            `json:"id"`
+	ID       string            `json:"id"`
 	Payload  string            `json:"payload"`
 	Routing  InternalRouting   `json:"-"`
 	Metadata map[string]string `json:"-"`

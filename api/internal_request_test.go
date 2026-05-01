@@ -9,7 +9,7 @@ func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 	ir := NewInternalRequest(
 		InternalRouting{RetryCount: 2, RequestQueueName: "rq", ResultQueueName: "resq"},
 		&RequestMessage{
-			Id: "plain-1", Created: 1000, Deadline: 2000,
+			ID: "plain-1", Created: 1000, Deadline: 2000,
 			Payload:  map[string]any{"model": "m1"},
 			Metadata: map[string]string{"k": "v"},
 		},
@@ -29,7 +29,7 @@ func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *RequestMessage, got %T", got.PublicRequest)
 	}
-	if rm.Id != "plain-1" || rm.Created != 1000 || rm.Deadline != 2000 {
+	if rm.ID != "plain-1" || rm.Created != 1000 || rm.Deadline != 2000 {
 		t.Errorf("field mismatch: %+v", rm)
 	}
 	if rm.Payload["model"] != "m1" {
@@ -44,7 +44,7 @@ func TestRoundTrip_RedisRequest(t *testing.T) {
 	ir := NewInternalRequest(
 		InternalRouting{RetryCount: 1, RequestQueueName: "rq", ResultQueueName: "resq", TransportCorrelationID: "tc"},
 		&RedisRequest{
-			RequestMessage:   RequestMessage{Id: "redis-1", Created: 100, Deadline: 200, Payload: map[string]any{"p": 1}},
+			RequestMessage:   RequestMessage{ID: "redis-1", Created: 100, Deadline: 200, Payload: map[string]any{"p": 1}},
 			RequestQueueName: "per-msg-rq",
 			ResultQueueName:  "per-msg-resq",
 		},
@@ -64,8 +64,8 @@ func TestRoundTrip_RedisRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *RedisRequest, got %T", got.PublicRequest)
 	}
-	if rr.Id != "redis-1" {
-		t.Errorf("id mismatch: %s", rr.Id)
+	if rr.ID != "redis-1" {
+		t.Errorf("id mismatch: %s", rr.ID)
 	}
 	if rr.RequestQueueName != "per-msg-rq" || rr.ResultQueueName != "per-msg-resq" {
 		t.Errorf("queue fields mismatch: %+v", rr)
@@ -76,7 +76,7 @@ func TestRoundTrip_PubSubRequest(t *testing.T) {
 	ir := NewInternalRequest(
 		InternalRouting{TransportCorrelationID: "corr-123"},
 		&PubSubRequest{
-			RequestMessage: RequestMessage{Id: "ps-1", Created: 10, Deadline: 20},
+			RequestMessage: RequestMessage{ID: "ps-1", Created: 10, Deadline: 20},
 			PubSubID:       "pub-abc",
 		},
 	)
@@ -95,7 +95,7 @@ func TestRoundTrip_PubSubRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *PubSubRequest, got %T", got.PublicRequest)
 	}
-	if ps.Id != "ps-1" || ps.PubSubID != "pub-abc" {
+	if ps.ID != "ps-1" || ps.PubSubID != "pub-abc" {
 		t.Errorf("field mismatch: %+v", ps)
 	}
 }
@@ -167,7 +167,7 @@ func TestUnmarshal_EmptyData(t *testing.T) {
 func TestRoundTrip_PublicRequestInterface(t *testing.T) {
 	ir := NewInternalRequest(
 		InternalRouting{},
-		&RequestMessage{Id: "iface-test", Created: 1, Deadline: 2, Payload: map[string]any{"k": "v"}, Metadata: map[string]string{"m": "d"}},
+		&RequestMessage{ID: "iface-test", Created: 1, Deadline: 2, Payload: map[string]any{"k": "v"}, Metadata: map[string]string{"m": "d"}},
 	)
 	b, err := json.Marshal(ir)
 	if err != nil {
@@ -182,8 +182,8 @@ func TestRoundTrip_PublicRequestInterface(t *testing.T) {
 	if r == nil {
 		t.Fatal("PublicRequest is nil")
 	}
-	if r.ReqId() != "iface-test" {
-		t.Errorf("ReqID() = %q", r.ReqId())
+	if r.ReqID() != "iface-test" {
+		t.Errorf("ReqID() = %q", r.ReqID())
 	}
 	if r.ReqCreated() != 1 {
 		t.Errorf("ReqCreated() = %d", r.ReqCreated())

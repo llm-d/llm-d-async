@@ -63,7 +63,7 @@ func Worker(ctx context.Context, characteristics asyncapi.Characteristics, clien
 					metrics.SuccessfulReqs.Inc()
 					select {
 					case resultChannel <- asyncapi.ResultMessage{
-						Id:       msg.PublicRequest.ReqId(),
+						ID:       msg.PublicRequest.ReqID(),
 						Payload:  string(responseBody),
 						Routing:  msg.InternalRouting,
 						Metadata: msg.PublicRequest.ReqMetadata(),
@@ -191,7 +191,7 @@ func CreateErrorResultMessage(req asyncapi.Request, routing asyncapi.InternalRou
 		payloadBytes = []byte(`{"error": "internal error"}`)
 	}
 	return asyncapi.ResultMessage{
-		Id:       req.ReqId(),
+		ID:       req.ReqID(),
 		Payload:  string(payloadBytes),
 		Routing:  routing,
 		Metadata: req.ReqMetadata(),

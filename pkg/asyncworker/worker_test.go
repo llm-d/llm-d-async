@@ -44,7 +44,7 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:       "123",
+		ID:       "123",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(-10 * time.Second).Unix(),
 	}, "", map[string]string{})
@@ -71,7 +71,7 @@ func TestRetryMessage_retry(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:       "123",
+		ID:       "123",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(10 * time.Second).Unix(),
 	}, "", map[string]string{})
@@ -125,7 +125,7 @@ func TestSheddedRequest(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       msgId,
+		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
@@ -133,7 +133,7 @@ func TestSheddedRequest(t *testing.T) {
 
 	select {
 	case r := <-retryChannel:
-		if r.PublicRequest == nil || r.PublicRequest.ReqId() != msgId {
+		if r.PublicRequest == nil || r.PublicRequest.ReqID() != msgId {
 			t.Errorf("Expected retry message id to be %s, got %v", msgId, r.PublicRequest)
 		}
 	case <-resultChannel:
@@ -162,7 +162,7 @@ func TestSuccessfulRequest(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       msgId,
+		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
@@ -172,8 +172,8 @@ func TestSuccessfulRequest(t *testing.T) {
 	case <-retryChannel:
 		t.Errorf("Should not get a retry from a 200 response")
 	case r := <-resultChannel:
-		if r.Id != msgId {
-			t.Errorf("Expected result message id to be %s, got %s", msgId, r.Id)
+		if r.ID != msgId {
+			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
 	}
 
@@ -196,7 +196,7 @@ func TestFatalError_NoRetry(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       msgId,
+		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
@@ -206,8 +206,8 @@ func TestFatalError_NoRetry(t *testing.T) {
 	case <-retryChannel:
 		t.Errorf("Should not retry a fatal error")
 	case r := <-resultChannel:
-		if r.Id != msgId {
-			t.Errorf("Expected result message id to be %s, got %s", msgId, r.Id)
+		if r.ID != msgId {
+			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
 		var resultMap map[string]any
 		err := json.Unmarshal([]byte(r.Payload), &resultMap)
@@ -241,7 +241,7 @@ func TestRateLimitRequest(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       msgId,
+		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
@@ -249,7 +249,7 @@ func TestRateLimitRequest(t *testing.T) {
 
 	select {
 	case r := <-retryChannel:
-		if r.PublicRequest == nil || r.PublicRequest.ReqId() != msgId {
+		if r.PublicRequest == nil || r.PublicRequest.ReqID() != msgId {
 			t.Errorf("Expected retry message id to be %s, got %v", msgId, r.PublicRequest)
 		}
 	case <-resultChannel:
@@ -277,7 +277,7 @@ func TestRequestTimeout(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       msgId,
+		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
@@ -286,8 +286,8 @@ func TestRequestTimeout(t *testing.T) {
 	select {
 	case r := <-resultChannel:
 		// The request should fail due to context deadline exceeded (fatal unknown error).
-		if r.Id != msgId {
-			t.Errorf("Expected result message id to be %s, got %s", msgId, r.Id)
+		if r.ID != msgId {
+			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
 	case <-retryChannel:
 		// Context cancellation errors are wrapped as ErrCategoryUnknown (fatal), so no retry.
@@ -368,7 +368,7 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	now := time.Now().Unix()
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:       "exact-deadline",
+		ID:       "exact-deadline",
 		Created:  now,
 		Deadline: now, // same second → no time left to retry
 	}, "", nil)
@@ -426,7 +426,7 @@ func TestRetryMessage_retryAfterHonored(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:       "retry-after-test",
+		ID:       "retry-after-test",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
 	}, "", nil)
@@ -447,7 +447,7 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmbR(asyncapi.InternalRouting{RetryCount: 5}, asyncapi.RequestMessage{
-		Id:       "retry-after-small",
+		ID:       "retry-after-small",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
 	}, "", nil)
@@ -468,7 +468,7 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	retryChannel := make(chan asyncapi.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:       "retry-after-exceeds-deadline",
+		ID:       "retry-after-exceeds-deadline",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(5 * time.Second).Unix(),
 	}, "", nil)
@@ -510,7 +510,7 @@ func TestRateLimitRequest_WithRetryAfterHeader(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       msgId,
+		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
@@ -518,7 +518,7 @@ func TestRateLimitRequest_WithRetryAfterHeader(t *testing.T) {
 
 	select {
 	case r := <-retryChannel:
-		if r.PublicRequest == nil || r.PublicRequest.ReqId() != msgId {
+		if r.PublicRequest == nil || r.PublicRequest.ReqID() != msgId {
 			t.Errorf("expected retry message id %s, got %v", msgId, r.PublicRequest)
 		}
 		if r.BackoffDurationSeconds < 25 {
@@ -539,7 +539,7 @@ func TestValidateAndMarshal_cancelledCtxDoesNotBlock(t *testing.T) {
 	resultChannel := make(chan asyncapi.ResultMessage)
 
 	emb := newEmb(asyncapi.RequestMessage{
-		Id:       "cancel-test",
+		ID:       "cancel-test",
 		Created:  time.Now().Unix(),
 		Deadline: 0, // invalid deadline → error path
 	}, "", nil)
@@ -567,7 +567,7 @@ func TestRetryMessage_cancelledCtxDoesNotBlock(t *testing.T) {
 	resultChannel := make(chan asyncapi.ResultMessage)
 
 	msg := newEmb(asyncapi.RequestMessage{
-		Id:       "cancel-retry-test",
+		ID:       "cancel-retry-test",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(10 * time.Second).Unix(),
 	}, "", nil)
@@ -610,7 +610,7 @@ func TestWorker_cancelledCtxExitsPromptly(t *testing.T) {
 
 	deadline := time.Now().Add(100 * time.Second).Unix()
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       "worker-cancel-test",
+		ID:       "worker-cancel-test",
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
@@ -648,7 +648,7 @@ func TestClientError_NoRetry(t *testing.T) {
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
-		Id:       msgId,
+		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
@@ -658,8 +658,8 @@ func TestClientError_NoRetry(t *testing.T) {
 	case <-retryChannel:
 		t.Errorf("Should not retry a 4xx client error")
 	case r := <-resultChannel:
-		if r.Id != msgId {
-			t.Errorf("Expected result message id to be %s, got %s", msgId, r.Id)
+		if r.ID != msgId {
+			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
 		expectedPayload := `{"error":"Failed to send request to inference: INVALID_REQ: client error: status code 400"}`
 		if r.Payload != expectedPayload {

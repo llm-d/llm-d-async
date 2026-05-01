@@ -251,7 +251,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			continue
 		}
 		if deadline < currentTime {
-			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", rview.ReqId())
+			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", rview.ReqID())
 			continue
 		}
 
@@ -279,7 +279,7 @@ func (r *RedisSortedSetFlow) parseMessage(z redis.Z, logger logr.Logger) (*api.I
 	}
 	deadline := ir.PublicRequest.ReqDeadline()
 	if deadline <= 0 {
-		logger.V(logutil.DEFAULT).Error(nil, "Invalid deadline", "id", ir.PublicRequest.ReqId())
+		logger.V(logutil.DEFAULT).Error(nil, "Invalid deadline", "id", ir.PublicRequest.ReqID())
 		return &ir, 0, false
 	}
 
@@ -437,7 +437,7 @@ func (r *RedisSortedSetFlow) marshalResult(msg api.ResultMessage) string {
 	if bytes, err := json.Marshal(msg); err == nil {
 		return string(bytes)
 	}
-	fallback := map[string]string{"id": msg.Id, "payload": `{"error":"marshal failed"}`}
+	fallback := map[string]string{"id": msg.ID, "payload": `{"error":"marshal failed"}`}
 	fallbackBytes, _ := json.Marshal(fallback)
 	return string(fallbackBytes)
 }

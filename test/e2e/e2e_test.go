@@ -28,7 +28,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 
 		result := popResult(ctx, rdb, resultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("e2e-basic-1"))
+		gomega.Expect(result.ID).To(gomega.Equal("e2e-basic-1"))
 	})
 
 	ginkgo.It("processes messages in deadline order", func() {
@@ -80,7 +80,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 
 		result := popResult(ctx, rdb, resultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("valid-msg"))
+		gomega.Expect(result.ID).To(gomega.Equal("valid-msg"))
 	})
 
 	ginkgo.It("retries on 5xx from inference gateway", func() {
@@ -97,7 +97,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 
 		result := popResult(ctx, rdb, resultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("retry-msg"))
+		gomega.Expect(result.ID).To(gomega.Equal("retry-msg"))
 	})
 
 	ginkgo.It("collects all results from batch of messages", func() {
@@ -121,7 +121,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 		for i := 0; i < 5; i++ {
 			r := popResult(ctx, rdb, resultQueue)
 			gomega.Expect(r).NotTo(gomega.BeNil())
-			collected[r.Id] = true
+			collected[r.ID] = true
 		}
 
 		for _, id := range ids {
@@ -168,7 +168,7 @@ var _ = ginkgo.Describe("Dispatch Gate E2E", func() {
 
 		result := popResult(ctx, rdb, resultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.Id).To(gomega.Equal("gated-pause"))
+		gomega.Expect(result.ID).To(gomega.Equal("gated-pause"))
 	})
 
 	ginkgo.It("resumes processing when budget changes from zero to one", func() {

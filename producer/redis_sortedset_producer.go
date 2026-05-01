@@ -124,7 +124,7 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 		return ir
 	default:
 		ir.PublicRequest = &api.RequestMessage{
-			Id:       req.ReqId(),
+			ID:       req.ReqID(),
 			Created:  req.ReqCreated(),
 			Deadline: req.ReqDeadline(),
 			Payload:  req.ReqPayload(),
@@ -143,7 +143,7 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 		return errors.New("request is required")
 	}
 
-	if r.ReqId() == "" {
+	if r.ReqID() == "" {
 		return errors.New("request ID is required")
 	}
 
@@ -228,7 +228,7 @@ func (p *RedisSortedSetProducer) parseResult(data string) (*api.ResultMessage, e
 		return nil, fmt.Errorf("failed to unmarshal result: %w", err)
 	}
 
-	if result.Id == "" {
+	if result.ID == "" {
 		return nil, errors.New("result missing 'id' field")
 	}
 
