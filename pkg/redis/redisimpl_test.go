@@ -32,9 +32,12 @@ func TestPubsubResultWorker_BatchPublish(t *testing.T) {
 	queue := "result-pubsub-queue"
 	flow := newTestMQFlow(rdb)
 
-	// Subscribe so published messages are captured.
+	// Subscribe and wait for confirmation before publishing.
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatalf("Subscribe confirmation: %v", err)
+	}
 	pubsubCh := sub.Channel()
 
 	// Pre-fill the channel with multiple results before starting the worker
@@ -86,6 +89,9 @@ func TestPubsubResultWorker_SingleMessage(t *testing.T) {
 
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatalf("Subscribe confirmation: %v", err)
+	}
 	pubsubCh := sub.Channel()
 
 	go flow.resultWorker(ctx, queue)
@@ -161,6 +167,9 @@ func TestPubsubResultWorker_BatchSizeCap(t *testing.T) {
 
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatalf("Subscribe confirmation: %v", err)
+	}
 	pubsubCh := sub.Channel()
 
 	// Send more than maxBatchSize messages. The worker should still
@@ -205,6 +214,9 @@ func TestPubsubResultWorker_ConcurrentProducers(t *testing.T) {
 
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatalf("Subscribe confirmation: %v", err)
+	}
 	pubsubCh := sub.Channel()
 
 	go flow.resultWorker(ctx, queue)
@@ -262,6 +274,9 @@ func TestPubsubResultWorker_RetryAfterFailure(t *testing.T) {
 
 	sub := rdb.Subscribe(ctx, queue)
 	defer sub.Close() // nolint:errcheck
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatalf("Subscribe confirmation: %v", err)
+	}
 	pubsubCh := sub.Channel()
 
 	// Start worker, then inject error so first Exec fails.
