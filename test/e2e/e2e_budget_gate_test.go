@@ -22,8 +22,12 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
 		rdb.Del(ctx, budgetRequestQueue) //nolint:errcheck
 		rdb.Del(ctx, budgetResultQueue)  //nolint:errcheck
 		resetMock(adminURL)
-		// Start with full dispatch budget (no load)
-		setPromMockBudget(promMockURL, "1.0")
+		// Reset all prom-mock metric sources (primary budget, vLLM budget,
+		// primaryDisabled flag) so cascade state doesn't leak between tests.
+		resetPromMock(promMockURL)
+		// Wait for the processor's metric cache (5s TTL) to expire and
+		// pick up the reset (gate-closed) values before each test runs.
+		time.Sleep(6 * time.Second)
 	})
 
 	ginkgo.It("processes a message when dispatch budget is positive", func() {
@@ -64,6 +68,24 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
 		result := popResult(ctx, rdb, budgetResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
 		gomega.Expect(result.ID).To(gomega.Equal("budget-zero"))
+	})
+
+	ginkgo.It("falls back to vLLM metrics when primary metric is unavailable", func() {
+		// Disable primary (EPP queue size metric) to simulate EPP being down
+		disablePromMockPrimary(promMockURL)
+		// Secondary (vLLM-based) budget is above baseline
+		setPromMockVLLMBudget(promMockURL, "0.8")
+
+		msg := makeRequestMessage("budget-cascade", 5*time.Minute)
+		enqueueMessage(ctx, rdb, budgetRequestQueue, msg)
+
+		gomega.Eventually(func() int64 {
+			return getResultCount(ctx, rdb, budgetResultQueue)
+		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
+
+		result := popResult(ctx, rdb, budgetResultQueue)
+		gomega.Expect(result).NotTo(gomega.BeNil())
+		gomega.Expect(result.ID).To(gomega.Equal("budget-cascade"))
 	})
 
 	ginkgo.It("resumes processing when dispatch budget is restored", func() {

@@ -101,7 +101,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `constant`: Always returns budget 1.0 (fully open) - no throttling.
 - `redis`: Queries Redis for dispatch budget (managed by external system).
 - `prometheus-saturation`: Queries Prometheus for pool saturation metric. Returns `1.0 - saturation` if below threshold, `0.0` otherwise.
-- `prometheus-budget`: Queries Prometheus to compute a dispatch budget using the formula `D = 1 - (F_SYS + F_EPP + B)`, where `F_SYS` is pool saturation, `F_EPP` is normalized EPP queue depth, and `B` is a configurable baseline reserve.
+- `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_sys)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / (ready_pods × max_concurrency))`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
 
 **Example Configuration with Per-Queue Gates:**
 
@@ -131,6 +131,7 @@ For more fine-grained control, configure gates per queue in your configuration f
        "gate_params": {
           "pool": "inference_pool_1",
           "max_sys": "100",
+          "max_concurrency": "100",
           "baseline": "0.05"
        }
     },
@@ -158,12 +159,17 @@ For more fine-grained control, configure gates per queue in your configuration f
   - `threshold` (optional): Saturation threshold (0.0-1.0). When saturation >= threshold, budget is 0.0. Default is `0.8`.
   - `fallback` (optional): Fallback saturation value (0.0-1.0) used when the metric source returns an error or empty data. Default is `0.0`.
 
-- `prometheus-budget`: Computes a dispatch budget using the formula `D = 1 - (F_SYS + F_EPP + B)`, where `F_SYS` is pool saturation,
-  `F_EPP` is normalized EPP queue depth, and `B` is a configurable baseline reserve. This is internally translated into a single Prometheus query.
+- `prometheus-budget`: Cascades two Prometheus metric sources to compute a dispatch budget D.
+  The primary source computes D from the EPP's flow control queue size: `D = 1 − (queue_size / max_sys)`.
+  If the primary metric is unavailable (e.g. EPP is down), the gate falls back to a secondary source
+  that estimates saturation from vLLM and pool metrics: `D = 1 − (running_requests / (ready_pods × max_concurrency))`.
+  The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
+  See [docs/dispatch-budget.md](docs/dispatch-budget.md) for the full derivation.
   - `pool` (**required**): The inference pool name to filter metrics by.
-  - `max_sys` (**required**): Maximum system request capacity, used to normalize the EPP queue depth (`F_EPP = queue_size / max_sys`). Must be a positive number.
-  - `baseline` (optional): Reserved fraction for unexpected traffic bursts. Default is `0.05`.
-  - `fallback` (optional): Fallback budget value (0.0-1.0) returned when metrics are unavailable. Default is `0.0` (fail closed).
+  - `max_sys` (**required**): Maximum system request capacity, used to normalize the EPP queue depth (`queue_size / max_sys`). Must be a positive number.
+  - `max_concurrency` (optional): Per-endpoint request capacity used to compute the vLLM fallback saturation. Default is `100` (matching the llm-d inference scheduler default).
+  - `baseline` (optional): Reserved baseline B. The gate closes when D ≤ B. Default is `0.05`.
+  - `fallback` (optional): Fallback budget value (0.0-1.0) returned when all metric sources are unavailable. Default is `0.0` (fail closed).
 
 ## Request Messages and Consumption
 

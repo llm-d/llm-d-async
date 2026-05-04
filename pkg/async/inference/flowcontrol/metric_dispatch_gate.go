@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"context"
 	"math"
+	"sync/atomic"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -28,14 +29,16 @@ import (
 var _ asyncapi.DispatchGate = (*MetricDispatchGate)(nil)
 
 // MetricDispatchGate implements DispatchGate by querying a MetricSource for a
-// budget value and returning it clamped to [0.0, 1.0].
+// budget value D and returning D − threshold, clamped to [0.0, 1.0].
 //
-// If the value is at or below the configured threshold, the gate returns 0.0.
+// The gate closes (returns 0.0) when D ≤ threshold. This implements the doc
+// formula N = max_SYS × (D − B) when threshold is set to the reserved baseline B.
 // On error or missing/invalid data, the gate returns the configured fallback budget.
 type MetricDispatchGate struct {
-	source    MetricSource
-	threshold float64
-	fallback  float64
+	source        MetricSource
+	threshold     float64
+	fallback      float64
+	usingFallback atomic.Bool
 }
 
 // NewMetricDispatchGate creates a MetricDispatchGate with the given source, threshold,
@@ -49,45 +52,58 @@ func NewMetricDispatchGate(source MetricSource, threshold float64, fallback floa
 }
 
 // NewSaturationDispatchGate creates a MetricDispatchGate for the saturation use case.
-// The source should return a budget value (e.g. 1 - saturation).
-// The threshold and fallback are saturation values; they are internally converted
-// to budget values via 1 - value.
+// The source should return a budget value D (e.g. 1 − saturation).
+// The threshold and fallback are given in saturation space and converted to budget
+// space via 1 − value.
 func NewSaturationDispatchGate(source MetricSource, threshold float64, fallback float64) *MetricDispatchGate {
 	return NewMetricDispatchGate(source, 1.0-threshold, 1.0-fallback)
 }
 
-// NewBudgetDispatchGate creates a MetricDispatchGate for the dispatch budget use case.
-// The source should return the budget value directly: (1 - F_SYS) * (1 - F_EPP) * (1 - B).
-// The threshold is set to 0.0 (gate closes only when budget reaches zero).
-// The fallback parameter is a direct budget value, clamped to [0.0, 1.0].
-func NewBudgetDispatchGate(source MetricSource, fallback float64) *MetricDispatchGate {
-	return NewMetricDispatchGate(source, 0.0, fallback)
+// NewBudgetDispatchGate creates a MetricDispatchGate for the prometheus-budget use case.
+// The source should return the dispatch budget D (e.g. D = 1 − F, where F is EPP
+// fullness, or D = 1 − S, where S is inference pool saturation).
+// baseline is the reserved baseline B ∈ [0, 1]: the gate closes when D ≤ B and
+// returns D − B when open, so the caller computes N = max_SYS × (D − B).
+// fallback is returned on error, clamped to [0.0, 1.0].
+func NewBudgetDispatchGate(source MetricSource, baseline float64, fallback float64) *MetricDispatchGate {
+	return NewMetricDispatchGate(source, baseline, fallback)
 }
 
 // Budget implements DispatchGate.
+// Returns 0.0 when D ≤ threshold (gate closed), otherwise D − threshold clamped to [0.0, 1.0].
 // On error or missing data the gate returns the configured fallback budget.
-// The output is always clamped to [0.0, 1.0].
 func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 	logger := log.FromContext(ctx)
 
 	samples, err := g.source.Query(ctx)
 	if err != nil {
-		logger.V(logutil.DEFAULT).Info("MetricSource error, using fallback value", "fallback", g.fallback, "error", err)
+		if g.usingFallback.CompareAndSwap(false, true) {
+			logger.V(logutil.DEFAULT).Info("MetricSource error, using fallback value", "fallback", g.fallback, "error", err)
+		}
 		return g.fallback
 	}
 
 	if len(samples) == 0 {
-		logger.V(logutil.DEFAULT).Info("No metric samples found, using fallback value", "fallback", g.fallback)
+		if g.usingFallback.CompareAndSwap(false, true) {
+			logger.V(logutil.DEFAULT).Info("No metric samples found, using fallback value", "fallback", g.fallback)
+		}
 		return g.fallback
 	}
 
 	value := samples[0].Value
 	if math.IsNaN(value) || math.IsInf(value, 0) {
-		logger.V(logutil.DEFAULT).Info("Invalid metric value, using fallback value", "fallback", g.fallback, "value", value)
+		if g.usingFallback.CompareAndSwap(false, true) {
+			logger.V(logutil.DEFAULT).Info("Invalid metric value, using fallback value", "fallback", g.fallback, "value", value)
+		}
 		return g.fallback
 	}
+
+	if g.usingFallback.CompareAndSwap(true, false) {
+		logger.V(logutil.DEFAULT).Info("MetricSource recovered, no longer using fallback")
+	}
+
 	if value <= g.threshold {
 		return 0.0
 	}
-	return math.Min(1.0, math.Max(0.0, value))
+	return math.Min(1.0, math.Max(0.0, value-g.threshold))
 }

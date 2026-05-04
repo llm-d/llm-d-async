@@ -116,12 +116,34 @@ func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
 	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
 }
 
+func resetPromMock(promMockURL string) {
+	req, err := http.NewRequest(http.MethodDelete, promMockURL+"/admin/reset", nil)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	resp, err := adminClient.Do(req)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	defer resp.Body.Close() //nolint:errcheck
+	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
+}
+
 func setPromMockSaturation(promMockURL string, value string) {
 	setPromMockValue(promMockURL+"/admin/saturation", value)
 }
 
 func setPromMockBudget(promMockURL string, value string) {
 	setPromMockValue(promMockURL+"/admin/budget", value)
+}
+
+func setPromMockVLLMBudget(promMockURL string, value string) {
+	setPromMockValue(promMockURL+"/admin/vllm-budget", value)
+}
+
+func disablePromMockPrimary(promMockURL string) {
+	req, err := http.NewRequest(http.MethodPost, promMockURL+"/admin/disable-primary", nil)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	resp, err := adminClient.Do(req)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	defer resp.Body.Close() //nolint:errcheck
+	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
 }
 
 func setPromMockValue(url string, value string) {

@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,15 +36,16 @@ func TestSaturationDispatchGate(t *testing.T) {
 		fallback   float64
 		expected   float64
 	}{
-		{"zero saturation", 0.0, nil, 0.8, 1.0, 1.0},
-		{"partial saturation", 0.3, nil, 0.8, 1.0, 1 - 0.3},
+		// source returns D = 1-saturation; threshold is converted to budget space as B = 1-threshold.
+		// Budget() returns D-B = (1-saturation)-(1-threshold) when D > B, else 0.
+		{"zero saturation", 0.0, nil, 0.8, 1.0, 0.8},
+		{"partial saturation", 0.3, nil, 0.8, 1.0, 0.8 - 0.3},
 		{"at threshold", 0.8, nil, 0.8, 1.0, 0.0},
 		{"above threshold", 0.95, nil, 0.8, 1.0, 0.0},
 		{"full saturation", 1.0, nil, 0.8, 1.0, 0.0},
-		{"just below threshold", 0.79, nil, 0.8, 1.0, 1 - 0.79},
-		{"threshold one", 0.99, nil, 1.0, 1.0, 1 - 0.99},
+		{"just below threshold", 0.79, nil, 0.8, 1.0, 0.8 - 0.79},
+		{"threshold one", 0.99, nil, 1.0, 1.0, 1.0 - 0.99},
 		{"saturation above one", 1.5, nil, 0.8, 1.0, 0.0},
-		{"saturation above one high threshold", 1.5, nil, 2.0, 1.0, 0.0},
 		{"negative saturation", -0.5, nil, 0.8, 1.0, 1.0},
 		{"error fail closed", 0, errors.New("conn refused"), 0.8, 1.0, 0.0},
 		{"error fail open", 0, errors.New("conn refused"), 0.8, 0.0, 1.0},
@@ -80,20 +83,22 @@ func TestBudgetDispatchGate(t *testing.T) {
 		name     string
 		budget   float64
 		err      error
+		baseline float64
 		fallback float64
 		expected float64
 	}{
-		{"core formula", 0.5 * 0.9 * 0.95, nil, 0.0, 0.5 * 0.9 * 0.95},
-		{"zero load", 1.0 * 1.0 * 0.95, nil, 0.0, 0.95},
-		{"fully saturated", 0.0, nil, 0.0, 0.0},
-		{"overloaded negative", -0.2 * 0.8 * 0.95, nil, 0.0, 0.0},
-		{"full budget", 1.0, nil, 0.0, 1.0},
-		{"near zero budget", 0.01, nil, 0.0, 0.01},
-		{"NaN", math.NaN(), nil, 0.0, 0.0},
-		{"error fail closed", 0, errors.New("conn refused"), 0.0, 0.0},
-		{"error fail open", 0, errors.New("conn refused"), 1.0, 1.0},
-		{"fallback clamped above one", 0, errors.New("error"), 2.0, 1.0},
-		{"fallback clamped below zero", 0, errors.New("error"), -1.0, 0.0},
+		// Budget() returns D-B when D > B (baseline), else 0.
+		{"D above baseline", 0.7, nil, 0.1, 0.0, 0.6},
+		{"D at baseline, gate closed", 0.1, nil, 0.1, 0.0, 0.0},
+		{"D below baseline, gate closed", 0.05, nil, 0.1, 0.0, 0.0},
+		{"zero baseline, returns D", 0.5, nil, 0.0, 0.0, 0.5},
+		{"zero baseline, full capacity", 1.0, nil, 0.0, 0.0, 1.0},
+		{"fully saturated", 0.0, nil, 0.05, 0.0, 0.0},
+		{"NaN", math.NaN(), nil, 0.05, 0.0, 0.0},
+		{"error fail closed", 0, errors.New("conn refused"), 0.05, 0.0, 0.0},
+		{"error fail open", 0, errors.New("conn refused"), 0.05, 1.0, 1.0},
+		{"fallback clamped above one", 0, errors.New("error"), 0.05, 2.0, 1.0},
+		{"fallback clamped below zero", 0, errors.New("error"), 0.05, -1.0, 0.0},
 	}
 
 	for _, tt := range tests {
@@ -104,10 +109,54 @@ func TestBudgetDispatchGate(t *testing.T) {
 			} else {
 				source = &mockMetricSource{samples: []Sample{{Value: tt.budget}}}
 			}
-			gate := NewBudgetDispatchGate(source, tt.fallback)
+			gate := NewBudgetDispatchGate(source, tt.baseline, tt.fallback)
 			require.InDelta(t, tt.expected, gate.Budget(context.Background()), 1e-9)
 		})
 	}
+}
+
+// switchableMetricSource allows changing what Query returns between calls.
+type switchableMetricSource struct {
+	mu      sync.Mutex
+	samples []Sample
+	err     error
+}
+
+func (s *switchableMetricSource) Query(_ context.Context) ([]Sample, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.samples, s.err
+}
+
+func (s *switchableMetricSource) set(samples []Sample, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.samples = samples
+	s.err = err
+}
+
+func TestMetricDispatchGate_FallbackLogsOnce(t *testing.T) {
+	source := &switchableMetricSource{err: errors.New("unavailable")}
+	gate := NewMetricDispatchGate(source, 0.0, 0.5)
+	ctx := context.Background()
+
+	// First call enters fallback — flag flips to true.
+	assert.Equal(t, 0.5, gate.Budget(ctx))
+	assert.True(t, gate.usingFallback.Load(), "should be in fallback after first error")
+
+	// Subsequent calls stay in fallback — flag stays true (no duplicate log).
+	assert.Equal(t, 0.5, gate.Budget(ctx))
+	assert.True(t, gate.usingFallback.Load())
+
+	// Recover: source returns valid data — flag flips back to false.
+	source.set([]Sample{{Value: 0.8}}, nil)
+	assert.InDelta(t, 0.8, gate.Budget(ctx), 1e-9)
+	assert.False(t, gate.usingFallback.Load(), "should leave fallback after recovery")
+
+	// Re-enter fallback — flag flips to true again (one new log).
+	source.set(nil, errors.New("unavailable again"))
+	assert.Equal(t, 0.5, gate.Budget(ctx))
+	assert.True(t, gate.usingFallback.Load(), "should re-enter fallback on new error")
 }
 
 func TestMetricDispatchGate(t *testing.T) {
@@ -119,7 +168,7 @@ func TestMetricDispatchGate(t *testing.T) {
 		fallback  float64
 		expected  float64
 	}{
-		{"above threshold", 0.5, nil, 0.3, 0.0, 0.5},
+		{"above threshold", 0.5, nil, 0.3, 0.0, 0.2},
 		{"at threshold", 0.3, nil, 0.3, 0.0, 0.0},
 		{"below threshold", 0.2, nil, 0.3, 0.0, 0.0},
 		{"fallback on error", 0, errors.New("error"), 0.8, 0.5, 0.5},

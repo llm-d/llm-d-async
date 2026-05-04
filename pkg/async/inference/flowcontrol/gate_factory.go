@@ -63,9 +63,12 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 //   - "redis": Queries Redis for dispatch budget
 //   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
 //     Params: pool (required), threshold (default 0.8), fallback (default 0.0)
-//   - "prometheus-budget": Queries Prometheus for dispatch budget using
-//     D = (1 - F_SYS) * (1 - F_EPP) * (1 - B). Params: pool, max_sys (required),
-//     baseline (default 0.05), fallback (default 0.0)
+//   - "prometheus-budget": Cascades two Prometheus metric sources to compute dispatch budget D.
+//     Primary: D = 1 − (queue_size / max_sys) via inference_extension_flow_control_queue_size.
+//     Secondary (fallback): D = 1 − (vllm_running / (ready_pods × max_concurrency)).
+//     Gate closes when D ≤ B (baseline); returns D − B when open, so callers compute
+//     N = max_SYS × (D − B). Params: pool, max_sys (required),
+//     max_concurrency (default 100), baseline (default 0.05), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asyncapi.DispatchGate, error) {
@@ -119,21 +122,46 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 			return nil, fmt.Errorf("prometheus-budget gate type requires --prometheus-url flag to be set")
 		}
 
+		pool := params["pool"]
+		if pool == "" {
+			return nil, fmt.Errorf("inference pool name is required for prometheus-budget gate")
+		}
+		maxSys, err := parsePositiveFloat("max_sys", params["max_sys"])
+		if err != nil {
+			return nil, err
+		}
+		maxConcurrency, err := parseFloat("max_concurrency", params["max_concurrency"], 100.0)
+		if err != nil {
+			return nil, err
+		}
+		if maxConcurrency <= 0 {
+			return nil, fmt.Errorf("max_concurrency must be positive, got %g", maxConcurrency)
+		}
+		baseline, err := parseFloat("baseline", params["baseline"], 0.05)
+		if err != nil {
+			return nil, err
+		}
 		fallback, err := parseFloat("fallback", params["fallback"], 0.0)
 		if err != nil {
 			return nil, err
 		}
 
 		promConfig := promapi.Config{Address: f.prometheusURL}
-		source, err := NewBudgetPromQLSourceFromConfig(promConfig, params)
+
+		primary, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxSys)
 		if err != nil {
 			return nil, err
 		}
-		var ms MetricSource = source
-		if f.cacheTTL > 0 {
-			ms = NewCachedMetricSource(source, f.cacheTTL)
+		secondary, err := NewVLLMSaturationPromQL(promConfig, pool, maxConcurrency)
+		if err != nil {
+			return nil, err
 		}
-		return NewBudgetDispatchGate(ms, fallback), nil
+
+		var ms MetricSource = NewCascadeMetricSource(
+			cachedSource(primary, f.cacheTTL),
+			cachedSource(secondary, f.cacheTTL),
+		)
+		return NewBudgetDispatchGate(ms, baseline, fallback), nil
 
 	default:
 		// Unknown gate types default to open gate
@@ -150,4 +178,25 @@ func parseFloat(name, str string, defaultValue float64) (float64, error) {
 		return 0, fmt.Errorf("invalid %s value '%s': %w", name, str, err)
 	}
 	return v, nil
+}
+
+func parsePositiveFloat(name, str string) (float64, error) {
+	if str == "" {
+		return 0, fmt.Errorf("prometheus-budget gate requires '%s' parameter", name)
+	}
+	v, err := strconv.ParseFloat(str, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s value '%s': %w", name, str, err)
+	}
+	if v <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %g", name, v)
+	}
+	return v, nil
+}
+
+func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
+	if ttl > 0 {
+		return NewCachedMetricSource(s, ttl)
+	}
+	return s
 }

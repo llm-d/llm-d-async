@@ -158,27 +158,51 @@ func TestGateFactory_BudgetGateWithoutURL(t *testing.T) {
 
 func TestGateFactory_BudgetGateMissingMaxSys(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
-	gate, err := factory.CreateGate("prometheus-budget", map[string]string{})
+	gate, err := factory.CreateGate("prometheus-budget", map[string]string{"pool": "my-pool"})
 	assert.Error(t, err, "should return error when max_sys is not provided")
 	assert.Nil(t, gate)
-	assert.Contains(t, err.Error(), "prometheus-budget gate requires 'max_sys' parameter")
+	assert.Contains(t, err.Error(), "max_sys")
 }
 
 func TestGateFactory_BudgetGateMissingPool(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
-		"max_sys": "50",
+		"max_sys":         "50",
+		"max_concurrency": "100",
 	})
 	assert.Error(t, err, "should return error when pool is missing")
 	assert.Nil(t, gate)
 	assert.Contains(t, err.Error(), "inference pool name is required")
 }
 
-func TestGateFactory_BudgetGateWithPoolAndMaxSys(t *testing.T) {
+func TestGateFactory_BudgetGateDefaultMaxConcurrency(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
 		"pool":    "my-pool",
 		"max_sys": "100",
+	})
+	assert.NoError(t, err, "should use default max_concurrency=100 when not provided")
+	assert.NotNil(t, gate)
+}
+
+func TestGateFactory_BudgetGateWithZeroMaxConcurrency(t *testing.T) {
+	factory := NewGateFactory("http://localhost:9090")
+	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
+		"pool":            "my-pool",
+		"max_sys":         "100",
+		"max_concurrency": "0",
+	})
+	assert.Error(t, err)
+	assert.Nil(t, gate)
+	assert.Contains(t, err.Error(), "max_concurrency must be positive")
+}
+
+func TestGateFactory_BudgetGateWithPoolAndMaxSys(t *testing.T) {
+	factory := NewGateFactory("http://localhost:9090")
+	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
+		"pool":            "my-pool",
+		"max_sys":         "100",
+		"max_concurrency": "100",
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, gate)
@@ -187,6 +211,7 @@ func TestGateFactory_BudgetGateWithPoolAndMaxSys(t *testing.T) {
 func TestGateFactory_BudgetGateWithInvalidMaxSys(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
+		"pool":    "my-pool",
 		"max_sys": "not-a-number",
 	})
 	assert.Error(t, err)
@@ -197,6 +222,7 @@ func TestGateFactory_BudgetGateWithInvalidMaxSys(t *testing.T) {
 func TestGateFactory_BudgetGateWithZeroMaxSys(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
+		"pool":    "my-pool",
 		"max_sys": "0",
 	})
 	assert.Error(t, err)
@@ -207,8 +233,10 @@ func TestGateFactory_BudgetGateWithZeroMaxSys(t *testing.T) {
 func TestGateFactory_BudgetGateWithInvalidBaseline(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
-		"max_sys":  "50",
-		"baseline": "not-a-number",
+		"pool":            "my-pool",
+		"max_sys":         "50",
+		"max_concurrency": "100",
+		"baseline":        "not-a-number",
 	})
 	assert.Error(t, err, "should return error when baseline is not a valid float")
 	assert.Nil(t, gate)
@@ -218,8 +246,10 @@ func TestGateFactory_BudgetGateWithInvalidBaseline(t *testing.T) {
 func TestGateFactory_BudgetGateWithInvalidFallback(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
-		"max_sys":  "50",
-		"fallback": "not-a-number",
+		"pool":            "my-pool",
+		"max_sys":         "50",
+		"max_concurrency": "100",
+		"fallback":        "not-a-number",
 	})
 	assert.Error(t, err, "should return error when fallback is not a valid float")
 	assert.Nil(t, gate)
@@ -229,10 +259,11 @@ func TestGateFactory_BudgetGateWithInvalidFallback(t *testing.T) {
 func TestGateFactory_BudgetGateWithAllParams(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
-		"pool":     "my-pool",
-		"max_sys":  "50",
-		"baseline": "0.1",
-		"fallback": "0.5",
+		"pool":            "my-pool",
+		"max_sys":         "50",
+		"max_concurrency": "100",
+		"baseline":        "0.1",
+		"fallback":        "0.5",
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, gate)

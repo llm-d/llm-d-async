@@ -46,59 +46,39 @@ func NewPromQLMetricSourceFromLabels(promConfig promapi.Config, metricName strin
 	return NewPromQLMetricSource(promConfig, queryExpr)
 }
 
-// NewBudgetPromQLSourceFromConfig builds a PromQLMetricSource for the dispatch budget use case,
-// parsing all budget-specific parameters.
-//
-// Params:
-//   - inferencePool: inference pool name for PromQL label selector
-//   - maxSysStr: max system capacity for normalizing F_EPP (required)
-//   - baselineStr: reserved baseline B (default "0.05")
-func NewBudgetPromQLSourceFromConfig(promConfig promapi.Config, params map[string]string) (*PromQLMetricSource, error) {
-	inferencePoolStr, maxSysStr, baselineStr := params["pool"], params["max_sys"], params["baseline"]
-
-	baseline := 0.05
-	if baselineStr != "" {
-		b, err := strconv.ParseFloat(baselineStr, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid baseline value '%s': %w", baselineStr, err)
-		}
-		if b < 0 || b > 1 {
-			return nil, fmt.Errorf("baseline must be in [0, 1], got %g", b)
-		}
-		baseline = b
-	}
-
-	if maxSysStr == "" {
-		return nil, fmt.Errorf("prometheus-budget gate requires 'max_sys' parameter")
-	}
-	maxSys, err := strconv.ParseFloat(maxSysStr, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid max_sys value '%s': %w", maxSysStr, err)
-	}
-	if maxSys <= 0 {
-		return nil, fmt.Errorf("max_sys must be positive, got %g", maxSys)
-	}
-
-	return NewBudgetPromQL(promConfig, inferencePoolStr, maxSys, baseline)
-}
-
-// NewBudgetPromQL constructs a PromQL expression for the multiplicative dispatch budget:
-//
-//	(1 - F_SYS) * (1 - F_EPP) * (1 - B)
-//
-// where:
-//   - F_SYS = inference_extension_flow_control_pool_saturation
-//   - F_EPP = sum(inference_extension_flow_control_queue_size) / maxSys
-//   - B = baseline
-func NewBudgetPromQL(promConfig promapi.Config, inferencePool string, maxSys float64, baseline float64) (*PromQLMetricSource, error) {
+// NewFlowControlQueueSizePromQL builds a PromQLMetricSource that returns the EPP queue depth
+// as a dispatch budget D = 1 − (queue_size / maxSys), where queue_size is
+// inference_extension_flow_control_queue_size and maxSys is the total system capacity.
+// inferencePool and maxSys are required.
+func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxSys float64) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
-		return nil, fmt.Errorf("inference pool name is required for budget PromQL")
+		return nil, fmt.Errorf("inference pool name is required for flow control queue size PromQL")
 	}
 	label := strconv.Quote(inferencePool)
-	query := fmt.Sprintf(`(1 - inference_extension_flow_control_pool_saturation{inference_pool=%s})
-			* on(inference_pool) (1 - sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / %g)
-			* %g`, label, label, maxSys, 1-baseline)
+	query := fmt.Sprintf(
+		`1 - sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / %g`,
+		label, maxSys,
+	)
+	source, err := NewPromQLMetricSource(promConfig, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Prometheus metric source: %w", err)
+	}
+	return source, nil
+}
 
+// NewVLLMSaturationPromQL builds a PromQLMetricSource that estimates inference pool saturation
+// from vLLM and pool metrics, returning D = 1 − (running_requests / (ready_pods × maxConcurrency)).
+// This serves as a fallback when EPP flow control metrics are unavailable.
+// inferencePool and maxConcurrency are required.
+func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64) (*PromQLMetricSource, error) {
+	if inferencePool == "" {
+		return nil, fmt.Errorf("inference pool name is required for vLLM saturation PromQL")
+	}
+	label := strconv.Quote(inferencePool)
+	query := fmt.Sprintf(
+		`1 - (sum(vllm:num_requests_running{inference_pool=%s}) / on() (inference_pool_ready_pods{name=%s} * %g))`,
+		label, label, maxConcurrency,
+	)
 	source, err := NewPromQLMetricSource(promConfig, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Prometheus metric source: %w", err)

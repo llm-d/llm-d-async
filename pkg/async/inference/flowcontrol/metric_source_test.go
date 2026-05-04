@@ -165,22 +165,40 @@ func TestNewPromQLMetricSource_InvalidAddress(t *testing.T) {
 
 // PromQL construction tests for budget and saturation source factories
 
-func TestBuildBudgetPromQL_ContainsExpectedMetrics(t *testing.T) {
-	source, err := NewBudgetPromQL(
+func TestFlowControlQueueSizePromQL_ContainsExpectedMetrics(t *testing.T) {
+	source, err := NewFlowControlQueueSizePromQL(
 		api.Config{Address: "http://localhost:9090"},
-		"my-pool", 100, 0.05,
+		"my-pool", 100,
 	)
 	require.NoError(t, err)
-	require.Contains(t, source.expr, `1 - inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
 	require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool"}`)
 	require.Contains(t, source.expr, "/ 100")
-	require.Contains(t, source.expr, "0.95")
 }
 
-func TestBuildBudgetPromQL_RequiresPool(t *testing.T) {
-	_, err := NewBudgetPromQL(
+func TestFlowControlQueueSizePromQL_RequiresPool(t *testing.T) {
+	_, err := NewFlowControlQueueSizePromQL(
 		api.Config{Address: "http://localhost:9090"},
-		"", 100, 0.05,
+		"", 100,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "inference pool name is required")
+}
+
+func TestVLLMSaturationPromQL_ContainsExpectedMetrics(t *testing.T) {
+	source, err := NewVLLMSaturationPromQL(
+		api.Config{Address: "http://localhost:9090"},
+		"my-pool", 100,
+	)
+	require.NoError(t, err)
+	require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool"}`)
+	require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
+	require.Contains(t, source.expr, "* 100")
+}
+
+func TestVLLMSaturationPromQL_RequiresPool(t *testing.T) {
+	_, err := NewVLLMSaturationPromQL(
+		api.Config{Address: "http://localhost:9090"},
+		"", 100,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "inference pool name is required")
@@ -202,20 +220,4 @@ func TestNewSaturationPromQLSourceFromConfig_RequiresPool(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "inference pool name is required")
-}
-
-func TestNewBudgetPromQLSourceFromConfig_ValidatesBaseline(t *testing.T) {
-	_, err := NewBudgetPromQLSourceFromConfig(
-		api.Config{Address: "http://localhost:9090"},
-		map[string]string{"pool": "my-pool", "max_sys": "100", "baseline": "-0.1"},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "baseline must be in [0, 1]")
-
-	_, err = NewBudgetPromQLSourceFromConfig(
-		api.Config{Address: "http://localhost:9090"},
-		map[string]string{"pool": "my-pool", "max_sys": "100", "baseline": "1.5"},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "baseline must be in [0, 1]")
 }
