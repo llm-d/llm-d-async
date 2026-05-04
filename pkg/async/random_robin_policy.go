@@ -49,13 +49,17 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChan
 				if !ok || ir == nil {
 					continue
 				}
+				requestURL := meta[i1].IGWBaseURl + meta[i1].RequestPathURL
+				if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
+					requestURL = meta[i1].IGWBaseURl + ep
+				}
 				erm := pipeline.EmbelishedRequestMessage{
 					InternalRequest: ir,
 					HttpHeaders: map[string]string{
 						"Content-Type":                  "application/json",
 						"x-gateway-inference-objective": meta[i1].InferenceObjective,
 					},
-					RequestURL: meta[i1].IGWBaseURl + meta[i1].RequestPathURL,
+					RequestURL: requestURL,
 				}
 				mergedChannel <- erm
 			}

@@ -187,6 +187,7 @@ The async processor expects request messages to have the following format:
 | `deadline` | int64 | Deadline in Unix seconds (required, must be positive) |
 | `payload` | object | Inference request payload |
 | `metadata` | map[string]string | Optional caller-supplied pass-through data (e.g. tracing IDs, user labels) |
+| `endpoint` | string | Optional per-request dispatch path; overrides the queue-level default when set |
 
 **Example:**
 

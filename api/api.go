@@ -9,6 +9,7 @@ type Request interface {
 	ReqDeadline() int64
 	ReqPayload() map[string]any
 	ReqMetadata() map[string]string
+	ReqEndpoint() string
 }
 
 // RequestMessage contains the caller-visible fields of a request. Metadata is reserved
@@ -22,13 +23,15 @@ type RequestMessage struct {
 	Deadline int64             `json:"deadline"` // Unix seconds
 	Payload  map[string]any    `json:"payload"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+	Endpoint string            `json:"endpoint,omitempty"`
 }
 
-func (r *RequestMessage) ReqID() string                { return r.ID }
-func (r *RequestMessage) ReqCreated() int64            { return r.Created }
-func (r *RequestMessage) ReqDeadline() int64           { return r.Deadline }
-func (r *RequestMessage) ReqPayload() map[string]any   { return r.Payload }
+func (r *RequestMessage) ReqID() string                  { return r.ID }
+func (r *RequestMessage) ReqCreated() int64              { return r.Created }
+func (r *RequestMessage) ReqDeadline() int64             { return r.Deadline }
+func (r *RequestMessage) ReqPayload() map[string]any     { return r.Payload }
 func (r *RequestMessage) ReqMetadata() map[string]string { return r.Metadata }
+func (r *RequestMessage) ReqEndpoint() string            { return r.Endpoint }
 
 // RedisRequest is the concrete Request implementation for Redis-based flows.
 // Per-message queue fields here override producer defaults; producers merge them

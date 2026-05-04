@@ -16,6 +16,15 @@ func irID(id string) *api.InternalRequest {
 	})
 }
 
+func irWithEndpoint(id, endpoint string) *api.InternalRequest {
+	return api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
+		ID:       id,
+		Created:  1,
+		Deadline: 9999999999,
+		Endpoint: endpoint,
+	})
+}
+
 func TestProcessAllChannels(t *testing.T) {
 	msgsPerChannel := 5
 	channels := []pipeline.RequestChannel{
@@ -140,6 +149,41 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timed out waiting for messages")
 		}
+	}
+}
+
+func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
+	ch := pipeline.RequestChannel{
+		Channel:            make(chan *api.InternalRequest, 2),
+		IGWBaseURl:         "http://gateway",
+		InferenceObjective: "obj",
+		RequestPathURL:     "/default/path",
+	}
+	policy := NewRandomRobinPolicy()
+
+	// One message with endpoint, one without.
+	ch.Channel <- irWithEndpoint("with-ep", "/v1/custom")
+	ch.Channel <- irID("without-ep")
+	close(ch.Channel)
+
+	merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch})
+
+	deadline := time.After(2 * time.Second)
+	results := map[string]string{}
+	for range 2 {
+		select {
+		case msg := <-merged.Channel:
+			results[msg.PublicRequest.ReqID()] = msg.RequestURL
+		case <-deadline:
+			t.Fatal("timed out waiting for messages")
+		}
+	}
+
+	if url := results["with-ep"]; url != "http://gateway/v1/custom" {
+		t.Errorf("expected http://gateway/v1/custom, got %s", url)
+	}
+	if url := results["without-ep"]; url != "http://gateway/default/path" {
+		t.Errorf("expected http://gateway/default/path, got %s", url)
 	}
 }
 

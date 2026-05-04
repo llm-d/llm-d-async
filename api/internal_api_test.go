@@ -199,6 +199,61 @@ func TestRoundTrip_PublicRequestInterface(t *testing.T) {
 	}
 }
 
+func TestRoundTrip_EndpointField(t *testing.T) {
+	ir := NewInternalRequest(
+		InternalRouting{RequestQueueName: "rq"},
+		&RequestMessage{
+			ID: "ep-test", Created: 1, Deadline: 2,
+			Payload:  map[string]any{"model": "m"},
+			Endpoint: "/v1/custom",
+		},
+	)
+	b, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got InternalRequest
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	rm, ok := got.PublicRequest.(*RequestMessage)
+	if !ok {
+		t.Fatalf("expected *RequestMessage, got %T", got.PublicRequest)
+	}
+	if rm.Endpoint != "/v1/custom" {
+		t.Errorf("Endpoint = %q, want /v1/custom", rm.Endpoint)
+	}
+	if rm.ReqEndpoint() != "/v1/custom" {
+		t.Errorf("ReqEndpoint() = %q, want /v1/custom", rm.ReqEndpoint())
+	}
+}
+
+func TestRoundTrip_EndpointOmittedWhenEmpty(t *testing.T) {
+	ir := NewInternalRequest(
+		InternalRouting{},
+		&RequestMessage{ID: "no-ep", Created: 1, Deadline: 2, Payload: map[string]any{}},
+	)
+	b, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(b) != "" && json.Valid(b) {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(b, &raw); err != nil {
+			t.Fatalf("unmarshal envelope: %v", err)
+		}
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(raw["data"], &data); err != nil {
+			t.Fatalf("unmarshal data: %v", err)
+		}
+		if _, exists := data["endpoint"]; exists {
+			t.Error("endpoint should be omitted from JSON when empty")
+		}
+	}
+}
+
 func assertRouting(t *testing.T, got, want InternalRouting) {
 	t.Helper()
 	if got.RetryCount != want.RetryCount {
