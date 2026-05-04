@@ -817,7 +817,7 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   api.RequestChannel{Channel: msgChan},
+			channel:   pipeline.RequestChannel{Channel: msgChan},
 			queueName: queue,
 			gate:      noopGate(),
 		}},
