@@ -45,11 +45,11 @@ $$N = \mathrm{max}\_\mathrm{SYS} \times (D - B)$$
 
 ### Example
 
-When capacity is measured in requests, a natural estimate for $\mathrm{max}\_\mathrm{SYS}$ is the aggregate pool capacity, the same value the EPP's [saturation detector](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/e7dca1b3673bf0d104595c39afcad7411e61ca0d/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/detector.go#L119-L147) uses as the denominator for saturation:
+When capacity is measured in requests, a natural estimate for $\mathrm{max}\_\mathrm{SYS}$ is the aggregate pool capacity, the same value the inference scheduler's [saturation detector](https://github.com/llm-d/llm-d-inference-scheduler/blob/b9f77ee9/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/detector.go#L119-L147) uses as the denominator for saturation:
 
 $$\mathrm{max}\_\mathrm{SYS} = \texttt{ready\\_model\\_servers} \times \texttt{max\\_concurrency}$$
 
-where `ready_model_servers` is the number of ready endpoints in the inference pool (available as the [`inference_pool_ready_pods` metric](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/365a1c0b61fab425e5e63141057bc83558a6c26e/site-src/guides/metrics-and-observability.md#L25-L58)) and [`max_concurrency` is the per-endpoint request capacity configured in the EPP's saturation detector (default 100)](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/e7dca1b3673bf0d104595c39afcad7411e61ca0d/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go#L32-L58). The number of dispatchable requests is then:
+where `ready_model_servers` is the number of ready endpoints in the inference pool (available as the `inference_pool_ready_pods` metric) and `max_concurrency` is the per-endpoint request capacity, corresponding to the [`MaxConcurrency` config value in the inference scheduler's saturation detector (default 100)](https://github.com/llm-d/llm-d-inference-scheduler/blob/b9f77ee9/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go#L32-L58). The number of dispatchable requests is then:
 
 $$N = \mathrm{max}\_\mathrm{SYS} \times (D-B) = \texttt{ready\\_model\\_servers} \times \texttt{max\\_concurrency} \times (D-B) $$
 
