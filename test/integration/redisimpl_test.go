@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"flag"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,10 +17,10 @@ import (
 
 func TestRedisImpl(t *testing.T) {
 	s := miniredis.RunT(t)
-	rAddr := s.Host() + ":" + s.Port()
+	redisURL := fmt.Sprintf("redis://%s:%s", s.Host(), s.Port())
 
 	ctx := context.Background()
-	err := flag.Set("redis.addr", rAddr)
+	err := flag.Set("redis.url", redisURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,24 +75,19 @@ func TestRedisImpl(t *testing.T) {
 func TestRedisImplWithAuth(t *testing.T) {
 	s := miniredis.RunT(t)
 	s.RequireAuth("test-password")
-	rAddr := s.Host() + ":" + s.Port()
+	redisURL := fmt.Sprintf("redis://default:test-password@%s:%s", s.Host(), s.Port())
 
 	ctx := context.Background()
-	_ = flag.Set("redis.addr", rAddr)
-	_ = flag.Set("redis.password", "test-password")
+	_ = flag.Set("redis.url", redisURL)
 
 	flow := redis.NewRedisSortedSetFlow()
 	flow.Start(ctx)
 
-	// Publish a result message
 	flow.ResultChannel() <- api.ResultMessage{
 		ID: "test-auth-id",
 	}
 
-	// Wait for processing
 	time.Sleep(1 * time.Second)
 
-	// Verify it was published to Redis successfully
-	// By default, the result queue is "result-list" for SortedSetFlow
 	s.CheckList(t, "result-list", `{"id":"test-auth-id","payload":""}`)
 }

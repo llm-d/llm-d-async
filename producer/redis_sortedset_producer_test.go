@@ -15,13 +15,12 @@ import (
 func setupTestProducer(t *testing.T) (*RedisSortedSetProducer, *miniredis.Miniredis) {
 	t.Helper()
 
-	// Start mini Redis
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	t.Cleanup(func() { mr.Close() })
 
 	producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:        mr.Addr(),
+		RedisURL:         "redis://" + mr.Addr(),
 		TenantID:         "test-tenant",
 		RequestQueueName: "test-request-queue",
 		ResultQueueName:  "test-result-queue",
@@ -203,12 +202,11 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create producers for two different tenants
 	tenant1Producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:        mr.Addr(),
+		RedisURL:         "redis://" + mr.Addr(),
 		TenantID:         "tenant-alice",
 		RequestQueueName: "shared-request-queue",
-		ResultQueueName:  "my-results", // Same name but different tenant
+		ResultQueueName:  "my-results",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -218,10 +216,10 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	})
 
 	tenant2Producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:        mr.Addr(),
+		RedisURL:         "redis://" + mr.Addr(),
 		TenantID:         "tenant-bob",
 		RequestQueueName: "shared-request-queue",
-		ResultQueueName:  "my-results", // Same name but different tenant
+		ResultQueueName:  "my-results",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -307,18 +305,17 @@ func TestProducerAuth(t *testing.T) {
 
 	t.Run("fails without password", func(t *testing.T) {
 		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-			RedisAddr: mr.Addr(),
-			TenantID:  "test",
+			RedisURL: "redis://" + mr.Addr(),
+			TenantID: "test",
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "NOAUTH")
 	})
 
-	t.Run("succeeds with password", func(t *testing.T) {
+	t.Run("succeeds with password in URL", func(t *testing.T) {
 		producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-			RedisAddr:     mr.Addr(),
-			RedisPassword: "producer-secret",
-			TenantID:      "test",
+			RedisURL: "redis://default:producer-secret@" + mr.Addr(),
+			TenantID: "test",
 		})
 		assert.NoError(t, err)
 		defer producer.Close() // nolint:errcheck
@@ -334,9 +331,8 @@ func TestTenantIDRequired(t *testing.T) {
 	require.NoError(t, err)
 	defer mr.Close()
 
-	// Should fail without TenantID
 	_, err = NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:        mr.Addr(),
+		RedisURL:         "redis://" + mr.Addr(),
 		RequestQueueName: "test",
 		ResultQueueName:  "test",
 	})
@@ -390,9 +386,8 @@ func TestSameTenantMultipleQueues(t *testing.T) {
 	require.NoError(t, err)
 	defer mr.Close()
 
-	// Same tenant creates two producers with different result queues
 	prod1, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:       mr.Addr(),
+		RedisURL:        "redis://" + mr.Addr(),
 		TenantID:        "alice",
 		ResultQueueName: "batch-jobs",
 	})
@@ -404,7 +399,7 @@ func TestSameTenantMultipleQueues(t *testing.T) {
 	})
 
 	prod2, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisAddr:       mr.Addr(),
+		RedisURL:        "redis://" + mr.Addr(),
 		TenantID:        "alice",
 		ResultQueueName: "realtime",
 	})

@@ -507,8 +507,12 @@ func TestSortedSetFlow_Integration(t *testing.T) {
 	*ssRequestQueueName = queue
 	defer func() { *ssRequestQueueName = origQueue }()
 
+	origURL := *RedisURL
+	*RedisURL = "redis://" + s.Addr()
+	defer func() { *RedisURL = origURL }()
+
 	flow := NewRedisSortedSetFlow()
-	flow.rdb = rdb // Override with test Redis
+	flow.rdb = rdb
 	flow.pollInterval = 50 * time.Millisecond
 
 	flow.Start(ctx)

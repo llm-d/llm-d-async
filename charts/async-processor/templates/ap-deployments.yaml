@@ -24,11 +24,10 @@ spec:
         - /async-processor
         args:
           {{- if .Values.ap.redis.enabled }}
+          - --redis.url=$(REDIS_URL)
           {{- if eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset" }}
           - --message-queue-impl=redis-sortedset
           - --redis.ss.igw-base-url={{ .Values.ap.igwBaseURL }}
-          - --redis.addr
-          - "{{ .Values.ap.redis.host }}:{{ .Values.ap.redis.port }}"
           - --redis.ss.request-path-url
           - "{{ .Values.ap.redis.requestPathURL }}"
           - --redis.ss.request-queue-name
@@ -38,14 +37,8 @@ spec:
           {{- else }}
           - --message-queue-impl=redis-pubsub
           - --redis.igw-base-url={{ .Values.ap.igwBaseURL }}
-          - --redis.request-path-url          
+          - --redis.request-path-url
           - "{{ .Values.ap.redis.requestPathURL }}"
-          - --redis.addr
-          - "{{ .Values.ap.redis.host }}:{{ .Values.ap.redis.port }}"
-          {{- end }}
-          {{- if .Values.ap.redis.auth.enabled }}
-          - --redis.user=$(REDIS_USERNAME)
-          - --redis.password=$(REDIS_PASSWORD)
           {{- end }}
           {{- else if .Values.gcpPubSub.enabled  }}
           - --message-queue-impl=gcp-pubsub
@@ -61,17 +54,12 @@ spec:
         env:
           - name: LOG_LEVEL
             value: {{ if .Values.ap.logging }}{{ .Values.ap.logging.level | default "info" | quote }}{{ else }}"info"{{ end }}
-          {{- if and .Values.ap.redis.enabled .Values.ap.redis.auth.enabled }}
-          - name: REDIS_USERNAME
+          {{- if .Values.ap.redis.enabled }}
+          - name: REDIS_URL
             valueFrom:
               secretKeyRef:
-                name: {{ .Values.ap.redis.auth.secretName }}
-                key: {{ .Values.ap.redis.auth.usernameKey }}
-          - name: REDIS_PASSWORD
-            valueFrom:
-              secretKeyRef:
-                name: {{ .Values.ap.redis.auth.secretName }}
-                key: {{ .Values.ap.redis.auth.passwordKey }}
+                name: {{ .Values.ap.redis.secretName }}
+                key: {{ .Values.ap.redis.secretKey }}
           {{- end }}
         name: async-processor
       serviceAccountName: {{ include "async-processor.fullname" . }}

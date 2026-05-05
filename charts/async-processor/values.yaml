@@ -16,14 +16,10 @@ ap:
     requestPathURL: "/v1/completions"
   redis:
     enabled: false
-    port: 6379
-    host: "redis-master.redis.svc.cluster.local"
+    # Secret containing the Redis URL (e.g. redis://user:pass@host:port/db or rediss://... for TLS)
+    secretName: "redis-creds"
+    secretKey: "url"
     requestPathURL: "/v1/completions"
     # For redis-sortedset
     requestQueueName: "request-sortedset"
     resultQueueName: "result-list"
-    auth:
-      enabled: false
-      secretName: "redis-creds"
-      usernameKey: "username"
-      passwordKey: "password"

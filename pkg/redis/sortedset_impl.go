@@ -85,12 +85,12 @@ func WithGateFactory(factory pipeline.GateFactory) SortedSetOption {
 
 func NewRedisSortedSetFlow(opts ...SortedSetOption) *RedisSortedSetFlow {
 	configs := loadQueueConfigs()
+	redisOpts, err := RedisOptions()
+	if err != nil {
+		panic(fmt.Sprintf("invalid Redis connection config: %v", err))
+	}
 	r := &RedisSortedSetFlow{
-		rdb: redis.NewClient(&redis.Options{
-			Addr:     *RedisAddr,
-			Username: *RedisUser,
-			Password: *RedisPassword,
-		}),
+		rdb:             redis.NewClient(redisOpts),
 		requestChannels: make([]requestChannelData, 0, len(configs)),
 		retryChannel:    make(chan pipeline.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),

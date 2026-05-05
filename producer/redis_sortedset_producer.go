@@ -23,17 +23,9 @@ type RedisSortedSetProducer struct {
 
 // RedisSortedSetConfig contains configuration for the Redis sorted set producer.
 type RedisSortedSetConfig struct {
-	// RedisAddr is the Redis server address (e.g., "localhost:6379").
+	// RedisURL is a Redis URL (e.g. "redis://user:pass@host:port/db" or "rediss://..." for TLS).
 	// Required.
-	RedisAddr string
-
-	// RedisUser is the username for the Redis server.
-	// Optional.
-	RedisUser string
-
-	// RedisPassword is the password for the Redis server.
-	// Optional.
-	RedisPassword string
+	RedisURL string
 
 	// TenantID is the unique identifier for the tenant/customer.
 	// Required for multi-tenant isolation.
@@ -55,8 +47,8 @@ type RedisSortedSetConfig struct {
 // NewRedisSortedSetProducer creates a new producer using Redis sorted set.
 // Multi-tenant safe: TenantID ensures result queue isolation between tenants.
 func NewRedisSortedSetProducer(config RedisSortedSetConfig) (*RedisSortedSetProducer, error) {
-	if config.RedisAddr == "" {
-		return nil, errors.New("RedisAddr is required")
+	if config.RedisURL == "" {
+		return nil, errors.New("RedisURL is required")
 	}
 
 	if config.TenantID == "" {
@@ -71,15 +63,14 @@ func NewRedisSortedSetProducer(config RedisSortedSetConfig) (*RedisSortedSetProd
 		config.ResultQueueName = "default"
 	}
 
-	// Namespace result queue with tenant ID to prevent collisions
-	// Format: results:{tenantID}:{customerQueueName}
 	namespacedResultQueue := fmt.Sprintf("results:%s:%s", config.TenantID, config.ResultQueueName)
 
-	client := redis.NewClient(&redis.Options{
-		Addr:     config.RedisAddr,
-		Username: config.RedisUser,
-		Password: config.RedisPassword,
-	})
+	opts, err := redis.ParseURL(config.RedisURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse RedisURL: %w", err)
+	}
+
+	client := redis.NewClient(opts)
 
 	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

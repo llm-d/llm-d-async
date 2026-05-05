@@ -40,7 +40,7 @@ spec:
           args:
             - "--message-queue-impl=redis-sortedset"
             - "--redis.ss.igw-base-url=http://igw-mock.e2e-test.svc.cluster.local:80"
-            - "--redis.addr=redis.e2e-test.svc.cluster.local:6379"
+            - "--redis.url=redis://redis.e2e-test.svc.cluster.local:6379"
             - "--redis.ss.poll-interval-ms=500"
             - "--redis.ss.batch-size=10"
             - "--metrics-endpoint-auth=false"

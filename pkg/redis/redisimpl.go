@@ -126,11 +126,11 @@ type RedisMQFlow struct {
 }
 
 func NewRedisMQFlow() *RedisMQFlow {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     *RedisAddr,
-		Username: *RedisUser,
-		Password: *RedisPassword,
-	})
+	opts, err := RedisOptions()
+	if err != nil {
+		panic(fmt.Sprintf("invalid Redis connection config: %v", err))
+	}
+	rdb := redis.NewClient(opts)
 	var configs []QueueConfig
 	if *queuesConfigFile != "" {
 		data, err := os.ReadFile(*queuesConfigFile)
