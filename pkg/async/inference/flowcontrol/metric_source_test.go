@@ -172,7 +172,8 @@ func TestFlowControlQueueSizePromQL_ContainsExpectedMetrics(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool"}`)
-	require.Contains(t, source.expr, "/ 100")
+	require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
+	require.Contains(t, source.expr, "* 100")
 }
 
 func TestFlowControlQueueSizePromQL_RequiresPool(t *testing.T) {

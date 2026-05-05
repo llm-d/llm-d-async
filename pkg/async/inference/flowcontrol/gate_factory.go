@@ -64,10 +64,11 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 //   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
 //     Params: pool (required), threshold (default 0.8), fallback (default 0.0)
 //   - "prometheus-budget": Cascades two Prometheus metric sources to compute dispatch budget D.
-//     Primary: D = 1 − (queue_size / max_sys) via inference_extension_flow_control_queue_size.
-//     Secondary (fallback): D = 1 − (vllm_running / (ready_pods × max_concurrency)).
+//     Both sources compute max_SYS = ready_pods × max_concurrency dynamically.
+//     Primary: D = 1 − (queue_size / max_SYS) via inference_extension_flow_control_queue_size.
+//     Secondary (fallback): D = 1 − (vllm_running / max_SYS).
 //     Gate closes when D ≤ B (baseline); returns D − B when open, so callers compute
-//     N = max_SYS × (D − B). Params: pool, max_sys (required),
+//     N = max_SYS × (D − B). Params: pool (required),
 //     max_concurrency (default 100), baseline (default 0.05), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
@@ -126,10 +127,6 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 		if pool == "" {
 			return nil, fmt.Errorf("inference pool name is required for prometheus-budget gate")
 		}
-		maxSys, err := parsePositiveFloat("max_sys", params["max_sys"])
-		if err != nil {
-			return nil, err
-		}
 		maxConcurrency, err := parseFloat("max_concurrency", params["max_concurrency"], 100.0)
 		if err != nil {
 			return nil, err
@@ -148,7 +145,7 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 
 		promConfig := promapi.Config{Address: f.prometheusURL}
 
-		primary, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxSys)
+		primary, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxConcurrency)
 		if err != nil {
 			return nil, err
 		}
@@ -176,20 +173,6 @@ func parseFloat(name, str string, defaultValue float64) (float64, error) {
 	v, err := strconv.ParseFloat(str, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s value '%s': %w", name, str, err)
-	}
-	return v, nil
-}
-
-func parsePositiveFloat(name, str string) (float64, error) {
-	if str == "" {
-		return 0, fmt.Errorf("prometheus-budget gate requires '%s' parameter", name)
-	}
-	v, err := strconv.ParseFloat(str, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s value '%s': %w", name, str, err)
-	}
-	if v <= 0 {
-		return 0, fmt.Errorf("%s must be positive, got %g", name, v)
 	}
 	return v, nil
 }

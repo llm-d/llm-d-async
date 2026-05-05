@@ -47,17 +47,18 @@ func NewPromQLMetricSourceFromLabels(promConfig promapi.Config, metricName strin
 }
 
 // NewFlowControlQueueSizePromQL builds a PromQLMetricSource that returns the EPP queue depth
-// as a dispatch budget D = 1 − (queue_size / maxSys), where queue_size is
-// inference_extension_flow_control_queue_size and maxSys is the total system capacity.
-// inferencePool and maxSys are required.
-func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxSys float64) (*PromQLMetricSource, error) {
+// as a dispatch budget D = 1 − (queue_size / (ready_pods × maxConcurrency)), where queue_size is
+// inference_extension_flow_control_queue_size and max_SYS = ready_pods × maxConcurrency is
+// computed dynamically from the inference_pool_ready_pods metric.
+// inferencePool and maxConcurrency are required.
+func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
 		return nil, fmt.Errorf("inference pool name is required for flow control queue size PromQL")
 	}
 	label := strconv.Quote(inferencePool)
 	query := fmt.Sprintf(
-		`1 - sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / %g`,
-		label, maxSys,
+		`1 - (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / on() (inference_pool_ready_pods{name=%s} * %g))`,
+		label, label, maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
 	if err != nil {

@@ -41,7 +41,7 @@ spec:
             - "--message-queue-impl=redis-sortedset"
             - "--prometheus-url=http://prom-mock.e2e-test.svc.cluster.local:9090"
             - "--redis.ss.gate-type=prometheus-budget"
-            - "--redis.ss.gate-params={\"pool\":\"e2e-pool\",\"max_sys\":\"100\",\"max_concurrency\":\"10\",\"baseline\":\"0.05\"}"
+            - "--redis.ss.gate-params={\"pool\":\"e2e-pool\",\"max_concurrency\":\"10\",\"baseline\":\"0.05\"}"
             - "--redis.ss.igw-base-url=http://igw-mock.e2e-test.svc.cluster.local:80"
             - "--redis.addr=redis.e2e-test.svc.cluster.local:6379"
             - "--redis.ss.poll-interval-ms=500"
