@@ -35,13 +35,17 @@ The **Dispatch Budget** $D$ is a measure of capacity of the gateway and the infe
 
 ### Acceptable Range
 
-For a given Dispatch Budget $D$, we also define a **Reserved Baseline** $B \in [0,1]$ as a threshold, and we pose
-that when $D\leq B$ "the gate is closed", i.e., no requests can be forwarded.
-Hence, **a dispatcher only forwards requests when $D > B$**.
-
-The number of requests that can be forwarded is estimated by scaling the total system capacity $\mathrm{max}\_\mathrm{SYS}$ by the dispatch budget, minus the baseline: $(D-B)$; depending on configuration, the unit of $\mathrm{max}\_\mathrm{SYS}$ could be bytes, tokens, or just number of requests.
+For a given Dispatch Budget $D$, we also define a **Reserved Baseline** $B \in [0,1]$ as a threshold:
+- When $D \leq B$ the gate is closed and no requests are forwarded.
+- When $D > B$, the number of dispatchable requests $N$ is estimated by scaling the total system capacity $\mathrm{max}\_\mathrm{SYS}$ by the usable headroom $(D - B)$.
 
 $$N = \mathrm{max}\_\mathrm{SYS} \times (D - B)$$
+
+**Notes**
+
+- depending on configuration, the unit of $\mathrm{max}\_\mathrm{SYS}$ (and thus $N$) could be bytes, tokens, or just number of requests.
+- $N$ may be clamped to zero so that stale or out-of-order metrics that momentarily yield $D < B$ never produce a negative value:
+  $$N = \max\!\bigl(0,\; \mathrm{max}\_\mathrm{SYS} \times (D - B)\bigr)$$
 
 ### Example
 
