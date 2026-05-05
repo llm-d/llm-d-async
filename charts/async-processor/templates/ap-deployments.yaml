@@ -56,6 +56,16 @@ spec:
           - "{{ .Values.ap.gcpPubSub.requestPathURL }}"
           {{- end }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}
+          {{- if .Values.ap.tls.insecureSkipVerify }}
+          - --tls-insecure-skip-verify=true
+          {{- end }}
+          {{- if .Values.ap.tls.caCertKey }}
+          - --tls-ca-cert=/etc/tls/{{ .Values.ap.tls.caCertKey }}
+          {{- end }}
+          {{- if and .Values.ap.tls.certKey .Values.ap.tls.keyKey }}
+          - --tls-cert=/etc/tls/{{ .Values.ap.tls.certKey }}
+          - --tls-key=/etc/tls/{{ .Values.ap.tls.keyKey }}
+          {{- end }}
         image: "{{ .Values.ap.image.repository }}:{{ .Values.ap.image.tag }}"
         imagePullPolicy: "{{ .Values.ap.imagePullPolicy }}"
         env:
@@ -74,5 +84,17 @@ spec:
                 key: {{ .Values.ap.redis.auth.passwordKey }}
           {{- end }}
         name: async-processor
+        {{- with .Values.ap.tls.secretName }}
+        volumeMounts:
+          - name: tls-certs
+            mountPath: /etc/tls
+            readOnly: true
+        {{- end }}
       serviceAccountName: {{ include "async-processor.fullname" . }}
       terminationGracePeriodSeconds: 130
+      {{- with .Values.ap.tls.secretName }}
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: {{ . }}
+      {{- end }}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"net/http"
@@ -38,6 +40,11 @@ func main() {
 	var requestMergePolicy string
 	var messageQueueImpl string
 
+	var tlsCACert string
+	var tlsCert string
+	var tlsKey string
+	var tlsInsecureSkipVerify bool
+
 	flag.IntVar(&loggerVerbosity, "v", logging.DEFAULT, "number for the log level verbosity")
 
 	flag.IntVar(&metricsPort, "metrics-port", 9090, "The metrics port")
@@ -48,6 +55,11 @@ func main() {
 
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
+
+	flag.StringVar(&tlsCACert, "tls-ca-cert", "", "Path to CA certificate file (PEM) for verifying the inference gateway")
+	flag.StringVar(&tlsCert, "tls-cert", "", "Path to client certificate file (PEM) for mTLS")
+	flag.StringVar(&tlsKey, "tls-key", "", "Path to client key file (PEM) for mTLS")
+	flag.BoolVar(&tlsInsecureSkipVerify, "tls-insecure-skip-verify", false, "Skip TLS certificate verification (dev/test only)")
 
 	var prometheusURL = flag.String("prometheus-url", "", "Prometheus server URL for metric-based gates (e.g., http://localhost:9090)")
 	var prometheusCacheTTL = flag.Duration("prometheus-cache-ttl", flowcontrol.DefaultCacheTTL, "TTL for cached Prometheus metrics (e.g., 5s, 0s to disable)")
@@ -122,11 +134,18 @@ func main() {
 	msrv, _ := metricsserver.NewServer(metricsServerOptions, restConfig, http.DefaultClient)
 	go msrv.Start(ctx) // nolint:errcheck
 
+	tlsConfig, err := buildTLSConfig(tlsCACert, tlsCert, tlsKey, tlsInsecureSkipVerify)
+	if err != nil {
+		setupLog.Error(err, "Failed to build TLS configuration")
+		os.Exit(1)
+	}
+
 	// Create inference client with a connection pool sized for the worker count.
 	inferenceTransport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: concurrency,
 		IdleConnTimeout:     90 * time.Second,
+		TLSClientConfig:     tlsConfig,
 	}
 	inferenceHTTPClient := &http.Client{Transport: inferenceTransport}
 	inferenceClient := asyncworker.NewHTTPInferenceClient(inferenceHTTPClient)
@@ -139,6 +158,47 @@ func main() {
 
 	impl.Start(ctx)
 	<-ctx.Done()
+}
+
+func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify bool) (*tls.Config, error) {
+	if caCertPath == "" && certPath == "" && keyPath == "" && !insecureSkipVerify {
+		return nil, nil
+	}
+
+	if (certPath != "") != (keyPath != "") {
+		return nil, fmt.Errorf("both tls-cert and tls-key must be provided together")
+	}
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec
+
+	if insecureSkipVerify {
+		tlsConfig.InsecureSkipVerify = true //nolint:gosec
+	}
+
+	if caCertPath != "" {
+		caCert, err := os.ReadFile(caCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate file %s: %w", caCertPath, err)
+		}
+		caCertPool, err := x509.SystemCertPool()
+		if err != nil {
+			caCertPool = x509.NewCertPool()
+		}
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("no valid certificates found in %s", caCertPath)
+		}
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	if certPath != "" && keyPath != "" {
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client certificate key pair: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsConfig, nil
 }
 
 func printAllFlags(setupLog logr.Logger) {
