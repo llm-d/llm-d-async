@@ -100,7 +100,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 
 - `constant`: Always returns budget 1.0 (fully open) - no throttling.
 - `redis`: Queries Redis for dispatch budget (managed by external system).
-- `prometheus-saturation`: Queries Prometheus for pool saturation metric. Returns `1.0 - saturation` if below threshold, `0.0` otherwise.
+- `prometheus-saturation`: Queries Prometheus for pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
 - `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
 
 **Example Configuration with Per-Queue Gates:**

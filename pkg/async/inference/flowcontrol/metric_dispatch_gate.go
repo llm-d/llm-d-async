@@ -18,6 +18,7 @@ package flowcontrol
 
 import (
 	"context"
+	"fmt"
 	"math"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
@@ -79,13 +80,13 @@ func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 	}
 
 	if len(samples) == 0 {
-		logger.Error(nil, "No metric samples found, using fallback value", "fallback", g.fallback)
+		logger.Error(fmt.Errorf("no metric samples found"), "using fallback value", "fallback", g.fallback)
 		return g.fallback
 	}
 
 	value := samples[0].Value
 	if math.IsNaN(value) || math.IsInf(value, 0) {
-		logger.Error(nil, "Invalid metric value, using fallback value", "fallback", g.fallback, "value", value)
+		logger.Error(fmt.Errorf("invalid metric value: %v", value), "using fallback value", "fallback", g.fallback)
 		return g.fallback
 	}
 

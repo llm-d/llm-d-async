@@ -55,6 +55,9 @@ func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool stri
 	if inferencePool == "" {
 		return nil, fmt.Errorf("inference pool name is required for flow control queue size PromQL")
 	}
+	if maxConcurrency <= 0 {
+		return nil, fmt.Errorf("maxConcurrency must be positive, got %g", maxConcurrency)
+	}
 	label := strconv.Quote(inferencePool)
 	query := fmt.Sprintf(
 		`1 - (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / on() (inference_pool_ready_pods{name=%s} * %g))`,
@@ -74,6 +77,9 @@ func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool stri
 func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
 		return nil, fmt.Errorf("inference pool name is required for vLLM saturation PromQL")
+	}
+	if maxConcurrency <= 0 {
+		return nil, fmt.Errorf("maxConcurrency must be positive, got %g", maxConcurrency)
 	}
 	label := strconv.Quote(inferencePool)
 	query := fmt.Sprintf(
