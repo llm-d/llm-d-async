@@ -19,11 +19,9 @@ package flowcontrol
 import (
 	"context"
 	"math"
-	"sync/atomic"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
 
 var _ asyncapi.DispatchGate = (*MetricDispatchGate)(nil)
@@ -35,10 +33,9 @@ var _ asyncapi.DispatchGate = (*MetricDispatchGate)(nil)
 // formula N = max_SYS × (D − B) when threshold is set to the reserved baseline B.
 // On error or missing/invalid data, the gate returns the configured fallback budget.
 type MetricDispatchGate struct {
-	source        MetricSource
-	threshold     float64
-	fallback      float64
-	usingFallback atomic.Bool
+	source    MetricSource
+	threshold float64
+	fallback  float64
 }
 
 // NewMetricDispatchGate creates a MetricDispatchGate with the given source, threshold,
@@ -77,29 +74,19 @@ func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 
 	samples, err := g.source.Query(ctx)
 	if err != nil {
-		if g.usingFallback.CompareAndSwap(false, true) {
-			logger.V(logutil.DEFAULT).Info("MetricSource error, using fallback value", "fallback", g.fallback, "error", err)
-		}
+		logger.Error(err, "MetricSource error, using fallback value", "fallback", g.fallback)
 		return g.fallback
 	}
 
 	if len(samples) == 0 {
-		if g.usingFallback.CompareAndSwap(false, true) {
-			logger.V(logutil.DEFAULT).Info("No metric samples found, using fallback value", "fallback", g.fallback)
-		}
+		logger.Error(nil, "No metric samples found, using fallback value", "fallback", g.fallback)
 		return g.fallback
 	}
 
 	value := samples[0].Value
 	if math.IsNaN(value) || math.IsInf(value, 0) {
-		if g.usingFallback.CompareAndSwap(false, true) {
-			logger.V(logutil.DEFAULT).Info("Invalid metric value, using fallback value", "fallback", g.fallback, "value", value)
-		}
+		logger.Error(nil, "Invalid metric value, using fallback value", "fallback", g.fallback, "value", value)
 		return g.fallback
-	}
-
-	if g.usingFallback.CompareAndSwap(true, false) {
-		logger.V(logutil.DEFAULT).Info("MetricSource recovered, no longer using fallback")
 	}
 
 	if value <= g.threshold {

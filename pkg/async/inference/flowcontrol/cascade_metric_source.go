@@ -29,32 +29,37 @@ var _ MetricSource = (*CascadeMetricSource)(nil)
 
 // CascadeMetricSource tries each source in order and returns the first successful result.
 // If a source returns an error or no samples, the next source is tried. Log messages are
-// emitted only on transitions (entering/leaving fallback) to avoid noise during sustained outages.
+// emitted only on transitions (entering/leaving fallback, or switching fallback source)
+// to avoid noise during sustained outages.
 type CascadeMetricSource struct {
-	sources       []MetricSource
-	usingFallback atomic.Bool
+	sources     []MetricSource
+	activeIndex atomic.Int32 // 0 = primary, >0 = fallback index
 }
 
 // NewCascadeMetricSource creates a CascadeMetricSource from the given sources, tried in order.
-// At least two sources are required.
+// At least two sources are required; panics otherwise.
 func NewCascadeMetricSource(sources ...MetricSource) *CascadeMetricSource {
+	if len(sources) < 2 {
+		panic("CascadeMetricSource requires at least two sources")
+	}
 	return &CascadeMetricSource{sources: sources}
 }
 
-// Query implements MetricSource. It tries each source in order, logging once when
-// entering fallback and once when recovering to the primary.
+// Query implements MetricSource. It tries each source in order, logging on transitions:
+// entering fallback, switching fallback source, or recovering to the primary.
 func (c *CascadeMetricSource) Query(ctx context.Context) ([]Sample, error) {
 	logger := log.FromContext(ctx)
 	for i, s := range c.sources {
 		samples, err := s.Query(ctx)
 		if err == nil && len(samples) > 0 {
-			if i > 0 {
-				if c.usingFallback.CompareAndSwap(false, true) {
-					logger.V(logutil.DEFAULT).Info("primary metric source unavailable, using fallback",
-						"fallbackIndex", i)
+			prev := c.activeIndex.Swap(int32(i))
+			if int32(i) != prev {
+				if i == 0 {
+					logger.V(logutil.DEFAULT).Info("primary metric source recovered")
+				} else {
+					logger.V(logutil.DEFAULT).Info("using fallback metric source",
+						"fallbackIndex", i, "previousIndex", prev)
 				}
-			} else if c.usingFallback.CompareAndSwap(true, false) {
-				logger.V(logutil.DEFAULT).Info("primary metric source recovered")
 			}
 			return samples, nil
 		}

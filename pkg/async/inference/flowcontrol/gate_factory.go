@@ -138,6 +138,9 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (asy
 		if err != nil {
 			return nil, err
 		}
+		if baseline < 0 || baseline >= 1 {
+			return nil, fmt.Errorf("baseline must be in [0, 1), got %g", baseline)
+		}
 		fallback, err := parseFloat("fallback", params["fallback"], 0.0)
 		if err != nil {
 			return nil, err

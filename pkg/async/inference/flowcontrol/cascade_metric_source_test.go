@@ -25,6 +25,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCascadeMetricSource_RequiresAtLeastTwoSources(t *testing.T) {
+	assert.Panics(t, func() { NewCascadeMetricSource() })
+	assert.Panics(t, func() {
+		NewCascadeMetricSource(&mockMetricSource{samples: []Sample{{Value: 1}}})
+	})
+}
+
 func TestCascadeMetricSource_UsesPrimary(t *testing.T) {
 	primary := &mockMetricSource{samples: []Sample{{Value: 0.7}}}
 	secondary := &mockMetricSource{samples: []Sample{{Value: 0.3}}}
@@ -72,32 +79,40 @@ func TestCascadeMetricSource_AllUnavailable(t *testing.T) {
 func TestCascadeMetricSource_FallbackLogsOnce(t *testing.T) {
 	primary := &switchableMetricSource{err: errors.New("unavailable")}
 	secondary := &switchableMetricSource{samples: []Sample{{Value: 0.5}}}
-	cascade := NewCascadeMetricSource(primary, secondary)
+	tertiary := &switchableMetricSource{samples: []Sample{{Value: 0.2}}}
+	cascade := NewCascadeMetricSource(primary, secondary, tertiary)
 	ctx := context.Background()
 
-	// First call cascades to secondary — flag flips to true.
+	// First call cascades to secondary — activeIndex becomes 1.
 	samples, err := cascade.Query(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0.5, samples[0].Value)
-	assert.True(t, cascade.usingFallback.Load(), "should be in fallback after primary fails")
+	assert.Equal(t, int32(1), cascade.activeIndex.Load(), "should track fallback index")
 
-	// Subsequent calls stay in fallback — flag stays true (no duplicate log).
+	// Subsequent calls stay on secondary — no duplicate log.
 	samples, err = cascade.Query(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0.5, samples[0].Value)
-	assert.True(t, cascade.usingFallback.Load())
+	assert.Equal(t, int32(1), cascade.activeIndex.Load())
 
-	// Primary recovers — flag flips back to false.
+	// Secondary also fails — cascades to tertiary, activeIndex becomes 2.
+	secondary.set(nil, errors.New("also down"))
+	samples, err = cascade.Query(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0.2, samples[0].Value)
+	assert.Equal(t, int32(2), cascade.activeIndex.Load(), "should track switch to tertiary")
+
+	// Primary recovers — activeIndex back to 0.
 	primary.set([]Sample{{Value: 0.8}}, nil)
 	samples, err = cascade.Query(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0.8, samples[0].Value)
-	assert.False(t, cascade.usingFallback.Load(), "should leave fallback after primary recovers")
+	assert.Equal(t, int32(0), cascade.activeIndex.Load(), "should recover to primary")
 
-	// Primary fails again — flag flips to true (one new log).
+	// Primary fails again — activeIndex becomes 2 (secondary still down).
 	primary.set(nil, errors.New("unavailable again"))
 	samples, err = cascade.Query(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 0.5, samples[0].Value)
-	assert.True(t, cascade.usingFallback.Load(), "should re-enter fallback on new error")
+	assert.Equal(t, 0.2, samples[0].Value)
+	assert.Equal(t, int32(2), cascade.activeIndex.Load(), "should re-enter fallback")
 }

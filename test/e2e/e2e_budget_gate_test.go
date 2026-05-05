@@ -25,9 +25,6 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
 		// Reset all prom-mock metric sources (primary budget, vLLM budget,
 		// primaryDisabled flag) so cascade state doesn't leak between tests.
 		resetPromMock(promMockURL)
-		// Wait for the processor's metric cache (5s TTL) to expire and
-		// pick up the reset (gate-closed) values before each test runs.
-		time.Sleep(6 * time.Second)
 	})
 
 	ginkgo.It("processes a message when dispatch budget is positive", func() {

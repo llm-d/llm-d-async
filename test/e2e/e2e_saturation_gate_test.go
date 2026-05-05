@@ -23,12 +23,9 @@ var _ = ginkgo.Describe("Saturation Metric Dispatch Gate E2E", func() {
 		rdb.Del(ctx, saturationResultQueue)  //nolint:errcheck
 		resetMock(adminURL)
 		resetPromMock(promMockURL)
-		// Set saturation to 1.0 (gate closed) so the processor's metric
-		// cache starts in a closed state before each test.
+		// Set saturation to 1.0 (gate closed) so the processor starts
+		// in a closed state before each test.
 		setPromMockSaturation(promMockURL, "1.0")
-		// Wait for the processor's metric cache (5s TTL) to expire and
-		// pick up the gate-closed values.
-		time.Sleep(6 * time.Second)
 	})
 
 	ginkgo.It("processes a message when saturation is below threshold", func() {

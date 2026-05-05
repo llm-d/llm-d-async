@@ -23,7 +23,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -133,30 +132,6 @@ func (s *switchableMetricSource) set(samples []Sample, err error) {
 	defer s.mu.Unlock()
 	s.samples = samples
 	s.err = err
-}
-
-func TestMetricDispatchGate_FallbackLogsOnce(t *testing.T) {
-	source := &switchableMetricSource{err: errors.New("unavailable")}
-	gate := NewMetricDispatchGate(source, 0.0, 0.5)
-	ctx := context.Background()
-
-	// First call enters fallback — flag flips to true.
-	assert.Equal(t, 0.5, gate.Budget(ctx))
-	assert.True(t, gate.usingFallback.Load(), "should be in fallback after first error")
-
-	// Subsequent calls stay in fallback — flag stays true (no duplicate log).
-	assert.Equal(t, 0.5, gate.Budget(ctx))
-	assert.True(t, gate.usingFallback.Load())
-
-	// Recover: source returns valid data — flag flips back to false.
-	source.set([]Sample{{Value: 0.8}}, nil)
-	assert.InDelta(t, 0.8, gate.Budget(ctx), 1e-9)
-	assert.False(t, gate.usingFallback.Load(), "should leave fallback after recovery")
-
-	// Re-enter fallback — flag flips to true again (one new log).
-	source.set(nil, errors.New("unavailable again"))
-	assert.Equal(t, 0.5, gate.Budget(ctx))
-	assert.True(t, gate.usingFallback.Load(), "should re-enter fallback on new error")
 }
 
 func TestMetricDispatchGate(t *testing.T) {

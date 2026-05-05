@@ -207,6 +207,26 @@ func TestGateFactory_BudgetGateWithInvalidBaseline(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid baseline value")
 }
 
+func TestGateFactory_BudgetGateWithBaselineOutOfRange(t *testing.T) {
+	factory := NewGateFactory("http://localhost:9090")
+
+	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
+		"pool":     "my-pool",
+		"baseline": "1.0",
+	})
+	assert.Error(t, err, "baseline=1.0 should be rejected (gate would never open)")
+	assert.Nil(t, gate)
+	assert.Contains(t, err.Error(), "baseline must be in [0, 1)")
+
+	gate, err = factory.CreateGate("prometheus-budget", map[string]string{
+		"pool":     "my-pool",
+		"baseline": "-0.1",
+	})
+	assert.Error(t, err, "negative baseline should be rejected")
+	assert.Nil(t, gate)
+	assert.Contains(t, err.Error(), "baseline must be in [0, 1)")
+}
+
 func TestGateFactory_BudgetGateWithInvalidFallback(t *testing.T) {
 	factory := NewGateFactory("http://localhost:9090")
 	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
