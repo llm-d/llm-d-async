@@ -8,6 +8,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -405,6 +406,34 @@ func TestMalformedResultHandling(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "missing 'id' field")
+	})
+}
+
+func TestWithRedisClient(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close() //nolint:errcheck
+
+	t.Run("injected client is used, RedisURL not required", func(t *testing.T) {
+		p, err := NewRedisSortedSetProducer(
+			RedisSortedSetConfig{TenantID: "test-tenant"},
+			WithRedisClient(client),
+		)
+		require.NoError(t, err)
+		assert.Equal(t, "results:test-tenant:default", p.resultQueueName)
+
+		ctx := context.Background()
+		err = p.client.Ping(ctx).Err()
+		assert.NoError(t, err)
+	})
+
+	t.Run("fails without RedisURL and without WithRedisClient", func(t *testing.T) {
+		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{TenantID: "test-tenant"})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "RedisURL is required when no RedisClient is provided")
 	})
 }
 

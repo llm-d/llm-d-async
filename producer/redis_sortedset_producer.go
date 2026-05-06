@@ -22,6 +22,18 @@ type RedisSortedSetProducer struct {
 	resultQueueName  string
 }
 
+// ProducerOption is a functional option for NewRedisSortedSetProducer.
+type ProducerOption func(*RedisSortedSetProducer)
+
+// WithRedisClient injects a pre-configured *redis.Client, allowing callers to
+// instrument it (e.g. with OpenTelemetry tracing/metrics hooks) before use.
+// When provided, RedisURL in the config is not required.
+func WithRedisClient(client *redis.Client) ProducerOption {
+	return func(p *RedisSortedSetProducer) {
+		p.client = client
+	}
+}
+
 // RedisSortedSetConfig contains configuration for the Redis sorted set producer.
 type RedisSortedSetConfig struct {
 	// RedisURL is a Redis URL (e.g. "redis://user:pass@host:port/db" or "rediss://..." for TLS).
@@ -47,11 +59,8 @@ type RedisSortedSetConfig struct {
 
 // NewRedisSortedSetProducer creates a new producer using Redis sorted set.
 // Multi-tenant safe: TenantID ensures result queue isolation between tenants.
-func NewRedisSortedSetProducer(config RedisSortedSetConfig) (*RedisSortedSetProducer, error) {
-	if config.RedisURL == "" {
-		return nil, errors.New("RedisURL is required")
-	}
-
+// Use WithRedisClient to inject a pre-configured client (e.g. with tracing hooks).
+func NewRedisSortedSetProducer(config RedisSortedSetConfig, opts ...ProducerOption) (*RedisSortedSetProducer, error) {
 	if config.TenantID == "" {
 		return nil, errors.New("TenantID is required for multi-tenant isolation")
 	}
@@ -70,26 +79,35 @@ func NewRedisSortedSetProducer(config RedisSortedSetConfig) (*RedisSortedSetProd
 
 	namespacedResultQueue := fmt.Sprintf("results:%s:%s", config.TenantID, config.ResultQueueName)
 
-	opts, err := redis.ParseURL(config.RedisURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse RedisURL: %w", err)
+	p := &RedisSortedSetProducer{
+		requestQueueName: config.RequestQueueName,
+		resultQueueName:  namespacedResultQueue,
 	}
 
-	client := redis.NewClient(opts)
+	for _, opt := range opts {
+		opt(p)
+	}
+
+	if p.client == nil {
+		if config.RedisURL == "" {
+			return nil, errors.New("RedisURL is required when no RedisClient is provided via WithRedisClient")
+		}
+		redisOpts, err := redis.ParseURL(config.RedisURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse RedisURL: %w", err)
+		}
+		p.client = redis.NewClient(redisOpts)
+	}
 
 	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := client.Ping(ctx).Err(); err != nil {
+	if err := p.client.Ping(ctx).Err(); err != nil {
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
-	return &RedisSortedSetProducer{
-		client:           client,
-		requestQueueName: config.RequestQueueName,
-		resultQueueName:  namespacedResultQueue,
-	}, nil
+	return p, nil
 }
 
 // toInternalRequest builds an InternalRequest with routing merged from the concrete
