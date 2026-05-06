@@ -83,11 +83,14 @@ func WithGateFactory(factory pipeline.GateFactory) SortedSetOption {
 	}
 }
 
-func NewRedisSortedSetFlow(opts ...SortedSetOption) *RedisSortedSetFlow {
-	configs := loadQueueConfigs()
+func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error) {
+	configs, err := loadQueueConfigs()
+	if err != nil {
+		return nil, err
+	}
 	redisOpts, err := RedisOptions()
 	if err != nil {
-		panic(fmt.Sprintf("invalid Redis connection config: %v", err))
+		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
 	}
 	r := &RedisSortedSetFlow{
 		rdb:             redis.NewClient(redisOpts),
@@ -98,27 +101,20 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) *RedisSortedSetFlow {
 		batchSize:       *ssBatchSize,
 	}
 
-	// Apply functional options
 	for _, opt := range opts {
 		opt(r)
 	}
 
-	// Create per-queue channels with gates
 	for _, cfg := range configs {
-		// Determine gate for this queue
 		var gate pipeline.DispatchGate
 		if r.gateFactory != nil && cfg.GateType != "" {
-			// Use factory to create per-queue gate
-			var err error
 			gate, err = r.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
 			if err != nil {
-				panic(fmt.Sprintf("failed to create gate for queue %q (gate_type=%q): %v", cfg.QueueName, cfg.GateType, err))
+				return nil, fmt.Errorf("failed to create gate for queue %q (gate_type=%q): %w", cfg.QueueName, cfg.GateType, err)
 			}
 		} else if r.gate != nil {
-			// Fall back to global gate if provided
 			gate = r.gate
 		} else {
-			// Default to always-open gate
 			gate = pipeline.ConstOpenGate()
 		}
 
@@ -137,27 +133,25 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) *RedisSortedSetFlow {
 		})
 	}
 
-	// Set default gate if not already set
 	if r.gate == nil {
 		r.gate = pipeline.ConstOpenGate()
 	}
 
-	return r
+	return r, nil
 }
 
-func loadQueueConfigs() []queueConfig {
+func loadQueueConfigs() ([]queueConfig, error) {
 	if *ssQueuesConfigFile != "" {
 		data, err := os.ReadFile(*ssQueuesConfigFile)
 		if err != nil {
-			panic(fmt.Sprintf("failed to read config file: %v", err))
+			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
 		var configs []queueConfig
 		if err := json.Unmarshal(data, &configs); err != nil {
-			panic(fmt.Sprintf("failed to unmarshal config file: %v", err))
+			return nil, fmt.Errorf("failed to unmarshal config file: %w", err)
 		}
-		return configs
+		return configs, nil
 	}
-	// Single-queue mode
 	return []queueConfig{{
 		QueueName:          *ssRequestQueueName,
 		InferenceObjective: *ssInferenceObjective,
@@ -165,7 +159,7 @@ func loadQueueConfigs() []queueConfig {
 		IGWBaseURl:         *ssIGWBaseURL,
 		GateType:           *ssGateType,
 		GateParams:         parseGateParams(*ssGateParamsJSON),
-	}}
+	}}, nil
 }
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {

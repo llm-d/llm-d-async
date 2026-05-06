@@ -125,21 +125,21 @@ type RedisMQFlow struct {
 	resultChannel   chan api.ResultMessage
 }
 
-func NewRedisMQFlow() *RedisMQFlow {
+func NewRedisMQFlow() (*RedisMQFlow, error) {
 	opts, err := RedisOptions()
 	if err != nil {
-		panic(fmt.Sprintf("invalid Redis connection config: %v", err))
+		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
 	}
 	rdb := redis.NewClient(opts)
 	var configs []QueueConfig
 	if *queuesConfigFile != "" {
 		data, err := os.ReadFile(*queuesConfigFile)
 		if err != nil {
-			panic(fmt.Sprintf("failed to read queues config file: %v", err))
+			return nil, fmt.Errorf("failed to read queues config file: %w", err)
 		}
 
 		if err := json.Unmarshal(data, &configs); err != nil {
-			panic(fmt.Sprintf("failed to unmarshal queues config: %v", err))
+			return nil, fmt.Errorf("failed to unmarshal queues config: %w", err)
 		}
 	} else {
 		configs = []QueueConfig{{QueueName: *requestQueueName, IGWBaseURl: *igwBaseURL, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
@@ -162,7 +162,7 @@ func NewRedisMQFlow() *RedisMQFlow {
 		requestChannels: channels,
 		retryChannel:    make(chan pipeline.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),
-	}
+	}, nil
 }
 
 func (r *RedisMQFlow) Start(ctx context.Context) {

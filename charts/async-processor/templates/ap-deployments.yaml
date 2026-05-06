@@ -24,7 +24,6 @@ spec:
         - /async-processor
         args:
           {{- if .Values.ap.redis.enabled }}
-          - --redis.url=$(REDIS_URL)
           {{- if eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset" }}
           - --message-queue-impl=redis-sortedset
           - --redis.ss.igw-base-url={{ .Values.ap.igwBaseURL }}

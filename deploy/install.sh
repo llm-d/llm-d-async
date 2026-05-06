@@ -407,7 +407,10 @@ deploy_ap_controller() {
         --set ap.image.tag=$AP_IMAGE_TAG \
         --set ap.imagePullPolicy=$AP_IMAGE_PULL_POLICY \
         --set ap.baseName=$WELL_LIT_PATH_NAME \
-        --set ap.logging.level=$AP_LOG_LEVEL 
+        --set ap.logging.level=$AP_LOG_LEVEL \
+        --set ap.redis.enabled=true \
+        --set ap.redis.secretName=redis-creds \
+        --set ap.redis.secretKey=url
         
     
     # Wait for AP to be ready
@@ -420,11 +423,17 @@ deploy_ap_controller() {
 
 deploy_redis() {
     log_info "Deploying Redis..."
-    # Add helm repo
     helm repo add bitnami https://charts.bitnami.com/bitnami
     helm repo update
 
     helm upgrade -i "$REDIS_RELEASE_NAME" bitnami/redis -n $REDIS_NS --set auth.enabled=false
+
+    # Create a secret with the Redis URL in the AP namespace so the async-processor can connect
+    local redis_url="redis://${REDIS_RELEASE_NAME}-master.${REDIS_NS}.svc.cluster.local:6379"
+    log_info "Creating Redis URL secret in $AP_NS namespace"
+    kubectl create secret generic redis-creds \
+        --from-literal=url="$redis_url" \
+        -n "$AP_NS" --dry-run=client -o yaml | kubectl apply -f -
 }
 
 deploy_llm_d_infrastructure() {

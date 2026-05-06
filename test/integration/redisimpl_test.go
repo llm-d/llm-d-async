@@ -25,7 +25,10 @@ func TestRedisImpl(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	flow := redis.NewRedisMQFlow()
+	flow, err := redis.NewRedisMQFlow()
+	if err != nil {
+		t.Fatal(err)
+	}
 	flow.Start(ctx)
 
 	flow.RetryChannel() <- pipeline.RetryMessage{
@@ -80,7 +83,10 @@ func TestRedisImplWithAuth(t *testing.T) {
 	ctx := context.Background()
 	_ = flag.Set("redis.url", redisURL)
 
-	flow := redis.NewRedisSortedSetFlow()
+	flow, err := redis.NewRedisSortedSetFlow()
+	if err != nil {
+		t.Fatal(err)
+	}
 	flow.Start(ctx)
 
 	flow.ResultChannel() <- api.ResultMessage{

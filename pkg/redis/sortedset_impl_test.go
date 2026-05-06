@@ -511,7 +511,10 @@ func TestSortedSetFlow_Integration(t *testing.T) {
 	*RedisURL = "redis://" + s.Addr()
 	defer func() { *RedisURL = origURL }()
 
-	flow := NewRedisSortedSetFlow()
+	flow, err := NewRedisSortedSetFlow()
+	if err != nil {
+		t.Fatal(err)
+	}
 	flow.rdb = rdb
 	flow.pollInterval = 50 * time.Millisecond
 

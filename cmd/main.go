@@ -95,9 +95,19 @@ func main() {
 	var impl pipeline.Flow
 	switch messageQueueImpl {
 	case "redis-pubsub":
-		impl = redis.NewRedisMQFlow()
+		flow, err := redis.NewRedisMQFlow()
+		if err != nil {
+			setupLog.Error(err, "Failed to create Redis pub/sub flow")
+			os.Exit(1)
+		}
+		impl = flow
 	case "redis-sortedset":
-		impl = redis.NewRedisSortedSetFlow(redis.WithGateFactory(gateFactory))
+		flow, err := redis.NewRedisSortedSetFlow(redis.WithGateFactory(gateFactory))
+		if err != nil {
+			setupLog.Error(err, "Failed to create Redis sorted-set flow")
+			os.Exit(1)
+		}
+		impl = flow
 		setupLog.Info("Using Redis sorted-set flow with per-queue gating")
 	case "gcp-pubsub":
 		impl = pubsub.NewGCPPubSubMQFlow()
