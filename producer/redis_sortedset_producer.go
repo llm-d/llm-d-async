@@ -217,8 +217,8 @@ func (p *RedisSortedSetProducer) Close() error {
 	return p.client.Close()
 }
 
-// QueueDepth returns the number of pending requests in the queue.
-func (p *RedisSortedSetProducer) QueueDepth(ctx context.Context) (int64, error) {
+// RequestQueueDepth returns the number of pending requests in the queue.
+func (p *RedisSortedSetProducer) RequestQueueDepth(ctx context.Context) (int64, error) {
 	return p.client.ZCard(ctx, p.requestQueueName).Result()
 }
 
