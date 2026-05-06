@@ -142,12 +142,36 @@ undeploy-ap-on-k8s:
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=kubernetes && \
 		ENVIRONMENT=kubernetes DEPLOY_LLM_D=$(DEPLOY_LLM_D)  deploy/install.sh --undeploy
 
-# E2E tests for Redis sorted set message flow
+# E2E integration tests
+#
+# The suite deploys the async-processor, EPP, llm-d-inference-sim, Envoy,
+# Prometheus, and Redis into a Kind cluster.
+#
+# By default the EPP image is pulled from the registry and InferencePool CRDs
+# are fetched from the GAIE GitHub repo at the matching tag. Set GAIE_ROOT to a
+# local gateway-api-inference-extension checkout to build EPP from source and
+# use that checkout's CRDs instead.
+#
+# The llm-d-inference-sim image is pulled from the registry by default.
+# Set SIM_ROOT to build from a local checkout instead.
+#
+# Optional env vars:
+#   GAIE_ROOT        — GAIE checkout; enables local EPP build and CRDs
+#   SIM_ROOT         — llm-d-inference-sim checkout; enables local sim build
+#   AP_IMAGE         — async-processor image tag        (default: $(IMAGE_TAG_BASE)/async-processor:e2e-test)
+#   EPP_IMAGE        — EPP image tag                    (default: registry.k8s.io/.../epp:v1.5.0)
+#   SIM_IMAGE        — inference-sim image tag          (default: ghcr.io/llm-d/llm-d-inference-sim:v0.0.0-test)
+#   CONTAINER_TOOL   — container runtime                (default: docker)
+#   E2E_SKIP_CLEANUP — set "true" to keep the Kind cluster after tests
+#
+# NodePort overrides (change if defaults conflict):
+#   E2E_INTEGRATION_REDIS_PORT, E2E_INTEGRATION_PROM_PORT,
+#   E2E_INTEGRATION_SIM_PORT, E2E_INTEGRATION_ENVOY_PORT,
+#   E2E_INTEGRATION_ENVOY_ADMIN_PORT
 E2E_IMG ?= $(IMAGE_TAG_BASE)/async-processor:e2e-test
-IGW_MOCK_IMG ?= e2e-igw-mock:latest
 
 .PHONY: test-e2e
-test-e2e: ## Run e2e tests against a Kind cluster
+test-e2e: ## Run e2e integration tests against a Kind cluster
 	@command -v kind >/dev/null 2>&1 || { echo "kind is not installed"; exit 1; }
 	CONTAINER_TOOL=$(CONTAINER_TOOL) AP_IMAGE=$(E2E_IMG) go test ./test/e2e/ -timeout 30m -v -ginkgo.v \
 		$(if $(FOCUS),-ginkgo.focus="$(FOCUS)",) \

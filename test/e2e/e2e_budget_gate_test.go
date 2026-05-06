@@ -14,22 +14,69 @@ const (
 	budgetResultQueue  = "budget-result-list"
 )
 
-var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
+// Budget Cascade tests run while EPP is deployed WITHOUT flow control.
+// The primary metric (inference_extension_flow_control_queue_size) is never
+// recorded, so the CascadeMetricSource falls back to vLLM metrics.
+var _ = ginkgo.Describe("Budget Cascade E2E", ginkgo.Ordered, func() {
 	var ctx context.Context
 
 	ginkgo.BeforeEach(func() {
 		ctx = context.Background()
 		rdb.Del(ctx, budgetRequestQueue) //nolint:errcheck
 		rdb.Del(ctx, budgetResultQueue)  //nolint:errcheck
-		resetMock(adminURL)
-		// Reset all prom-mock metric sources (primary budget, vLLM budget,
-		// primaryDisabled flag) so cascade state doesn't leak between tests.
-		resetPromMock(promMockURL)
+		setSimWaitingRequests(simAdminURL, 0)
+	})
+
+	ginkgo.It("falls back to vLLM metrics when primary metric is unavailable", func() {
+		// EPP was deployed without flow control by BeforeSuite, so
+		// inference_extension_flow_control_queue_size is never recorded.
+		// The cascade falls back to vLLM metrics:
+		//   D = 1 - (running_requests / (ready_pods * max_concurrency))
+		// With sim at 0 waiting/running requests, budget is positive.
+		setSimWaitingRequests(simAdminURL, 0)
+
+		msg := makeRequestMessage("budget-cascade", 5*time.Minute)
+		enqueueMessage(ctx, rdb, budgetRequestQueue, msg)
+
+		gomega.Eventually(func() int64 {
+			return getResultCount(ctx, rdb, budgetResultQueue)
+		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
+
+		result := popResult(ctx, rdb, budgetResultQueue)
+		gomega.Expect(result).NotTo(gomega.BeNil())
+		gomega.Expect(result.ID).To(gomega.Equal("budget-cascade"))
+	})
+})
+
+// Budget Metric Dispatch Gate tests run after EPP has been redeployed WITH
+// flow control. The budget is derived from:
+//
+//	D = 1 - (queue_size / (ready_pods * max_concurrency))
+//
+// where queue_size is inference_extension_flow_control_queue_size (EPP's
+// internal flow control admission queue depth).
+//
+// To drive queue_size > 0, the tests flood EPP with concurrent probe
+// requests while saturation is high. EPP throttles them in its admission
+// queue, making queue_size visible in Prometheus. With max_concurrency=1,
+// a single queued request closes the gate.
+var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", ginkgo.Ordered, func() {
+	var ctx context.Context
+
+	ginkgo.BeforeAll(func() {
+		redeployEPPWithFlowControl()
+	})
+
+	ginkgo.BeforeEach(func() {
+		ctx = context.Background()
+		rdb.Del(ctx, budgetRequestQueue) //nolint:errcheck
+		rdb.Del(ctx, budgetResultQueue)  //nolint:errcheck
+		setSimWaitingRequests(simAdminURL, 0)
 	})
 
 	ginkgo.It("processes a message when dispatch budget is positive", func() {
-		// D = 0.35: 35% capacity available
-		setPromMockBudget(promMockURL, "0.35")
+		setSimWaitingRequests(simAdminURL, 0)
+		waitForBudget(promURL, envoyURL, func(b float64) bool { return b > 0.5 })
 
 		msg := makeRequestMessage("budget-positive", 5*time.Minute)
 		enqueueMessage(ctx, rdb, budgetRequestQueue, msg)
@@ -43,20 +90,36 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
 		gomega.Expect(result.ID).To(gomega.Equal("budget-positive"))
 	})
 
-	ginkgo.It("pauses processing when dispatch budget is zero", func() {
-		// D = 0: system fully loaded
-		setPromMockBudget(promMockURL, "0.0")
+	ginkgo.It("blocks messages when dispatch budget is zero", func() {
+		// Drive saturation high and wait for EPP to detect it, so its
+		// flow control layer starts throttling incoming requests.
+		setSimWaitingRequests(simAdminURL, 10)
+		waitForSaturation(promURL, envoyURL, func(v float64) bool { return v >= 0.7 })
+
+		// Now flood EPP with concurrent probes — they will queue up in
+		// EPP's flow control admission layer, driving queue_size > 0.
+		stopFlood := floodProbes(envoyURL, 5)
+		defer stopFlood()
+
+		// Wait longer: sim → EPP scrape → throttle → probes queue →
+		// Prometheus scrape is a multi-hop propagation chain.
+		gomega.Eventually(func() bool {
+			sendProbeRequest(envoyURL)
+			v := queryProm(promURL, budgetPromQL)
+			return v >= 0 && v <= 0
+		}, 120*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to reach zero")
 
 		msg := makeRequestMessage("budget-zero", 5*time.Minute)
 		enqueueMessage(ctx, rdb, budgetRequestQueue, msg)
 
-		// Message should NOT be processed while budget is zero
 		gomega.Consistently(func() int64 {
 			return getResultCount(ctx, rdb, budgetResultQueue)
 		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
 
-		// Restore budget to allow processing
-		setPromMockBudget(promMockURL, "0.5")
+		// Stop flooding and restore budget.
+		stopFlood()
+		setSimWaitingRequests(simAdminURL, 0)
+		waitForBudget(promURL, envoyURL, func(b float64) bool { return b > 0.5 })
 
 		gomega.Eventually(func() int64 {
 			return getResultCount(ctx, rdb, budgetResultQueue)
@@ -67,42 +130,32 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", func() {
 		gomega.Expect(result.ID).To(gomega.Equal("budget-zero"))
 	})
 
-	ginkgo.It("falls back to vLLM metrics when primary metric is unavailable", func() {
-		// Disable primary (EPP queue size metric) to simulate EPP being down
-		disablePromMockPrimary(promMockURL)
-		// Secondary (vLLM-based) budget is above baseline
-		setPromMockVLLMBudget(promMockURL, "0.8")
-
-		msg := makeRequestMessage("budget-cascade", 5*time.Minute)
-		enqueueMessage(ctx, rdb, budgetRequestQueue, msg)
-
-		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, budgetResultQueue)
-		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
-
-		result := popResult(ctx, rdb, budgetResultQueue)
-		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.ID).To(gomega.Equal("budget-cascade"))
-	})
-
 	ginkgo.It("resumes processing when dispatch budget is restored", func() {
-		// Start with zero budget
-		setPromMockBudget(promMockURL, "0.0")
+		setSimWaitingRequests(simAdminURL, 10)
+		waitForSaturation(promURL, envoyURL, func(v float64) bool { return v >= 0.7 })
+
+		stopFlood := floodProbes(envoyURL, 5)
+		defer stopFlood()
+
+		gomega.Eventually(func() bool {
+			sendProbeRequest(envoyURL)
+			v := queryProm(promURL, budgetPromQL)
+			return v >= 0 && v <= 0
+		}, 120*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to reach zero")
 
 		for i := 1; i <= 3; i++ {
 			msg := makeRequestMessage(fmt.Sprintf("budget-resume-%d", i), 5*time.Minute)
 			enqueueMessage(ctx, rdb, budgetRequestQueue, msg)
 		}
 
-		// Nothing should be processed
 		gomega.Consistently(func() int64 {
 			return getResultCount(ctx, rdb, budgetResultQueue)
 		}, 5*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
 
-		// Restore dispatch budget
-		setPromMockBudget(promMockURL, "0.9")
+		stopFlood()
+		setSimWaitingRequests(simAdminURL, 0)
+		waitForBudget(promURL, envoyURL, func(b float64) bool { return b > 0.5 })
 
-		// All 3 messages should eventually be processed
 		gomega.Eventually(func() int64 {
 			return getResultCount(ctx, rdb, budgetResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 3))

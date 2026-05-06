@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-sim
+  namespace: e2e-integration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-sim
+  template:
+    metadata:
+      labels:
+        app: llm-sim
+        inference.networking.k8s.io/engine-type: vllm
+        # Required: Prometheus relabeling copies this into scraped vLLM metrics
+        # so the prometheus-budget gate can filter by inference_pool.
+        inference_pool: e2e-pool
+    spec:
+      containers:
+        - name: sim
+          image: ${SIM_IMAGE}
+          imagePullPolicy: Never
+          args:
+            - --model
+            - test-model
+            - --port
+            - "8000"
+            - --fake-metrics
+            - '{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}'
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+---
+# ClusterIP service for EPP to scrape metrics from sim pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-sim
+  namespace: e2e-integration
+spec:
+  selector:
+    app: llm-sim
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# NodePort service to allow test code to call /fake_metrics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-sim-admin
+  namespace: e2e-integration
+spec:
+  type: NodePort
+  selector:
+    app: llm-sim
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30490

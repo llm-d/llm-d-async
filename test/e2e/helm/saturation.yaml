@@ -1,0 +1,25 @@
+ap:
+  imagePullPolicy: Never
+  messageQueueImpl: "redis-sortedset"
+  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  concurrency: 1
+  prometheusURL: "http://prometheus.e2e-integration.svc.cluster.local:9090"
+  prometheusCacheTTL: "0s"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    enabled: true
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
+    requestPathURL: "/v1/completions"
+    requestQueueName: "saturation-request-sortedset"
+    resultQueueName: "saturation-result-list"
+    pollIntervalMs: 500
+    batchSize: 10
+    gateType: "prometheus-saturation"
+    gateParams:
+      pool: "e2e-pool"
+      threshold: "0.7"
+  modelServerMonitor:
+    enabled: false

@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,9 +17,6 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	k8slog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -29,54 +27,47 @@ import (
 )
 
 const (
-	// kindClusterName is the name of the Kind cluster created for e2e tests.
-	kindClusterName = "e2e-tests"
+	kindClusterName = "e2e-integration-tests"
+	nsName          = "e2e-integration"
 
-	// redisManifest is the manifest for the Redis deployment and service.
-	redisManifest = "./yaml/redis.yaml"
-	// igwMockManifest is the manifest for the mock inference gateway.
-	igwMockManifest = "./yaml/igw-mock.yaml"
-	// promMockManifest is the manifest for the mock Prometheus server.
-	promMockManifest = "./yaml/prom-mock.yaml"
-	// asyncProcessorManifest is the manifest for the async-processor deployment.
-	asyncProcessorManifest = "./yaml/async-processor.yaml"
-	// asyncProcessorSaturationManifest is the manifest for the saturation-gated async-processor.
-	asyncProcessorSaturationManifest = "./yaml/async-processor-saturation.yaml"
-	// asyncProcessorBudgetManifest is the manifest for the budget-gated async-processor.
-	asyncProcessorBudgetManifest = "./yaml/async-processor-budget.yaml"
-	// asyncProcessorQuotaManifest is the manifest for the quota-gated async-processor.
-	asyncProcessorQuotaManifest = "./yaml/async-processor-quota.yaml"
-	// asyncProcessorCompositeManifest is the manifest for the composite-gated async-processor.
-	asyncProcessorCompositeManifest = "./yaml/async-processor-composite.yaml"
+	// Manifests
+	redisManifest      = "./yaml/redis.yaml"
+	simManifest        = "./yaml/sim.yaml"
+	eppFCManifest      = "./yaml/epp-fc.yaml"
+	eppNoFCManifest    = "./yaml/epp-no-fc.yaml"
+	envoyManifest      = "./yaml/envoy.yaml"
+	prometheusManifest = "./yaml/prometheus.yaml"
+
+	// Helm chart and per-instance values for async-processor deployments.
+	chartPath     = "../../charts/async-processor"
+	helmValuesDir = "./helm"
 )
 
 var (
-	redisPort    string = env.GetEnvString("E2E_REDIS_PORT", "30379", ginkgo.GinkgoLogr)
-	adminPort    string = env.GetEnvString("E2E_ADMIN_PORT", "30081", ginkgo.GinkgoLogr)
-	promMockPort string = env.GetEnvString("E2E_PROM_MOCK_PORT", "30091", ginkgo.GinkgoLogr)
-
-	testConfig *testutils.TestConfig
+	redisPort      string = env.GetEnvString("E2E_INTEGRATION_REDIS_PORT", "30480", ginkgo.GinkgoLogr)
+	promPort       string = env.GetEnvString("E2E_INTEGRATION_PROM_PORT", "30491", ginkgo.GinkgoLogr)
+	simPort        string = env.GetEnvString("E2E_INTEGRATION_SIM_PORT", "30490", ginkgo.GinkgoLogr)
+	envoyPort      string = env.GetEnvString("E2E_INTEGRATION_ENVOY_PORT", "30492", ginkgo.GinkgoLogr)
+	envoyAdminPort string = env.GetEnvString("E2E_INTEGRATION_ENVOY_ADMIN_PORT", "30493", ginkgo.GinkgoLogr)
 
 	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d-incubation/async-processor:e2e-test", ginkgo.GinkgoLogr)
-	igwMockImage     = "e2e-igw-mock:latest"
-	promMockImage    = "e2e-prom-mock:latest"
-	// nsName is the namespace in which the K8S objects will be created
-	nsName = env.GetEnvString("NAMESPACE", "e2e-test", ginkgo.GinkgoLogr)
+	eppImage         = env.GetEnvString("EPP_IMAGE", "registry.k8s.io/gateway-api-inference-extension/epp:v1.5.0", ginkgo.GinkgoLogr)
+	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.0.0-test", ginkgo.GinkgoLogr)
+	gaieRoot         = os.Getenv("GAIE_ROOT")
+	simRoot          = os.Getenv("SIM_ROOT")
 
-	redisObjects                    []string
-	igwMockObjects                  []string
-	promMockObjects                 []string
-	asyncProcessorObjects           []string
-	asyncProcessorSaturationObjects []string
-	asyncProcessorBudgetObjects     []string
-	asyncProcessorQuotaObjects      []string
-	asyncProcessorCompositeObjects  []string
-	createdNameSpace                bool
+	testConfig *testutils.TestConfig
 
-	rdb         *redis.Client
-	adminURL    string
-	promMockURL string
+	// kindKubeconfig is an isolated kubeconfig file for the Kind cluster,
+	// so we never modify the user's default ~/.kube/config or current context.
+	kindKubeconfig string
+
+	rdb           *redis.Client
+	promURL       string
+	simAdminURL   string
+	envoyURL      string
+	envoyAdminURL string
 )
 
 func TestEndToEnd(t *testing.T) {
@@ -92,7 +83,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	setupK8sClient()
 	setupNameSpace()
 	applyManifests()
-	setupRedisClient()
+	setupClients()
 })
 
 var _ = ginkgo.AfterSuite(func() {
@@ -106,9 +97,9 @@ var _ = ginkgo.AfterSuite(func() {
 		return
 	}
 
-	// delete kind cluster we created
 	ginkgo.By("Deleting kind cluster " + kindClusterName)
-	command := exec.Command("kind", "delete", "cluster", "--name", kindClusterName)
+	command := exec.Command("kind", "delete", "cluster", "--name", kindClusterName,
+		"--kubeconfig", kindKubeconfig)
 	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	if err != nil {
 		ginkgo.GinkgoLogr.Error(err, "Failed to delete kind cluster")
@@ -137,26 +128,29 @@ func detectContainerRuntime() string {
 	return "docker"
 }
 
-// setupK8sCluster creates the Kind cluster, builds images, and loads them.
 func setupK8sCluster() {
+	kindKubeconfig = filepath.Join(os.TempDir(), "kind-kubeconfig-"+kindClusterName)
+
 	if containerRuntime == "podman" {
 		ginkgo.By("Setting KIND_EXPERIMENTAL_PROVIDER=podman")
 		os.Setenv("KIND_EXPERIMENTAL_PROVIDER", "podman") //nolint:errcheck
 	}
 
 	ginkgo.By("Creating Kind cluster " + kindClusterName)
-	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName, "--wait", "120s", "--config", "-")
+	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName,
+		"--kubeconfig", kindKubeconfig, "--wait", "120s", "--config", "-")
 	stdin, err := command.StdinPipe()
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	go func() {
 		defer func() {
-			err := stdin.Close()
-			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Expect(stdin.Close()).To(gomega.Succeed())
 		}()
-		clusterConfig := strings.ReplaceAll(kindClusterConfig, "${REDIS_PORT}", redisPort)
-		clusterConfig = strings.ReplaceAll(clusterConfig, "${ADMIN_PORT}", adminPort)
-		clusterConfig = strings.ReplaceAll(clusterConfig, "${PROM_MOCK_PORT}", promMockPort)
-		_, err := io.WriteString(stdin, clusterConfig)
+		cfg := strings.ReplaceAll(kindClusterConfig, "${REDIS_PORT}", redisPort)
+		cfg = strings.ReplaceAll(cfg, "${PROM_PORT}", promPort)
+		cfg = strings.ReplaceAll(cfg, "${SIM_PORT}", simPort)
+		cfg = strings.ReplaceAll(cfg, "${ENVOY_PORT}", envoyPort)
+		cfg = strings.ReplaceAll(cfg, "${ENVOY_ADMIN_PORT}", envoyAdminPort)
+		_, err := io.WriteString(stdin, cfg)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	}()
 	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
@@ -169,31 +163,60 @@ func setupK8sCluster() {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 
-	ginkgo.By("Building igw-mock image")
-	command = exec.Command(containerRuntime, "build", "-t", igwMockImage,
-		filepath.Join(projectRoot(), "test", "e2e", "igw-mock"))
-	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	if gaieRoot != "" {
+		ginkgo.By("Building EPP image from " + gaieRoot)
+		command = exec.Command(containerRuntime, "build", "-t", eppImage, gaieRoot)
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	} else {
+		ginkgo.By("Pulling EPP image " + eppImage)
+		command = exec.Command(containerRuntime, "pull", eppImage)
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	}
 
-	ginkgo.By("Building prom-mock image")
-	command = exec.Command(containerRuntime, "build", "-t", promMockImage,
-		filepath.Join(projectRoot(), "test", "e2e", "prom-mock"))
-	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	if simRoot != "" {
+		ginkgo.By("Building sim image from " + simRoot)
+		command = exec.Command(containerRuntime, "build", "-t", simImage, simRoot)
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	} else {
+		ginkgo.By("Pulling sim image " + simImage)
+		command = exec.Command(containerRuntime, "pull", simImage)
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	}
 
 	kindLoadImage(apImage)
-	kindLoadImage(igwMockImage)
-	kindLoadImage(promMockImage)
+	kindLoadImage(eppImage)
+	kindLoadImage(simImage)
 
-	// Pull and load redis image
 	ginkgo.By("Pulling redis:7-alpine")
 	command = exec.Command(containerRuntime, "pull", "redis:7-alpine")
 	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	gomega.Eventually(session).WithTimeout(300 * time.Second).Should(gexec.Exit(0))
 	kindLoadImage("redis:7-alpine")
+
+	ginkgo.By("Pulling docker.io/envoyproxy/envoy:distroless-v1.33.2")
+	command = exec.Command(containerRuntime, "pull", "docker.io/envoyproxy/envoy:distroless-v1.33.2")
+	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(300 * time.Second).Should(gexec.Exit(0))
+	kindLoadImage("docker.io/envoyproxy/envoy:distroless-v1.33.2")
+
+	ginkgo.By("Pulling prom/prometheus:v2.53.0")
+	command = exec.Command(containerRuntime, "pull", "prom/prometheus:v2.53.0")
+	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(300 * time.Second).Should(gexec.Exit(0))
+	kindLoadImage("prom/prometheus:v2.53.0")
+
+	// The sim image is pulled with imagePullPolicy: Always directly by the cluster.
 }
 
 func kindLoadImage(image string) {
@@ -226,7 +249,8 @@ func kindLoadImage(image string) {
 }
 
 func setupK8sClient() {
-	k8sCfg, err := config.GetConfigWithContext("")
+	os.Setenv("KUBECONFIG", kindKubeconfig) //nolint:errcheck
+	k8sCfg, err := config.GetConfigWithContext("kind-" + kindClusterName)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.ExpectWithOffset(1, k8sCfg).NotTo(gomega.BeNil())
 
@@ -238,108 +262,310 @@ func setupK8sClient() {
 	k8slog.SetLogger(ginkgo.GinkgoLogr)
 }
 
-// setupNameSpace sets up the specified namespace if it doesn't exist
+// setupNameSpace sets up the specified namespace if it doesn't exist.
+// Uses kubectl (not the Go API client) to ensure the same kubeconfig/context
+// as all other manifest operations.
 func setupNameSpace() {
-	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
-	if err == nil {
-		return
-	}
-	gomega.Expect(errors.IsNotFound(err)).To(gomega.BeTrue())
+	ginkgo.By("Creating namespace " + nsName + " (kubeconfig=" + kindKubeconfig + ")")
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"create", "namespace", nsName)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit())
 
-	ginkgo.By("Creating namespace " + nsName)
-	namespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: nsName,
-		},
-	}
-	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	createdNameSpace = true
+	// Verify namespace actually exists.
+	command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"get", "namespace", nsName)
+	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 }
 
 func applyManifests() {
+	// All manifests are applied via kubectl to avoid scheme registration issues
+	// with GAIE custom resources (InferencePool, CRDs).
+	ginkgo.By("Applying InferencePool CRDs")
+	for _, crd := range inferencePoolCRDs() {
+		kubectlApplyFile(crd, nil)
+	}
+
 	ginkgo.By("Applying Redis manifest")
-	redisObjects = testutils.ApplyYAMLFile(testConfig, redisManifest)
+	kubectlApplyFile(redisManifest, nil)
 
-	ginkgo.By("Applying igw-mock manifest")
-	igwMockObjects = testutils.ApplyYAMLFile(testConfig, igwMockManifest)
+	ginkgo.By("Applying sim manifest")
+	kubectlApplyFile(simManifest, map[string]string{"${SIM_IMAGE}": simImage})
 
-	ginkgo.By("Applying prom-mock manifest")
-	promMockObjects = testutils.ApplyYAMLFile(testConfig, promMockManifest)
+	// Deploy EPP without flow control initially so the cascade test
+	// (which runs first) sees no primary metric.
+	ginkgo.By("Applying EPP manifest (without flow control)")
+	kubectlApplyFile(eppNoFCManifest, map[string]string{"${EPP_IMAGE}": eppImage})
 
-	ginkgo.By("Applying async-processor manifest")
-	apYamls := testutils.ReadYaml(asyncProcessorManifest)
-	apYamls = substituteMany(apYamls, map[string]string{
-		"${AP_IMAGE}": apImage,
+	ginkgo.By("Applying Prometheus manifest")
+	kubectlApplyFile(prometheusManifest, nil)
+
+	ginkgo.By("Applying Envoy manifest")
+	kubectlApplyFile(envoyManifest, map[string]string{
+		"${EPP_SVC}":               "epp-svc",
+		"${ENVOY_ADMIN_NODE_PORT}": envoyAdminPort,
 	})
-	asyncProcessorObjects = testutils.CreateObjsFromYaml(testConfig, apYamls)
+	// Patch Envoy service to NodePort so test code can reach it for probe requests.
+	kubectlPatchEnvoyNodePort()
 
-	ginkgo.By("Applying async-processor-saturation manifest")
-	apSatYamls := testutils.ReadYaml(asyncProcessorSaturationManifest)
-	apSatYamls = substituteMany(apSatYamls, map[string]string{
-		"${AP_IMAGE}": apImage,
-	})
-	asyncProcessorSaturationObjects = testutils.CreateObjsFromYaml(testConfig, apSatYamls)
-	ginkgo.By("Applying async-processor-budget manifest")
-	apBudgetYamls := testutils.ReadYaml(asyncProcessorBudgetManifest)
-	apBudgetYamls = substituteMany(apBudgetYamls, map[string]string{
-		"${AP_IMAGE}": apImage,
-	})
-	asyncProcessorBudgetObjects = testutils.CreateObjsFromYaml(testConfig, apBudgetYamls)
-
-	ginkgo.By("Applying async-processor-quota manifest")
-	apQuotaYamls := testutils.ReadYaml(asyncProcessorQuotaManifest)
-	apQuotaYamls = substituteMany(apQuotaYamls, map[string]string{
-		"${AP_IMAGE}": apImage,
-	})
-	asyncProcessorQuotaObjects = testutils.CreateObjsFromYaml(testConfig, apQuotaYamls)
-
-	ginkgo.By("Applying async-processor-composite manifest")
-	apCompositeYamls := testutils.ReadYaml(asyncProcessorCompositeManifest)
-	apCompositeYamls = substituteMany(apCompositeYamls, map[string]string{
-		"${AP_IMAGE}": apImage,
-	})
-	asyncProcessorCompositeObjects = testutils.CreateObjsFromYaml(testConfig, apCompositeYamls)
+	ginkgo.By("Installing async-processor helm releases")
+	imageRepo, imageTag := splitImage(apImage)
+	for _, r := range []struct{ name, values string }{
+		{"integration", helmValuesDir + "/integration.yaml"},
+		{"saturation", helmValuesDir + "/saturation.yaml"},
+		{"budget", helmValuesDir + "/budget.yaml"},
+		{"redis-gate", helmValuesDir + "/redis-gate.yaml"},
+	} {
+		helmInstall(r.name, r.values, map[string]string{
+			"ap.image.repository": imageRepo,
+			"ap.image.tag":        imageTag,
+		})
+	}
 }
 
-func setupRedisClient() {
-	adminURL = "http://localhost:" + adminPort
-	promMockURL = "http://localhost:" + promMockPort
+// kubectlPatchEnvoyNodePort patches the Envoy service to NodePort so test code
+// outside the cluster can reach it for probe requests.
+func kubectlPatchEnvoyNodePort() {
+	patch := fmt.Sprintf(`{"spec":{"type":"NodePort","ports":[{"name":"http-8081","port":8081,"targetPort":8081,"nodePort":%s}]}}`, envoyPort)
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "patch", "service", "envoy",
+		"--type=merge", "--patch", patch)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+}
+
+// kubectlApplyFile applies a YAML manifest via kubectl, optionally substituting
+// template variables. Uses stdin to avoid temp files.
+func kubectlApplyFile(path string, substitutions map[string]string) {
+	kubectlApplyFileInNamespace(path, "", substitutions)
+}
+
+func kubectlApplyFileInNamespace(path, namespace string, substitutions map[string]string) {
+	content, err := os.ReadFile(path)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred(), "reading manifest %s", path)
+
+	yaml := string(content)
+	for k, v := range substitutions {
+		yaml = strings.ReplaceAll(yaml, k, v)
+	}
+
+	args := []string{"--kubeconfig", kindKubeconfig, "apply"}
+	if namespace != "" {
+		args = append(args, "-n", namespace)
+	}
+	args = append(args, "-f", "-")
+
+	command := exec.Command("kubectl", args...)
+	command.Stdin = strings.NewReader(yaml)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+}
+
+func splitImage(image string) (string, string) {
+	if i := strings.LastIndex(image, ":"); i >= 0 {
+		return image[:i], image[i+1:]
+	}
+	return image, "latest"
+}
+
+func helmInstall(releaseName, valuesFile string, sets map[string]string) {
+	args := []string{"install", releaseName, chartPath,
+		"-f", valuesFile, "-n", nsName, "--wait", "--timeout=120s"}
+	for k, v := range sets {
+		args = append(args, "--set", k+"="+v)
+	}
+	command := exec.Command("helm", args...)
+	command.Env = append(os.Environ(), "KUBECONFIG="+kindKubeconfig)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred(), "helm install %s", releaseName)
+	gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
+}
+
+
+func setupClients() {
+	promURL = "http://localhost:" + promPort
+	simAdminURL = "http://localhost:" + simPort
+	envoyURL = "http://localhost:" + envoyPort
+	envoyAdminURL = "http://localhost:" + envoyAdminPort
 
 	ginkgo.By("Creating Redis client on localhost:" + redisPort)
-	rdb = redis.NewClient(&redis.Options{
-		Addr: "localhost:" + redisPort,
-	})
+	rdb = redis.NewClient(&redis.Options{Addr: "localhost:" + redisPort})
 	gomega.Eventually(func() error {
 		return rdb.Ping(context.Background()).Err()
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
 
-	ginkgo.By("Waiting for prom-mock to be ready on localhost:" + promMockPort)
+	ginkgo.By("Waiting for Prometheus to be ready")
 	gomega.Eventually(func() error {
-		resp, err := http.Get(promMockURL + "/admin/saturation")
+		resp, err := http.Get(promURL + "/-/ready")
 		if err != nil {
 			return err
 		}
 		return resp.Body.Close()
-	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
+	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
+
+	ginkgo.By("Waiting for sim to be ready")
+	gomega.Eventually(func() error {
+		resp, err := http.Get(simAdminURL + "/metrics")
+		if err != nil {
+			return err
+		}
+		return resp.Body.Close()
+	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
+
+	ginkgo.By("Waiting for Envoy to be ready")
+	gomega.Eventually(func() error {
+		resp, err := http.Get(envoyURL + "/v1/completions")
+		if err != nil {
+			return err
+		}
+		resp.Body.Close() //nolint:errcheck
+		return nil
+	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
 
-// projectRoot returns the root of the project (two levels up from test/e2e/).
+var gaieInferencePoolCRDs = []string{
+	"inference.networking.k8s.io_inferencepools.yaml",
+	"inference.networking.x-k8s.io_inferenceobjectives.yaml",
+	"inference.networking.x-k8s.io_inferencemodelrewrites.yaml",
+	"inference.networking.x-k8s.io_inferencepoolimports.yaml",
+}
+
+// inferencePoolCRDs returns paths to the CRD files.
+// When GAIE_ROOT is set, CRDs are read from the local checkout;
+// otherwise they are fetched from the GAIE GitHub release matching the EPP_IMAGE tag.
+func inferencePoolCRDs() []string {
+	if gaieRoot != "" {
+		base := filepath.Join(gaieRoot, "config", "crd", "bases")
+		paths := make([]string, len(gaieInferencePoolCRDs))
+		for i, name := range gaieInferencePoolCRDs {
+			paths[i] = filepath.Join(base, name)
+		}
+		return paths
+	}
+	return fetchGAIECRDs()
+}
+
+func fetchGAIECRDs() []string {
+	version := eppImage[strings.LastIndex(eppImage, ":")+1:]
+
+	cacheDir := filepath.Join(projectRoot(), ".cache", "gaie-crds", version)
+	paths := make([]string, len(gaieInferencePoolCRDs))
+	for i, name := range gaieInferencePoolCRDs {
+		paths[i] = filepath.Join(cacheDir, name)
+	}
+
+	if _, err := os.Stat(paths[0]); err == nil {
+		ginkgo.By("Using cached GAIE CRDs for version " + version)
+		return paths
+	}
+
+	ginkgo.By("Fetching GAIE CRDs for version " + version)
+	gomega.Expect(os.MkdirAll(cacheDir, 0755)).To(gomega.Succeed())
+
+	baseURL := fmt.Sprintf(
+		"https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/%s/config/crd/bases",
+		version,
+	)
+
+	for i, name := range gaieInferencePoolCRDs {
+		resp, err := http.Get(baseURL + "/" + name) //nolint:gosec
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
+			"failed to fetch CRD %s at version %s", name, version)
+		data, err := io.ReadAll(resp.Body)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Expect(os.WriteFile(paths[i], data, 0644)).To(gomega.Succeed())
+	}
+	return paths
+}
+
 func projectRoot() string {
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
 
-func substituteMany(inputs []string, substitutions map[string]string) []string {
-	outputs := []string{}
-	for _, input := range inputs {
-		output := input
-		for key, value := range substitutions {
-			output = strings.ReplaceAll(output, key, value)
-		}
-		outputs = append(outputs, output)
+// redeployEPPWithFlowControl re-applies the EPP manifest with flow control
+// enabled, restarts the deployment, and waits for the new pod to be ready.
+func redeployEPPWithFlowControl() {
+	ginkgo.By("Redeploying EPP with flow control enabled")
+	// Delete the existing ConfigMap first so kubectl apply detects the change.
+	// Without this, kubectl apply sometimes reports "unchanged" when only the
+	// embedded data string differs between multi-document YAML files.
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "delete", "configmap", "epp-plugins-config", "--ignore-not-found")
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+
+	kubectlApplyFile(eppFCManifest, map[string]string{"${EPP_IMAGE}": eppImage})
+
+	// Rollout restart to pick up the new ConfigMap.
+	command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "rollout", "restart", "deployment/epp")
+	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+
+	// Wait for the rollout to complete.
+	command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "rollout", "status", "deployment/epp", "--timeout=120s")
+	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
+
+	// Restart all processor deployments so they get fresh connections to
+	// Envoy/EPP. Without this, processors that poll during the EPP restart
+	// window can get 404s from Envoy that are classified as non-retryable.
+	for _, deploy := range []string{
+		"integration-async-processor",
+		"saturation-async-processor",
+		"budget-async-processor",
+		"redis-gate-async-processor",
+	} {
+		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
+		s, e := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(e).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(s).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 	}
-	return outputs
+	for _, deploy := range []string{
+		"integration-async-processor",
+		"saturation-async-processor",
+		"budget-async-processor",
+		"redis-gate-async-processor",
+	} {
+		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")
+		s, e := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(e).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(s).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
+	}
+
+	// Wait for the full Envoy → EPP → sim pipeline to be healthy by
+	// sending a real inference request and checking for a 200 response.
+	gomega.Eventually(func() error {
+		body := []byte(`{"model":"test-model","prompt":"probe"}`)
+		req, err := http.NewRequest(http.MethodPost, envoyURL+"/v1/completions", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		resp.Body.Close() //nolint:errcheck
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("envoy returned %d, want 200", resp.StatusCode)
+		}
+		return nil
+	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
 
 const kindClusterConfig = `
@@ -347,13 +573,19 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - extraPortMappings:
-  - containerPort: 30379
+  - containerPort: 30480
     hostPort: ${REDIS_PORT}
     protocol: TCP
-  - containerPort: 30081
-    hostPort: ${ADMIN_PORT}
+  - containerPort: 30491
+    hostPort: ${PROM_PORT}
     protocol: TCP
-  - containerPort: 30091
-    hostPort: ${PROM_MOCK_PORT}
+  - containerPort: 30490
+    hostPort: ${SIM_PORT}
+    protocol: TCP
+  - containerPort: 30492
+    hostPort: ${ENVOY_PORT}
+    protocol: TCP
+  - containerPort: 30493
+    hostPort: ${ENVOY_ADMIN_PORT}
     protocol: TCP
 `

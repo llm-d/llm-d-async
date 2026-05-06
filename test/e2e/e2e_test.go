@@ -9,24 +9,36 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
+var _ = ginkgo.Describe("General Integration", func() {
 	var ctx context.Context
 
 	ginkgo.BeforeEach(func() {
 		ctx = context.Background()
-		cleanupQueues(ctx, rdb)
-		resetMock(adminURL)
+		setSimWaitingRequests(simAdminURL, 0)
+		setEnvoyFaultAbort(envoyAdminURL, 0)
+		// Drain queues and wait for any in-flight requests to settle.
+		// Delete, pause for in-flight results, delete again.
+		rdb.Del(ctx, integrationRequestQueue) //nolint:errcheck
+		rdb.Del(ctx, integrationResultQueue)  //nolint:errcheck
+		gomega.Consistently(func() int64 {
+			return rdb.LLen(ctx, integrationResultQueue).Val() +
+				rdb.ZCard(ctx, integrationRequestQueue).Val()
+		}, 3*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(0)))
+	})
+
+	ginkgo.AfterEach(func() {
+		setEnvoyFaultAbort(envoyAdminURL, 0)
 	})
 
 	ginkgo.It("processes a message end-to-end", func() {
 		msg := makeRequestMessage("e2e-basic-1", 5*time.Minute)
-		enqueueMessage(ctx, rdb, requestQueue, msg)
+		enqueueMessage(ctx, rdb, integrationRequestQueue, msg)
 
 		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, integrationResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
 
-		result := popResult(ctx, rdb, resultQueue)
+		result := popResult(ctx, rdb, integrationResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
 		gomega.Expect(result.ID).To(gomega.Equal("e2e-basic-1"))
 	})
@@ -34,7 +46,7 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 	ginkgo.It("processes messages in deadline order", func() {
 		now := time.Now()
 
-		// Enqueue 3 messages with different deadlines (out of order)
+		// Enqueue 3 messages with different deadlines (out of order).
 		msg1 := makeRequestMessage("deadline-300", 300*time.Second)
 		msg1.Deadline = now.Add(300 * time.Second).Unix()
 
@@ -44,82 +56,87 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 		msg3 := makeRequestMessage("deadline-200", 200*time.Second)
 		msg3.Deadline = now.Add(200 * time.Second).Unix()
 
-		enqueueMessages(ctx, rdb, requestQueue, msg1, msg2, msg3)
+		enqueueMessages(ctx, rdb, integrationRequestQueue, msg1, msg2, msg3)
 
-		// Wait for all 3 results
+		// Wait for all 3 results. With concurrency=1 the result list preserves
+		// processing order, which should match deadline order.
 		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, integrationResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 3))
 
-		// Check the order in the mock's request log
-		log := getRequestLog(adminURL)
-		gomega.Expect(len(log)).To(gomega.BeNumerically(">=", 3))
-		gomega.Expect(log[0]).To(gomega.Equal("deadline-100"))
-		gomega.Expect(log[1]).To(gomega.Equal("deadline-200"))
-		gomega.Expect(log[2]).To(gomega.Equal("deadline-300"))
+		r1 := popResult(ctx, rdb, integrationResultQueue)
+		r2 := popResult(ctx, rdb, integrationResultQueue)
+		r3 := popResult(ctx, rdb, integrationResultQueue)
+		gomega.Expect(r1).NotTo(gomega.BeNil())
+		gomega.Expect(r2).NotTo(gomega.BeNil())
+		gomega.Expect(r3).NotTo(gomega.BeNil())
+		gomega.Expect(r1.ID).To(gomega.Equal("deadline-100"))
+		gomega.Expect(r2.ID).To(gomega.Equal("deadline-200"))
+		gomega.Expect(r3.ID).To(gomega.Equal("deadline-300"))
 	})
 
-	ginkgo.It("skips expired messages", func() {
-		// Enqueue an expired message
-		expiredMsg := makeRequestMessage("expired-msg", -100*time.Second)
-		// Enqueue a valid message
-		validMsg := makeRequestMessage("valid-msg", 5*time.Minute)
-
-		enqueueMessage(ctx, rdb, requestQueue, expiredMsg)
-		enqueueMessage(ctx, rdb, requestQueue, validMsg)
-
-		// Wait for the valid message to be processed
-		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
-		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
-
-		// Give extra time to ensure only valid messages appear
-		gomega.Consistently(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
-		}, 5*time.Second, 1*time.Second).Should(gomega.BeNumerically("<=", 1))
-
-		result := popResult(ctx, rdb, resultQueue)
-		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.ID).To(gomega.Equal("valid-msg"))
-	})
-
-	ginkgo.It("retries on 5xx from inference gateway", func() {
-		// Configure mock to fail the first request with 500
-		setMockFailures(adminURL, 500, 1)
+	ginkgo.It("retries on 5xx from the inference backend", func() {
+		// Enable 100% fault injection so the first attempt fails with 503.
+		setEnvoyFaultAbort(envoyAdminURL, 100)
 
 		msg := makeRequestMessage("retry-msg", 5*time.Minute)
-		enqueueMessage(ctx, rdb, requestQueue, msg)
+		enqueueMessage(ctx, rdb, integrationRequestQueue, msg)
 
-		// Eventually the result should appear after retry
+		// Message should not be delivered while faults are active.
+		gomega.Consistently(func() int64 {
+			return getResultCount(ctx, rdb, integrationResultQueue)
+		}, 5*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
+
+		// Disable fault injection so retries succeed.
+		setEnvoyFaultAbort(envoyAdminURL, 0)
+
 		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, integrationResultQueue)
 		}, 120*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
 
-		result := popResult(ctx, rdb, resultQueue)
+		result := popResult(ctx, rdb, integrationResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
 		gomega.Expect(result.ID).To(gomega.Equal("retry-msg"))
 	})
 
-	ginkgo.It("collects all results from batch of messages", func() {
-		// Enqueue 5 messages rapidly with the same priority
+	ginkgo.It("skips expired messages", func() {
+		expiredMsg := makeRequestMessage("expired-msg", -100*time.Second)
+		validMsg := makeRequestMessage("valid-msg", 5*time.Minute)
+
+		enqueueMessage(ctx, rdb, integrationRequestQueue, expiredMsg)
+		enqueueMessage(ctx, rdb, integrationRequestQueue, validMsg)
+
+		gomega.Eventually(func() int64 {
+			return getResultCount(ctx, rdb, integrationResultQueue)
+		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
+
+		// Only the valid message should appear.
+		gomega.Consistently(func() int64 {
+			return getResultCount(ctx, rdb, integrationResultQueue)
+		}, 5*time.Second, 1*time.Second).Should(gomega.BeNumerically("<=", 1))
+
+		result := popResult(ctx, rdb, integrationResultQueue)
+		gomega.Expect(result).NotTo(gomega.BeNil())
+		gomega.Expect(result.ID).To(gomega.Equal("valid-msg"))
+	})
+
+	ginkgo.It("collects all results from a batch of messages", func() {
 		deadline := time.Now().Add(5 * time.Minute)
-		ids := []string{"fifo-1", "fifo-2", "fifo-3", "fifo-4", "fifo-5"}
+		ids := []string{"batch-1", "batch-2", "batch-3", "batch-4", "batch-5"}
 
 		for _, id := range ids {
 			msg := makeRequestMessage(id, 5*time.Minute)
 			msg.Deadline = deadline.Unix()
-			enqueueMessage(ctx, rdb, requestQueue, msg)
+			enqueueMessage(ctx, rdb, integrationRequestQueue, msg)
 		}
 
-		// Wait for all results
 		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, integrationResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 5))
 
-		// Collect all results via RPOP and verify all IDs are present
 		collected := make(map[string]bool)
 		for i := 0; i < 5; i++ {
-			r := popResult(ctx, rdb, resultQueue)
+			r := popResult(ctx, rdb, integrationResultQueue)
 			gomega.Expect(r).NotTo(gomega.BeNil())
 			collected[r.ID] = true
 		}
@@ -130,68 +147,57 @@ var _ = ginkgo.Describe("Redis Sorted Set E2E", func() {
 	})
 })
 
-var _ = ginkgo.Describe("Dispatch Gate E2E", func() {
+var _ = ginkgo.Describe("Redis Dispatch Gate E2E", func() {
 	var ctx context.Context
 
 	ginkgo.BeforeEach(func() {
 		ctx = context.Background()
-		cleanupQueues(ctx, rdb)
-		resetMock(adminURL)
-		// Default to full capacity so other tests are unaffected
+		rdb.Del(ctx, redisGateRequestQueue) //nolint:errcheck
+		rdb.Del(ctx, redisGateResultQueue)  //nolint:errcheck
 		clearDispatchGateBudget(ctx, rdb)
 	})
 
 	ginkgo.AfterEach(func() {
-		// Restore full capacity
 		clearDispatchGateBudget(ctx, rdb)
 	})
 
 	ginkgo.It("pauses processing when budget is zero", func() {
-		// Close the gate
 		setDispatchGateBudget(ctx, rdb, "0.0")
 
 		msg := makeRequestMessage("gated-pause", 5*time.Minute)
-		enqueueMessage(ctx, rdb, requestQueue, msg)
+		enqueueMessage(ctx, rdb, redisGateRequestQueue, msg)
 
-		// Verify the message is NOT processed while gate is closed
 		gomega.Consistently(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, redisGateResultQueue)
 		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
 
-		// Open the gate
 		setDispatchGateBudget(ctx, rdb, "1.0")
 
-		// Verify the message IS processed after gate opens
 		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, redisGateResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
 
-		result := popResult(ctx, rdb, resultQueue)
+		result := popResult(ctx, rdb, redisGateResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
 		gomega.Expect(result.ID).To(gomega.Equal("gated-pause"))
 	})
 
 	ginkgo.It("resumes processing when budget changes from zero to one", func() {
-		// Start with gate closed
 		setDispatchGateBudget(ctx, rdb, "0.0")
 
-		// Enqueue multiple messages
 		for i := 1; i <= 3; i++ {
 			msg := makeRequestMessage(fmt.Sprintf("resume-%d", i), 5*time.Minute)
-			enqueueMessage(ctx, rdb, requestQueue, msg)
+			enqueueMessage(ctx, rdb, redisGateRequestQueue, msg)
 		}
 
-		// Nothing should be processed
 		gomega.Consistently(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, redisGateResultQueue)
 		}, 5*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
 
-		// Open the gate
 		setDispatchGateBudget(ctx, rdb, "1.0")
 
-		// All 3 messages should eventually be processed
 		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, resultQueue)
+			return getResultCount(ctx, rdb, redisGateResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 3))
 	})
 })

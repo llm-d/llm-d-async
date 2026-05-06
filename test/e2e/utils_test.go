@@ -5,8 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/onsi/gomega"
@@ -16,11 +17,18 @@ import (
 )
 
 const (
-	requestQueue = "request-sortedset"
-	resultQueue  = "result-list"
+	integrationRequestQueue = "integration-request-sortedset"
+	integrationResultQueue  = "integration-result-list"
+
+	saturationRequestQueue = "saturation-request-sortedset"
+	saturationResultQueue  = "saturation-result-list"
+
+	redisGateRequestQueue = "redis-gate-request-sortedset"
+	redisGateResultQueue  = "redis-gate-result-list"
+	dispatchGateBudgetKey = "dispatch-gate-budget"
 )
 
-var adminClient = &http.Client{Timeout: 10 * time.Second}
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 func enqueueMessage(ctx context.Context, rdb *redis.Client, queue string, msg api.RequestMessage) {
 	ir := api.NewInternalRequest(api.InternalRouting{}, &msg)
@@ -68,107 +76,6 @@ func popResult(ctx context.Context, rdb *redis.Client, queue string) *api.Result
 	return &msg
 }
 
-func cleanupQueues(ctx context.Context, rdb *redis.Client) {
-	rdb.Del(ctx, requestQueue) //nolint:errcheck
-	rdb.Del(ctx, resultQueue)  //nolint:errcheck
-}
-
-func resetMock(adminURL string) {
-	req, err := http.NewRequest(http.MethodDelete, adminURL+"/admin/reset", nil)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
-}
-
-func setMockFailures(adminURL string, status, count int) {
-	body := fmt.Sprintf(`{"status":%d,"count":%d}`, status, count)
-	req, err := http.NewRequest(http.MethodPost, adminURL+"/admin/fail-next", bytes.NewBufferString(body))
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
-}
-
-func setMockDelay(adminURL string, delayMs int) {
-	body := fmt.Sprintf(`{"delay_ms":%d}`, delayMs)
-	req, err := http.NewRequest(http.MethodPost, adminURL+"/admin/delay", bytes.NewBufferString(body))
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
-}
-
-func getRequestLog(adminURL string) []string {
-	req, err := http.NewRequest(http.MethodGet, adminURL+"/admin/request-log", nil)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	body, err := io.ReadAll(resp.Body)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-
-	var log []string
-	gomega.ExpectWithOffset(1, json.Unmarshal(body, &log)).To(gomega.Succeed())
-	return log
-}
-
-const dispatchGateBudgetKey = "dispatch-gate-budget"
-
-func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string) {
-	gomega.ExpectWithOffset(1, rdb.Set(ctx, dispatchGateBudgetKey, budget, 0).Err()).NotTo(gomega.HaveOccurred())
-}
-
-func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
-	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
-}
-
-func resetPromMock(promMockURL string) {
-	req, err := http.NewRequest(http.MethodDelete, promMockURL+"/admin/reset", nil)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
-}
-
-func setPromMockSaturation(promMockURL string, value string) {
-	setPromMockValue(promMockURL+"/admin/saturation", value)
-}
-
-func setPromMockBudget(promMockURL string, value string) {
-	setPromMockValue(promMockURL+"/admin/budget", value)
-}
-
-func setPromMockVLLMBudget(promMockURL string, value string) {
-	setPromMockValue(promMockURL+"/admin/vllm-budget", value)
-}
-
-func disablePromMockPrimary(promMockURL string) {
-	req, err := http.NewRequest(http.MethodPost, promMockURL+"/admin/disable-primary", nil)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
-}
-
-func setPromMockValue(url string, value string) {
-	body, _ := json.Marshal(map[string]string{"value": value})
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	gomega.ExpectWithOffset(2, err).NotTo(gomega.HaveOccurred())
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := adminClient.Do(req)
-	gomega.ExpectWithOffset(2, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(2, resp.StatusCode).To(gomega.Equal(http.StatusOK))
-}
-
 func makeRequestMessage(id string, deadlineOffset time.Duration) api.RequestMessage {
 	deadline := time.Now().Add(deadlineOffset)
 	return api.RequestMessage{
@@ -177,4 +84,146 @@ func makeRequestMessage(id string, deadlineOffset time.Duration) api.RequestMess
 		Deadline: deadline.Unix(),
 		Payload:  map[string]any{"model": id, "prompt": "test"},
 	}
+}
+
+// setSimWaitingRequests drives the vLLM simulator's waiting request count.
+// EPP computes per-pod saturation as Max(WaitingQueue/QueueDepthThreshold, KVCache/KVCacheThreshold).
+// The default QueueDepthThreshold is 5, so waitingRequests >= 5 saturates the pod.
+func setSimWaitingRequests(simAdminURL string, waitingRequests int) {
+	body, _ := json.Marshal(map[string]any{
+		"waiting-requests": waitingRequests,
+	})
+	req, err := http.NewRequest(http.MethodPost, simAdminURL+"/fake_metrics", bytes.NewReader(body))
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	defer resp.Body.Close() //nolint:errcheck
+	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.BeElementOf(http.StatusOK, http.StatusNoContent))
+}
+
+// sendProbeRequest sends a minimal inference request through Envoy → EPP to trigger
+// the EPP's flow control admission controller, which records the saturation metric.
+func sendProbeRequest(envoyURL string) {
+	body := []byte(`{"model":"test-model","prompt":"probe"}`)
+	req, err := http.NewRequest(http.MethodPost, envoyURL+"/v1/completions", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close() //nolint:errcheck
+}
+
+// queryProm runs a PromQL instant query and returns the first result's scalar
+// value. Returns -1 if the query fails or returns no results.
+func queryProm(promURL, query string) float64 {
+	resp, err := httpClient.Get(promURL + "/api/v1/query?query=" + url.QueryEscape(query))
+	if err != nil {
+		return -1
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Value [2]any `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return -1
+	}
+	if result.Status != "success" || len(result.Data.Result) == 0 {
+		return -1
+	}
+	v, err := strconv.ParseFloat(result.Data.Result[0].Value[1].(string), 64)
+	if err != nil {
+		return -1
+	}
+	return v
+}
+
+// budgetPromQL is the same PromQL the budget gate's primary source uses
+// (EPP flow control queue_size). The multiplier (* 1) is max_concurrency and
+// must match the budget processor's gate-params in async-processor.yaml.
+// We use max_concurrency=1 so a single queued request in EPP's admission
+// layer is enough to drive the budget to zero.
+const budgetPromQL = `1 - (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool="e2e-pool"}) / on() (inference_pool_ready_pods{name="e2e-pool"} * 1))`
+
+// waitForBudget polls Prometheus using the same PromQL the budget gate uses.
+// It sends probe requests through Envoy to trigger EPP metric recording, then
+// queries the primary budget PromQL. pred receives the raw budget value D
+// (before baseline subtraction — the gate subtracts baseline internally).
+func waitForBudget(promURL, envoyURL string, pred func(float64) bool) {
+	gomega.EventuallyWithOffset(1, func() bool {
+		sendProbeRequest(envoyURL)
+		v := queryProm(promURL, budgetPromQL)
+		return v >= 0 && pred(v)
+	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to satisfy condition")
+}
+
+// waitForSaturation polls Prometheus until pred is satisfied or the timeout elapses.
+// It sends probe requests through Envoy on each poll to trigger EPP's flow control
+// admission controller, which records the saturation metric.
+func waitForSaturation(promURL, envoyURL string, pred func(float64) bool) {
+	gomega.EventuallyWithOffset(1, func() bool {
+		sendProbeRequest(envoyURL)
+		v := queryProm(promURL, `inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"}`)
+		return v >= 0 && pred(v)
+	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for saturation to satisfy condition")
+}
+
+// floodProbes continuously sends concurrent inference requests through Envoy
+// to fill EPP's flow control admission queue. When EPP is saturated, these
+// requests queue up, driving inference_extension_flow_control_queue_size > 0.
+// Uses a long HTTP timeout so throttled requests stay in EPP's queue long
+// enough for Prometheus to scrape the non-zero queue_size.
+// Call the returned cancel function to stop the flood.
+func floodProbes(envoyURL string, concurrency int) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	floodClient := &http.Client{Timeout: 120 * time.Second}
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					body := []byte(`{"model":"test-model","prompt":"probe"}`)
+					req, _ := http.NewRequestWithContext(ctx, http.MethodPost, envoyURL+"/v1/completions", bytes.NewReader(body))
+					req.Header.Set("Content-Type", "application/json")
+					resp, err := floodClient.Do(req)
+					if err == nil {
+						resp.Body.Close() //nolint:errcheck
+					}
+				}
+			}
+		}()
+	}
+	return cancel
+}
+
+// setEnvoyFaultAbort configures Envoy's fault injection filter via the admin
+// runtime API. percent is 0–100 (percentage of requests that return 503).
+func setEnvoyFaultAbort(envoyAdminURL string, percent int) {
+	body := fmt.Sprintf("fault.http.abort.abort_percent=%d", percent)
+	req, err := http.NewRequest(http.MethodPost, envoyAdminURL+"/runtime_modify?"+body, nil)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	resp, err := httpClient.Do(req)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	defer resp.Body.Close() //nolint:errcheck
+	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
+}
+
+func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string) {
+	gomega.ExpectWithOffset(1, rdb.Set(ctx, dispatchGateBudgetKey, budget, 0).Err()).NotTo(gomega.HaveOccurred())
+}
+
+func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
+	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
 }

@@ -41,3 +41,6 @@ llmd/
 llmd-infra/
 
 *.tgz
+
+# Downloaded CRDs and other cached artifacts
+.cache/

@@ -9,27 +9,35 @@ import (
 	"github.com/onsi/gomega"
 )
 
-const (
-	saturationRequestQueue = "saturation-request-sortedset"
-	saturationResultQueue  = "saturation-result-list"
-)
-
-var _ = ginkgo.Describe("Saturation Metric Dispatch Gate E2E", func() {
+// These tests drive the saturation gate through the full observability pipeline:
+//
+//	setSimWaitingRequests → sim reports vllm:num_requests_waiting
+//	  → EPP scrapes sim, computes inference_extension_flow_control_pool_saturation
+//	    (saturation = Max(WaitingQueue/QueueDepthThreshold, KVCache/KVCacheThreshold))
+//	  → Prometheus scrapes EPP
+//	  → async-processor queries Prometheus, gate opens/closes
+//
+// Probe requests through Envoy → EPP are needed to trigger the flow control
+// admission layer that records the saturation metric.
+var _ = ginkgo.Describe("Saturation Metric Dispatch Gate E2E", ginkgo.Ordered, func() {
 	var ctx context.Context
+
+	ginkgo.BeforeAll(func() {
+		redeployEPPWithFlowControl()
+	})
 
 	ginkgo.BeforeEach(func() {
 		ctx = context.Background()
 		rdb.Del(ctx, saturationRequestQueue) //nolint:errcheck
 		rdb.Del(ctx, saturationResultQueue)  //nolint:errcheck
-		resetMock(adminURL)
-		resetPromMock(promMockURL)
-		// Set saturation to 1.0 (gate closed) so the processor starts
-		// in a closed state before each test.
-		setPromMockSaturation(promMockURL, "1.0")
+		setSimWaitingRequests(simAdminURL, 0)
 	})
 
 	ginkgo.It("processes a message when saturation is below threshold", func() {
-		setPromMockSaturation(promMockURL, "0.3")
+		setSimWaitingRequests(simAdminURL, 0)
+
+		// Wait for EPP to reflect low saturation in Prometheus.
+		waitForSaturation(promURL, envoyURL, func(v float64) bool { return v < 0.5 })
 
 		msg := makeRequestMessage("sat-below-threshold", 5*time.Minute)
 		enqueueMessage(ctx, rdb, saturationRequestQueue, msg)
@@ -44,21 +52,22 @@ var _ = ginkgo.Describe("Saturation Metric Dispatch Gate E2E", func() {
 	})
 
 	ginkgo.It("pauses processing when saturation is at or above threshold", func() {
-		// Set saturation above threshold (0.8)
-		setPromMockSaturation(promMockURL, "0.9")
+		// Drive waiting requests high → EPP saturation >> threshold (0.7) → gate closed.
+		setSimWaitingRequests(simAdminURL, 10)
+
+		// Wait for saturation to propagate through EPP → Prometheus.
+		waitForSaturation(promURL, envoyURL, func(v float64) bool { return v >= 0.7 })
 
 		msg := makeRequestMessage("sat-above-threshold", 5*time.Minute)
 		enqueueMessage(ctx, rdb, saturationRequestQueue, msg)
 
-		// Message should NOT be processed while saturated
 		gomega.Consistently(func() int64 {
 			return getResultCount(ctx, rdb, saturationResultQueue)
 		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
 
-		// Lower saturation below threshold
-		setPromMockSaturation(promMockURL, "0.2")
+		// Drop waiting requests → saturation falls → gate reopens → message processed.
+		setSimWaitingRequests(simAdminURL, 0)
 
-		// Message should now be processed
 		gomega.Eventually(func() int64 {
 			return getResultCount(ctx, rdb, saturationResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
@@ -69,24 +78,20 @@ var _ = ginkgo.Describe("Saturation Metric Dispatch Gate E2E", func() {
 	})
 
 	ginkgo.It("resumes processing when saturation drops below threshold", func() {
-		// Start saturated
-		setPromMockSaturation(promMockURL, "1.0")
+		setSimWaitingRequests(simAdminURL, 10)
+		waitForSaturation(promURL, envoyURL, func(v float64) bool { return v >= 0.7 })
 
-		// Enqueue multiple messages
 		for i := 1; i <= 3; i++ {
 			msg := makeRequestMessage(fmt.Sprintf("sat-resume-%d", i), 5*time.Minute)
 			enqueueMessage(ctx, rdb, saturationRequestQueue, msg)
 		}
 
-		// Nothing should be processed
 		gomega.Consistently(func() int64 {
 			return getResultCount(ctx, rdb, saturationResultQueue)
 		}, 5*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
 
-		// Drop saturation to allow processing
-		setPromMockSaturation(promMockURL, "0.1")
+		setSimWaitingRequests(simAdminURL, 0)
 
-		// All 3 messages should eventually be processed
 		gomega.Eventually(func() int64 {
 			return getResultCount(ctx, rdb, saturationResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 3))
