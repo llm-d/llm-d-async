@@ -18,6 +18,7 @@ var _ Producer = (*RedisSortedSetProducer)(nil)
 // and Redis list for results.
 type RedisSortedSetProducer struct {
 	client           *redis.Client
+	managedClient    bool
 	requestQueueName string
 	resultQueueName  string
 }
@@ -97,6 +98,7 @@ func NewRedisSortedSetProducer(config RedisSortedSetConfig, opts ...ProducerOpti
 			return nil, fmt.Errorf("failed to parse RedisURL: %w", err)
 		}
 		p.client = redis.NewClient(redisOpts)
+		p.managedClient = true
 	}
 
 	// Test connection
@@ -230,9 +232,13 @@ func (p *RedisSortedSetProducer) parseResult(data string) (*api.ResultMessage, e
 	return &result, nil
 }
 
-// Close closes the Redis connection.
+// Close closes the Redis connection if the client was created internally.
+// Externally injected clients (via WithRedisClient) are not closed.
 func (p *RedisSortedSetProducer) Close() error {
-	return p.client.Close()
+	if p.managedClient {
+		return p.client.Close()
+	}
+	return nil
 }
 
 // RequestQueueDepth returns the number of pending requests in the queue.
