@@ -67,6 +67,10 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 //     Both sources compute max_SYS = ready_pods × max_concurrency dynamically.
 //     Primary: D = 1 − (queue_size / max_SYS) via inference_extension_flow_control_queue_size.
 //     Secondary (fallback): D = 1 − (vllm_running / max_SYS).
+//     The primary source requires llm-d's flow control plugin to be enabled.
+//     The fallback filters vLLM metrics by inference_pool label, which vLLM does not
+//     emit natively — model server pods must carry this label and Prometheus must be
+//     configured with metric relabeling to propagate it (see docs/guides/e2e-deploy.md).
 //     Gate closes when D ≤ B (baseline); returns D − B when open, so callers compute
 //     N = max_SYS × (D − B). Params: pool (required),
 //     max_concurrency (default 100), baseline (default 0.05), fallback (default 0.0)

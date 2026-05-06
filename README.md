@@ -158,6 +158,9 @@ For more fine-grained control, configure gates per queue in your configuration f
   - `threshold` (optional): Saturation threshold (0.0-1.0). When saturation >= threshold, budget is 0.0. Default is `0.8`.
   - `fallback` (optional): Fallback saturation value (0.0-1.0) used when the metric source returns an error or empty data. Default is `0.0`.
 
+  **Metric prerequisites:** The primary metric source requires llm-d's flow control plugin to be
+  enabled: without it, the EPP flow control metrics will be missing and the gate will always use the fallback value.
+
 - `prometheus-budget`: Cascades two Prometheus metric sources to compute a dispatch budget D.
   Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically from the `inference_pool_ready_pods` metric.
   The primary source computes D from the EPP's flow control queue size: `D = 1 − (queue_size / max_SYS)`.
@@ -165,10 +168,21 @@ For more fine-grained control, configure gates per queue in your configuration f
   that estimates saturation from vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`.
   The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
   See [docs/dispatch-budget.md](docs/dispatch-budget.md) for the full derivation.
-  - `pool` (**required**): The inference pool name to filter metrics by.
+
+  - `pool` (**required**): The inference pool name to filter metrics by (must match the `inference_pool` pod label).
   - `max_concurrency` (optional): Per-endpoint request capacity (`MaxConcurrency` in the [inference scheduler's saturation detector](https://github.com/llm-d/llm-d-inference-scheduler/blob/main/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go)). Default is `100` (matching the inference scheduler default).
   - `baseline` (optional): Reserved baseline B. The gate closes when D ≤ B. Default is `0.05`.
   - `fallback` (optional): Fallback budget value (0.0-1.0) returned when all metric sources are unavailable. Default is `0.0` (fail closed).
+
+   **Metric prerequisites:** The primary metric source requires llm-d's flow control plugin to be
+   enabled; without it, the gate falls back to vLLM metrics. The fallback filters by `inference_pool` label, 
+   which vLLM does not emit natively: configure Prometheus relabeling to propagate it from model server pod labels
+  (the helm chart handles this)
+     ```yaml
+     relabelings:
+       - sourceLabels: [__meta_kubernetes_pod_label_inference_pool]
+         targetLabel: inference_pool
+     ```
 
 ## Request Messages and Consumption
 
