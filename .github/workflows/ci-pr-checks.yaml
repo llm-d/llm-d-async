@@ -94,6 +94,21 @@ jobs:
         if: steps.check-python.outputs.has_python == 'true'
         run: ruff format --check .
 
+  # Helm: lint chart
+  helm-lint:
+    runs-on: ubuntu-latest
+    needs: check-code-changes
+    if: needs.check-code-changes.outputs.has_code_changes == 'true'
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint Helm chart
+        run: helm lint charts/async-processor
+
   # Container: build (no push) to validate Dockerfile
   container-build:
     runs-on: ubuntu-latest

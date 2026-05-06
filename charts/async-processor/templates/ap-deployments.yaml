@@ -39,7 +39,7 @@ spec:
           - --redis.request-path-url
           - "{{ .Values.ap.redis.requestPathURL }}"
           {{- end }}
-          {{- else if .Values.gcpPubSub.enabled  }}
+          {{- else if .Values.ap.gcpPubSub.enabled }}
           - --message-queue-impl=gcp-pubsub
           - --pubsub.igw-base-url={{ .Values.ap.igwBaseURL }}
           - --pubsub.request-subscriber-id={{ .Values.ap.gcpPubSub.requestSubscriberId }}
