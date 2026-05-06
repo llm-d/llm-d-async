@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: guidellm-loadtest
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: guidellm
+          image: ghcr.io/vllm-project/guidellm:latest
+          env:
+            - name: USER
+              value: "guidellm"
+            - name: HF_HUB_CACHE
+              value: "/tmp/hf_cache"
+          command:
+            - guidellm
+            - benchmark
+            - run
+            - --target
+            - "http://llm-d-inference-gateway-istio.evacchi-dev-batch-processor.svc.cluster.local"
+            - --request-format
+            - text_completions
+            - --model
+            - "Qwen/Qwen3-0.6B"
+            - --profile
+            - constant
+            - --rate
+            - "50"
+            - --max-seconds
+            - "3600"
+            - --data
+            - "prompt_tokens=256,output_tokens=512"
+            - --output-dir
+            - /tmp
+            - --max-requests
+            - "100000"
+            - --processor
+            - "Qwen/Qwen3-0.6B"

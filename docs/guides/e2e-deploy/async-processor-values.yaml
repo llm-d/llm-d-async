@@ -1,0 +1,33 @@
+ap:
+  image:
+    repository: ghcr.io/llm-d-incubation/llm-d-async
+    tag: "4a1b0a4"
+  imagePullPolicy: Always
+  igwBaseURL: "http://llm-d-inference-gateway-istio.evacchi-dev-batch-processor.svc.cluster.local:80"
+  messageQueueImpl: "redis-sortedset"
+  concurrency: 4
+  prometheusURL: "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    enabled: true
+    url: "redis://redis-master.redis.svc.cluster.local:6379"
+    requestPathURL: "/v1/completions"
+    requestQueueName: "request-sortedset"
+    resultQueueName: "result-list"
+    pollIntervalMs: 1000
+    batchSize: 10
+    gateType: "prometheus-budget"
+    gateParams:
+      pool: "optimized-baseline"
+      max_concurrency: "100"
+      baseline: "0.05"
+  modelServerMonitor:
+    enabled: true
+    selector:
+      llm-d.ai/role: decode
+    port: modelserver
+    path: /metrics
+    interval: 15s
