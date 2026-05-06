@@ -4,6 +4,9 @@ ap:
     repository: ghcr.io/llm-d/async-processor
     tag: 0.6.0
   imagePullPolicy: Always
+  concurrency: 8
+  prometheusURL: ""
+  prometheusCacheTTL: ""
   metrics:
     enabled: true
     port: 9090
@@ -22,10 +25,28 @@ ap:
     keyKey: ""
   redis:
     enabled: false
-    # Secret containing the Redis URL (e.g. redis://user:pass@host:port/db or rediss://... for TLS)
+    # Option 1: provide the URL directly — chart creates the Secret automatically.
+    # url: "redis://redis-master.redis.svc.cluster.local:6379"
+    # Option 2: reference a pre-existing Secret (used when url is not set).
     secretName: "redis-creds"
     secretKey: "url"
     requestPathURL: "/v1/completions"
     # For redis-sortedset
     requestQueueName: "request-sortedset"
     resultQueueName: "result-list"
+    pollIntervalMs: 1000
+    batchSize: 10
+    gateType: ""
+    gateParams: {}
+  # PodMonitor for model server metrics relabeling.
+  # Creates a PodMonitor that scrapes vLLM metrics and relabels
+  # the inference_pool pod label into scraped metrics.
+  # Required when using prometheus-budget or prometheus-saturation gates
+  # without llm-d's flow control plugin enabled.
+  modelServerMonitor:
+    enabled: false
+    selector:
+      llm-d.ai/role: decode
+    port: modelserver
+    path: /metrics
+    interval: 15s

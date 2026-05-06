@@ -1,0 +1,22 @@
+{{- if .Values.ap.modelServerMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "async-processor.fullname" . }}-modelserver
+  labels:
+    {{- include "async-processor.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml .Values.ap.modelServerMonitor.selector | nindent 6 }}
+  podMetricsEndpoints:
+    - port: {{ .Values.ap.modelServerMonitor.port }}
+      path: {{ .Values.ap.modelServerMonitor.path }}
+      interval: {{ .Values.ap.modelServerMonitor.interval }}
+      relabelings:
+        # vLLM does not natively emit the inference_pool label that
+        # prometheus-budget/prometheus-saturation gates filter on.
+        # This relabeling carries it from the pod label into scraped metrics.
+        - sourceLabels: [__meta_kubernetes_pod_label_inference_pool]
+          targetLabel: inference_pool
+{{- end }}

@@ -33,6 +33,14 @@ spec:
           - "{{ .Values.ap.redis.requestQueueName | default "request-sortedset" }}"
           - --redis.ss.result-queue-name
           - "{{ .Values.ap.redis.resultQueueName | default "result-list" }}"
+          - --redis.ss.poll-interval-ms
+          - "{{ .Values.ap.redis.pollIntervalMs | default 1000 }}"
+          - --redis.ss.batch-size
+          - "{{ .Values.ap.redis.batchSize | default 10 }}"
+          {{- if .Values.ap.redis.gateType }}
+          - --redis.ss.gate-type={{ .Values.ap.redis.gateType }}
+          - --redis.ss.gate-params={{ include "async-processor.gateParamsJson" . }}
+          {{- end }}
           {{- else }}
           - --message-queue-impl=redis-pubsub
           - --redis.igw-base-url={{ .Values.ap.igwBaseURL }}
@@ -47,6 +55,13 @@ spec:
           - --pubsub.request-path-url
           - "{{ .Values.ap.gcpPubSub.requestPathURL }}"
           {{- end }}
+          {{- if .Values.ap.prometheusURL }}
+          - --prometheus-url={{ .Values.ap.prometheusURL }}
+          {{- end }}
+          {{- if .Values.ap.prometheusCacheTTL }}
+          - --prometheus-cache-ttl={{ .Values.ap.prometheusCacheTTL }}
+          {{- end }}
+          - --concurrency={{ .Values.ap.concurrency | default 8 }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}
           {{- if .Values.ap.tls.insecureSkipVerify }}
           - --tls-insecure-skip-verify=true
@@ -67,8 +82,8 @@ spec:
           - name: REDIS_URL
             valueFrom:
               secretKeyRef:
-                name: {{ .Values.ap.redis.secretName }}
-                key: {{ .Values.ap.redis.secretKey }}
+                name: {{ include "async-processor.redisSecretName" . }}
+                key: {{ include "async-processor.redisSecretKey" . }}
           {{- end }}
         name: async-processor
         {{- with .Values.ap.tls.secretName }}
