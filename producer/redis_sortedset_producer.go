@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
@@ -53,6 +54,10 @@ func NewRedisSortedSetProducer(config RedisSortedSetConfig) (*RedisSortedSetProd
 
 	if config.TenantID == "" {
 		return nil, errors.New("TenantID is required for multi-tenant isolation")
+	}
+
+	if strings.Contains(config.TenantID, ":") {
+		return nil, errors.New("TenantID must not contain ':' ")
 	}
 
 	if config.RequestQueueName == "" {
@@ -143,6 +148,10 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 		return errors.New("deadline is required and must be a positive Unix timestamp")
 	}
 
+	if deadline <= time.Now().Unix() {
+		return errors.New("deadline has already expired")
+	}
+
 	// Apply producer-level defaults for queue routing if not set by caller
 	if ir.ResultQueueName == "" {
 		ir.ResultQueueName = p.resultQueueName
@@ -175,29 +184,6 @@ func (p *RedisSortedSetProducer) GetResult(ctx context.Context) (*api.ResultMess
 	// Use BRPOP (blocking right pop) to wait for a result
 	result, err := p.client.BRPop(ctx, 0, p.resultQueueName).Result()
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("failed to get result: %w", err)
-	}
-
-	// BRPOP returns [queueName, value]
-	if len(result) != 2 {
-		return nil, errors.New("unexpected BRPOP result format")
-	}
-
-	return p.parseResult(result[1])
-}
-
-// GetResultWithTimeout retrieves a result with a timeout.
-func (p *RedisSortedSetProducer) GetResultWithTimeout(ctx context.Context, timeout time.Duration) (*api.ResultMessage, error) {
-	// Use BRPOP with timeout
-	result, err := p.client.BRPop(ctx, timeout, p.resultQueueName).Result()
-	if err != nil {
-		if err == redis.Nil {
-			// Timeout occurred
-			return nil, nil
-		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}

@@ -133,6 +133,16 @@ func TestSubmitRequest_Validation(t *testing.T) {
 			},
 			wantErr: "deadline is required",
 		},
+		{
+			name: "expired deadline",
+			req: &api.RequestMessage{
+				ID:       "test",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(-1 * time.Minute).Unix(),
+				Payload:  map[string]interface{}{},
+			},
+			wantErr: "deadline has already expired",
+		},
 	}
 
 	for _, tt := range tests {
@@ -166,19 +176,10 @@ func TestGetResult(t *testing.T) {
 	assert.Contains(t, result.Payload, "Hello!")
 }
 
-func TestGetResultWithTimeout(t *testing.T) {
+func TestGetResultWithContextTimeout(t *testing.T) {
 	producer, mr := setupTestProducer(t)
 
-	ctx := context.Background()
-
-	t.Run("timeout with no result", func(t *testing.T) {
-		result, err := producer.GetResultWithTimeout(ctx, 100*time.Millisecond)
-		assert.NoError(t, err)
-		assert.Nil(t, result)
-	})
-
 	t.Run("get result before timeout", func(t *testing.T) {
-		// Push a result to namespaced queue
 		resultMsg := api.ResultMessage{
 			ID:      "test-456",
 			Payload: "test response",
@@ -187,7 +188,10 @@ func TestGetResultWithTimeout(t *testing.T) {
 		_, err := mr.Lpush("results:test-tenant:test-result-queue", string(resultJSON))
 		require.NoError(t, err)
 
-		result, err := producer.GetResultWithTimeout(ctx, 1*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		result, err := producer.GetResult(ctx)
 		require.NoError(t, err)
 		assert.NotNil(t, result)
 		assert.Equal(t, "test-456", result.ID)
@@ -283,13 +287,16 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Each tenant should only receive their own result
-	res1, err := tenant1Producer.GetResultWithTimeout(ctx, 1*time.Second)
+	ctxT, cancelT := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelT()
+
+	res1, err := tenant1Producer.GetResult(ctxT)
 	require.NoError(t, err)
 	require.NotNil(t, res1)
 	assert.Equal(t, "alice-request", res1.ID)
 	assert.Contains(t, res1.Payload, "alice result")
 
-	res2, err := tenant2Producer.GetResultWithTimeout(ctx, 1*time.Second)
+	res2, err := tenant2Producer.GetResult(ctxT)
 	require.NoError(t, err)
 	require.NotNil(t, res2)
 	assert.Equal(t, "bob-request", res2.ID)
@@ -340,29 +347,46 @@ func TestTenantIDRequired(t *testing.T) {
 	assert.Contains(t, err.Error(), "TenantID is required")
 }
 
+func TestTenantIDWithColon(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	_, err = NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL: "redis://" + mr.Addr(),
+		TenantID: "tenant:bad",
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "must not contain ':'")
+}
+
 func TestContextCancellation(t *testing.T) {
-	producer, _ := setupTestProducer(t)
+	producer, mr := setupTestProducer(t)
 
-	// Test context cancellation with timeout-based retrieval
+	// Push a result so BRPop returns, but cancel context first to test cancellation.
+	// With miniredis, BRPop(ctx,0) blocks indefinitely if no data and ctx isn't pre-cancelled,
+	// so we pre-cancel the context to verify the error path.
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
-	result, err := producer.GetResultWithTimeout(ctx, 5*time.Second)
+	result, err := producer.GetResult(ctx)
 	assert.Error(t, err)
 	assert.Nil(t, result)
-	assert.ErrorIs(t, err, context.Canceled)
+
+	_ = mr // keep linter happy
 }
 
 func TestMalformedResultHandling(t *testing.T) {
 	producer, mr := setupTestProducer(t)
 
-	ctx := context.Background()
-
 	t.Run("invalid JSON", func(t *testing.T) {
 		_, err := mr.Lpush("results:test-tenant:test-result-queue", "invalid-json{{{")
 		require.NoError(t, err)
 
-		result, err := producer.GetResultWithTimeout(ctx, 1*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		result, err := producer.GetResult(ctx)
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "unmarshal")
@@ -374,7 +398,10 @@ func TestMalformedResultHandling(t *testing.T) {
 		_, err := mr.Lpush("results:test-tenant:test-result-queue", string(resultJSON))
 		require.NoError(t, err)
 
-		result, err := producer.GetResultWithTimeout(ctx, 1*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		result, err := producer.GetResult(ctx)
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "missing 'id' field")

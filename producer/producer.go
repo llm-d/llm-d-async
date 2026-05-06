@@ -2,7 +2,6 @@ package producer
 
 import (
 	"context"
-	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
 )
@@ -16,12 +15,8 @@ type Producer interface {
 
 	// GetResult retrieves a result from the result queue.
 	// Blocks until a result is available or context is cancelled.
-	// Returns error if retrieval fails or context is cancelled.
+	// Use context.WithTimeout for timeout-based retrieval.
 	GetResult(ctx context.Context) (*api.ResultMessage, error)
-
-	// GetResultWithTimeout retrieves a result with a timeout.
-	// Returns nil result if timeout expires without a result.
-	GetResultWithTimeout(ctx context.Context, timeout time.Duration) (*api.ResultMessage, error)
 
 	// Close releases any resources held by the producer.
 	Close() error
