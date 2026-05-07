@@ -6,10 +6,52 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        args: [--unsafe]  # allows custom YAML tags used in k8s
+        args: [--unsafe]
+        exclude: 'charts/.*/templates/.*\.yaml$'
       - id: check-json
       - id: check-added-large-files
         args: [--maxkb=1000]
       - id: check-merge-conflict
       - id: mixed-line-ending
       - id: check-case-conflict
+
+  # Go pre-commit hooks
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+      - id: go-mod-tidy
+
+  # Local Go hooks
+  - repo: local
+    hooks:
+      - id: go-build
+        name: go build
+        entry: bash -c 'go build $(go list ./... | grep -v /test/)'
+        language: system
+        pass_filenames: false
+        files: \.go$
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        pass_filenames: false
+        files: \.go$
+      - id: go-imports
+        name: goimports (optional)
+        entry: bash -c 'if command -v goimports >/dev/null 2>&1; then goimports -w .; else echo "goimports not installed, skipping"; fi'
+        language: system
+        pass_filenames: false
+        files: \.go$
+      - id: golangci-lint
+        name: golangci-lint (optional)
+        entry: bash -c 'if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run --timeout=5m ./...; else echo "golangci-lint not installed, skipping"; fi'
+        language: system
+        pass_filenames: false
+        files: \.go$
+      - id: gosec
+        name: gosec (optional)
+        entry: bash -c 'if command -v gosec >/dev/null 2>&1; then gosec ./...; else echo "gosec not installed, skipping"; fi'
+        language: system
+        pass_filenames: false
+        files: \.go$

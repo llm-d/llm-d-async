@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+  settings:
+    depguard:
+      rules:
+        no-stdlib-log:
+          files:
+            - "!$test"
+          deny:
+            - pkg: "log$"
+              desc: "Use logr (github.com/go-logr/logr) instead of stdlib log"
+    errcheck:
+      exclude-functions:
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*net.TCPListener).Close
+        - (net.Conn).Close
