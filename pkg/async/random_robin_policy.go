@@ -55,13 +55,17 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChan
 					requestPath = ep
 				}
 				requestURL, _ := url.JoinPath(meta[i1].IGWBaseURL, requestPath)
+				headers := map[string]string{
+					"Content-Type":                  "application/json",
+					"x-gateway-inference-objective": meta[i1].InferenceObjective,
+				}
+				for k, v := range ir.PublicRequest.ReqHeaders() {
+					headers[k] = v
+				}
 				erm := pipeline.EmbelishedRequestMessage{
 					InternalRequest: ir,
-					HttpHeaders: map[string]string{
-						"Content-Type":                  "application/json",
-						"x-gateway-inference-objective": meta[i1].InferenceObjective,
-					},
-					RequestURL: requestURL,
+					HttpHeaders:     headers,
+					RequestURL:      requestURL,
 				}
 				mergedChannel <- erm
 			}
