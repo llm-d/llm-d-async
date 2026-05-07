@@ -56,10 +56,8 @@ GOBIN := $(shell go env GOBIN)
 endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
-# Be aware that the target commands are only tested with Docker which is
-# scaffolded by default. However, you might want to replace it to use other
-# tools. (i.e. podman)
-CONTAINER_TOOL ?= docker
+# Auto-detects docker (if daemon running) or podman; override with CONTAINER_TOOL=podman.
+CONTAINER_TOOL ?= $(shell (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && echo docker) || (command -v podman >/dev/null 2>&1 && echo podman) || echo docker)
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -151,7 +149,7 @@ IGW_MOCK_IMG ?= e2e-igw-mock:latest
 .PHONY: test-e2e
 test-e2e: ## Run e2e tests against a Kind cluster
 	@command -v kind >/dev/null 2>&1 || { echo "kind is not installed"; exit 1; }
-	AP_IMAGE=$(E2E_IMG) go test ./test/e2e/ -timeout 30m -v -ginkgo.v \
+	CONTAINER_TOOL=$(CONTAINER_TOOL) AP_IMAGE=$(E2E_IMG) go test ./test/e2e/ -timeout 30m -v -ginkgo.v \
 		$(if $(FOCUS),-ginkgo.focus="$(FOCUS)",) \
 		$(if $(SKIP),-ginkgo.skip="$(SKIP)",)
 

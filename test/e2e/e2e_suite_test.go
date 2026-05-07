@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -56,7 +57,7 @@ var (
 
 	testConfig *testutils.TestConfig
 
-	containerRuntime = env.GetEnvString("CONTAINER_TOOL", env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr), ginkgo.GinkgoLogr)
+	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d-incubation/async-processor:e2e-test", ginkgo.GinkgoLogr)
 	igwMockImage     = "e2e-igw-mock:latest"
 	promMockImage    = "e2e-prom-mock:latest"
@@ -116,8 +117,33 @@ var _ = ginkgo.AfterSuite(func() {
 	}
 })
 
+// detectContainerRuntime returns the container runtime to use.
+// Priority: CONTAINER_TOOL env > CONTAINER_RUNTIME env > docker (if daemon running) > podman.
+func detectContainerRuntime() string {
+	if tool := os.Getenv("CONTAINER_TOOL"); tool != "" {
+		return tool
+	}
+	if tool := os.Getenv("CONTAINER_RUNTIME"); tool != "" {
+		return tool
+	}
+	if _, err := exec.LookPath("docker"); err == nil {
+		if exec.Command("docker", "info").Run() == nil {
+			return "docker"
+		}
+	}
+	if _, err := exec.LookPath("podman"); err == nil {
+		return "podman"
+	}
+	return "docker"
+}
+
 // setupK8sCluster creates the Kind cluster, builds images, and loads them.
 func setupK8sCluster() {
+	if containerRuntime == "podman" {
+		ginkgo.By("Setting KIND_EXPERIMENTAL_PROVIDER=podman")
+		os.Setenv("KIND_EXPERIMENTAL_PROVIDER", "podman") //nolint:errcheck
+	}
+
 	ginkgo.By("Creating Kind cluster " + kindClusterName)
 	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName, "--wait", "120s", "--config", "-")
 	stdin, err := command.StdinPipe()
@@ -171,12 +197,32 @@ func setupK8sCluster() {
 }
 
 func kindLoadImage(image string) {
-	ginkgo.By(fmt.Sprintf("Loading %s into the cluster %s", image, kindClusterName))
+	ginkgo.By(fmt.Sprintf("Loading %s into the cluster %s (runtime=%s)", image, kindClusterName, containerRuntime))
 
-	command := exec.Command("kind", "load", "docker-image", image, "--name", kindClusterName)
-	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	if containerRuntime == "podman" {
+		// Podman: tag unqualified images so kind can find them, then pipe via
+		// podman save | kind load image-archive.
+		qualifiedImage := image
+		if !strings.Contains(image, "/") {
+			qualifiedImage = "docker.io/library/" + image
+			cmd := exec.Command("podman", "tag", image, qualifiedImage)
+			session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+		}
+
+		shell := fmt.Sprintf("podman save --format docker-archive %s | kind load image-archive /dev/stdin --name %s",
+			qualifiedImage, kindClusterName)
+		command := exec.Command("bash", "-c", shell)
+		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	} else {
+		command := exec.Command("kind", "load", "docker-image", image, "--name", kindClusterName)
+		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	}
 }
 
 func setupK8sClient() {
