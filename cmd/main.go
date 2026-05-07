@@ -186,7 +186,7 @@ func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify boo
 	}
 
 	if caCertPath != "" {
-		caCert, err := os.ReadFile(caCertPath)
+		caCert, err := os.ReadFile(caCertPath) // #nosec G304 -- path from trusted CLI flag
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA certificate file %s: %w", caCertPath, err)
 		}

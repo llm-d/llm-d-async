@@ -301,7 +301,7 @@ mv $(1) $(1)-$(3) ;\
 ln -sf $(1)-$(3) $(1)
 endef
 
-## Copied from https://github.com/llm-d-incubation/batch-gateway 
+## Copied from https://github.com/llm-d-incubation/batch-gateway
 ## publish-helm-chart: Patch chart for VERSION, package, append chart to SHA256SUMS, push to oci://ghcr.io/llm-d-incubation/charts (requires VERSION, yq, helm; GITHUB_TOKEN, GITHUB_ACTOR for push).
 .PHONY: publish-helm-chart
 publish-helm-chart:

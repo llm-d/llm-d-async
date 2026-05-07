@@ -18,7 +18,7 @@ By utilizing an asynchronous, queue-based approach, users can perform tasks such
 
 The architecture adheres to the following core principles:
 
-1. **Bring Your Own Queue (BYOQ):** All aspects of prioritization, routing, retries, and scaling are decoupled from the message queue implementation. 
+1. **Bring Your Own Queue (BYOQ):** All aspects of prioritization, routing, retries, and scaling are decoupled from the message queue implementation.
 
 2. **Composability:** The end-user does not interact directly with the processor via an API. Instead, the processor interacts solely with the message queues, making it highly composable with offline batch processing and asynchronous workflows.
 
@@ -62,8 +62,8 @@ DEPLOY_REDIS=false
 DEPLOY_PROMETHEUS=false
 AP_IMAGE_PULL_POLICY=Always
 ```
-- Run: 
-```bash 
+- Run:
+```bash
 make deploy-ap-on-k8s
 ```
 - To test a request (only for the Redis implementation):
@@ -83,7 +83,7 @@ make deploy-ap-on-k8s
 - `request-merge-policy`: Currently only supporting <u>random-robin</u> policy.
 - `message-queue-impl`: Implementation of the queueing system. Options are <u>gcp-pubsub</u> for GCP PubSub, <u>gcp-pubsub-gated</u> for GCP PubSub with per-topic gating, <u>redis-sortedset</u> for Redis Sorted Set (persisted and sorted), and <u>redis-pubsub</u> for ephemeral Redis-based implementation.
 
- - `prometheus-url`: Prometheus server URL for metric-based gates (e.g., http://localhost:9090). For Google Managed Prometheus (GMP), point this to a local proxy or GMP frontend that handles authentication — direct GMP URLs are not supported as the Async Processor does not perform GMP authentication.  
+ - `prometheus-url`: Prometheus server URL for metric-based gates (e.g., http://localhost:9090). For Google Managed Prometheus (GMP), point this to a local proxy or GMP frontend that handles authentication — direct GMP URLs are not supported as the Async Processor does not perform GMP authentication.
    This flag is required when using metric-based per-queue gates (e.g., `prometheus-saturation`, `prometheus-budget`).
 
 <i>additional parameters may be specified for concrete message queue implementations</i>
@@ -337,7 +337,7 @@ The GCP PubSub implementation requires the user to configure the following:
 
 <u>Note:</u> If DLQ is NOT configured for the request topic. Retried messages will be counted multiple times in the #_of_requests metric.
 
-![Async Processor - GCP PubSub Architecture](/docs/images/gcp_pubsub_architecture.png "AP - GCP PubSub") 
+![Async Processor - GCP PubSub Architecture](/docs/images/gcp_pubsub_architecture.png "AP - GCP PubSub")
 
 #### GCP PubSub Command line parameters
 

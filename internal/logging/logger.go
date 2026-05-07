@@ -29,7 +29,10 @@ func InitLogging(opts *zap.Options, logVerbosity int) {
 	if useV {
 		// See https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/log/zap#Options.Level
 		lvl := -1 * (logVerbosity)
-		opts.Level = uberzap.NewAtomicLevelAt(zapcore.Level(int8(lvl)))
+		if lvl < -128 {
+			lvl = -128
+		}
+		opts.Level = uberzap.NewAtomicLevelAt(zapcore.Level(int8(lvl))) // #nosec G115 -- clamped above
 	}
 
 	logger := zap.New(zap.UseFlagOptions(opts), zap.RawZapOpts(uberzap.AddCaller()))

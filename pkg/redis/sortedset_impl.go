@@ -166,8 +166,8 @@ func (r *RedisSortedSetFlow) Start(ctx context.Context) {
 	for _, ch := range r.requestChannels {
 		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName)
 	}
-	go r.retryWorker(ctx)
-	go r.resultWorker(ctx)
+	go r.retryWorker(ctx)  // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+	go r.resultWorker(ctx) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
 }
 
 func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {

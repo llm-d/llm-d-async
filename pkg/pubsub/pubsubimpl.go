@@ -230,13 +230,13 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 			if msg.InternalRequest == nil {
 				continue
 			}
-			value, ok := resultChannels.Load(msg.InternalRouting.TransportCorrelationID)
+			value, ok := resultChannels.Load(msg.TransportCorrelationID)
 			if !ok {
-				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", msg.InternalRouting.TransportCorrelationID)
+				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", msg.TransportCorrelationID)
 				continue
 			}
 			resultChannel := value.(chan bool)
-			logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", msg.InternalRouting.TransportCorrelationID)
+			logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", msg.TransportCorrelationID)
 			resultChannel <- false
 
 		}

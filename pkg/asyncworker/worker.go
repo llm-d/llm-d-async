@@ -221,5 +221,5 @@ func expBackoffDuration(retryCount int, secondsToDeadline int) float64 {
 
 	// equal jitter: [temp/2, temp)
 	half := temp / 2
-	return half + rand.Float64()*half
+	return half + rand.Float64()*half // #nosec G404 -- non-security jitter, crypto/rand unnecessary
 }

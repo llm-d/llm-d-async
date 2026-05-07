@@ -175,7 +175,7 @@ parse_args() {
       log_warning "IMG has wrong format, using default image"
     fi
   fi
-  
+
   # Parse command-line arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -206,16 +206,16 @@ parse_args() {
 
 check_prerequisites() {
     log_info "Checking prerequisites..."
-    
+
     local missing_tools=()
-    
+
     # Check for required tools
     for tool in "${REQUIRED_TOOLS[@]}"; do
         if ! command -v $tool &> /dev/null; then
             missing_tools+=($tool)
         fi
     done
-    
+
     if [ ${#missing_tools[@]} -ne 0 ]; then
         log_warning "Missing required tools: ${missing_tools[*]}"
         if [ "$E2E_TESTS_ENABLED" == "false" ]; then
@@ -235,7 +235,7 @@ prompt_install_missing_tools() {
     echo "      1. Install them manually."
         echo "      2. Let the script attempt to install them for you."
         echo "The environment is currently set to: ${ENVIRONMENT}"
-    
+
         while true; do
         read -p "Do you want to install the required client tools? (y/n): " -r answer
         case $answer in
@@ -258,14 +258,14 @@ prompt_install_missing_tools() {
 
 detect_gpu_type() {
     log_info "Detecting GPU type in cluster..."
-    
+
     # Check if GPUs are visible
     local gpu_count=$(kubectl get nodes -o json | jq -r '.items[].status.allocatable["nvidia.com/gpu"]' | grep -v null | head -1)
-    
+
     if [ -z "$gpu_count" ] || [ "$gpu_count" == "null" ]; then
         log_warning "No GPUs visible"
         log_warning "GPUs may exist on host but need NVIDIA Device Plugin or GPU Operator"
-        
+
         # Check if GPUs exist on host
         if nvidia-smi &> /dev/null; then
             log_info "nvidia-smi detected GPUs on host:"
@@ -278,13 +278,13 @@ detect_gpu_type() {
         fi
     else
         log_success "GPUs visible: $gpu_count GPU(s) per node"
-        
+
         # Detect GPU type from labels
         local gpu_product=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.allocatable["nvidia.com/gpu"] != null) | .metadata.labels["nvidia.com/gpu.product"]' | head -1)
-        
+
         if [ -n "$gpu_product" ]; then
             log_success "Detected GPU: $gpu_product"
-            
+
             # Map GPU product to accelerator type
             case "$gpu_product" in
                 *H100*)
@@ -302,7 +302,7 @@ detect_gpu_type() {
             esac
         fi
     fi
-    
+
     export ACCELERATOR_TYPE
     export DEPLOY_LLM_D_INFERENCE_SIM
     log_info "Using detected accelerator type: $ACCELERATOR_TYPE"
@@ -318,7 +318,7 @@ prompt_gateway_installation() {
     echo "  1. Install the Gateway control plane (recommended for new clusters or emulated clusters)"
     echo "  2. Use an existing Gateway control plane in your cluster (recommended for production clusters)"
     echo "The environment is currently set to: ${ENVIRONMENT}"
-    
+
     while true; do
         read -p "Do you want to install the Gateway control plane? (y/n): " -r answer
         case $answer in
@@ -337,14 +337,14 @@ prompt_gateway_installation() {
                 ;;
         esac
     done
-    
+
     export INSTALL_GATEWAY_CTRLPLANE
     echo ""
 }
 
 set_tls_verification() {
     log_info "Setting TLS verification..."
-    
+
     # Auto-detect TLS verification setting if not specified
     if ! containsElement "$ENVIRONMENT" "${NON_EMULATED_ENV_LIST[@]}"; then
             SKIP_TLS_VERIFY="true"
@@ -371,13 +371,13 @@ set_tls_verification() {
     fi
 
     export SKIP_TLS_VERIFY
-    
+
     log_success "Successfully set TLS verification to: $SKIP_TLS_VERIFY"
 }
 
 set_ap_logging_level() {
     log_info "Setting AP logging level..."
-    
+
     # Set logging level based on environment
     if ! containsElement "$ENVIRONMENT" "${NON_EMULATED_ENV_LIST[@]}"; then
         AP_LOG_LEVEL="debug"
@@ -386,7 +386,7 @@ set_ap_logging_level() {
         AP_LOG_LEVEL="info"
         log_info "Production environment - using info logging"
     fi
-    
+
     export AP_LOG_LEVEL
     log_success "AP logging level set to: $AP_LOG_LEVEL"
     echo ""
@@ -411,13 +411,13 @@ deploy_ap_controller() {
         --set ap.redis.enabled=true \
         --set ap.redis.secretName=redis-creds \
         --set ap.redis.secretKey=url
-        
-    
+
+
     # Wait for AP to be ready
     log_info "Waiting for AP to be ready..."
     kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=async-processor -n $AP_NS --timeout=30s || \
         log_warning "AP is not ready yet - check 'kubectl get pods -n $AP_NS'"
-    
+
     log_success "AP deployment complete"
 }
 
@@ -446,7 +446,7 @@ deploy_llm_d_infrastructure() {
     else
         log_warning "$LLM_D_PROJECT directory already exists, skipping clone"
     fi
-    
+
     # Install dependencies
     log_info "Installing llm-d dependencies"
     bash $CLIENT_PREREQ_DIR/install-deps.sh
@@ -471,7 +471,7 @@ deploy_llm_d_infrastructure() {
       log_info "Benchmark mode enabled - using benchmark configuration for Istio"
       GATEWAY_PROVIDER="istioBench"
     fi
-    
+
     # Configuring llm-d before installation
     cd $EXAMPLE_DIR
     log_info "Configuring llm-d infrastructure"
@@ -517,20 +517,20 @@ deploy_llm_d_infrastructure() {
         --type='merge' \
         -p '{"spec":{"kube":{"service":{"type":"NodePort"}}}}'
     fi
-    
+
     log_info "Waiting for llm-d components to initialize..."
     kubectl wait --for=condition=Available deployment --all -n $LLMD_NS --timeout=30s || \
         log_warning "llm-d components are not ready yet - check 'kubectl get pods -n $LLMD_NS'"
-    
+
     cd "$AP_PROJECT"
     log_success "llm-d infrastructure deployment complete"
 }
 
 verify_deployment() {
     log_info "Verifying deployment..."
-    
+
     local all_good=true
-    
+
     # Check AP pods
     log_info "Checking AP pods..."
     sleep 10
@@ -540,7 +540,7 @@ verify_deployment() {
         log_warning "AP may still be starting"
         all_good=false
     fi
-    
+
     # Check Prometheus
     if [ "$DEPLOY_PROMETHEUS" = "true" ]; then
         log_info "Checking Prometheus..."
@@ -550,7 +550,7 @@ verify_deployment() {
             log_warning "Prometheus may still be starting"
         fi
     fi
-    
+
     # Check llm-d infrastructure
     if [ "$DEPLOY_LLM_D" = "true" ]; then
         log_info "Checking llm-d infrastructure..."
@@ -560,7 +560,7 @@ verify_deployment() {
             log_warning "llm-d infrastructure may still be deploying"
         fi
     fi
-    
+
     # Check Prometheus Adapter
     if [ "$DEPLOY_PROMETHEUS_ADAPTER" = "true" ]; then
         log_info "Checking Prometheus Adapter..."
@@ -570,7 +570,7 @@ verify_deployment() {
             log_warning "Prometheus Adapter may still be starting"
         fi
     fi
-    
+
     if [ "$all_good" = true ]; then
         log_success "All components verified successfully!"
     else
@@ -673,15 +673,15 @@ undeploy_llm_d_infrastructure() {
     local RELEASE=""
     if ! containsElement "$ENVIRONMENT" "${NON_EMULATED_ENV_LIST[@]}" ; then
         RELEASE="$NAMESPACE_SUFFIX"
-    else 
+    else
         RELEASE="$WELL_LIT_PATH_NAME"
     fi
-    
+
     if [ ! -d "$EXAMPLE_DIR" ]; then
         log_warning "llm-d example directory not found, skipping cleanup"
     else
         cd "$EXAMPLE_DIR"
-        
+
         log_info "Removing llm-d core components..."
 
         helm uninstall infra-$RELEASE -n ${LLMD_NS} 2>/dev/null || \
@@ -692,10 +692,10 @@ undeploy_llm_d_infrastructure() {
             log_warning "llm-d ModelService components not found or already uninstalled"
 
     fi
-    
+
     # Remove HF token secret
     kubectl delete secret llm-d-hf-token -n "${LLMD_NS}" --ignore-not-found
-    
+
     # Remove Gateway provider if installed by the script
     if [[ "$INSTALL_GATEWAY_CTRLPLANE" == true ]]; then
         log_info "Removing Gateway provider..."
@@ -745,13 +745,13 @@ cleanup() {
     if [ "$DEPLOY_PROMETHEUS" = "true" ]; then
         undeploy_prometheus_stack
     fi
-    
+
     # Undeploy in reverse order
-    
+
     if [ "$DEPLOY_LLM_D" = "true" ]; then
         undeploy_llm_d_infrastructure
     fi
-    
+
     if [ "$DEPLOY_AP" = "true" ]; then
         undeploy_ap_controller
     fi
@@ -759,19 +759,19 @@ cleanup() {
     if [ "$DEPLOY_REDIS" = "true"]; then
         undeploy_redis
     fi
-    
+
     # Delete namespaces if requested
     if [ "$DELETE_NAMESPACES" = "true" ] || [ "$DELETE_CLUSTER" = "true" ]; then
         delete_namespaces
     else
         log_info "Keeping namespaces (use --delete-namespaces or set DELETE_NAMESPACES=true to remove)"
     fi
-    
+
     # Remove llm-d repository
     if [ -d "$(dirname $AP_PROJECT)/$LLM_D_PROJECT" ]; then
         log_info "llm-d repository at $(dirname $AP_PROJECT)/$LLM_D_PROJECT preserved (manual cleanup if needed)"
     fi
-    
+
     echo ""
     log_success "Undeployment complete!"
     echo ""
@@ -783,7 +783,7 @@ cleanup() {
     [ "$DEPLOY_LLM_D" = "true" ] && echo "✓ llm-d Infrastructure"
     [ "$DEPLOY_AP" = "true" ] && echo "✓ AP Controller"
     [ "$DEPLOY_PROMETHEUS" = "true" ] && echo "✓ Prometheus Stack"
-    
+
     if [ "$DELETE_NAMESPACES" = "true" ]; then
         echo "✓ Namespaces"
     else
@@ -807,14 +807,14 @@ main() {
         log_info "Starting Async-Processor Undeployment on $ENVIRONMENT"
         log_info "============================================================="
         echo ""
-        
+
         # Source environment-specific script to make functions available
         if [ -f "$SCRIPT_DIR/$ENVIRONMENT/install.sh" ]; then
             source "$SCRIPT_DIR/$ENVIRONMENT/install.sh"
         else
             log_error "Environment-specific script not found: $SCRIPT_DIR/$ENVIRONMENT/install.sh"
         fi
-        
+
         cleanup
         exit 0
     fi
@@ -823,7 +823,7 @@ main() {
     log_info "Starting Async-Processor Deployment on $ENVIRONMENT"
     log_info "==========================================================="
     echo ""
-    
+
     # Check prerequisites
     if [ "$SKIP_CHECKS" != "true" ]; then
         check_prerequisites
@@ -884,7 +884,7 @@ main() {
 
     # Create namespaces
     create_namespaces
-    
+
     # Deploy Redis
     if [ "$DEPLOY_REDIS" = "true" ]; then
         deploy_redis
@@ -899,26 +899,26 @@ main() {
     else
         log_info "Skipping Prometheus deployment (DEPLOY_PROMETHEUS=false)"
     fi
-     
-    
-    
+
+
+
     # Deploy llm-d
     if [ "$DEPLOY_LLM_D" = "true" ]; then
         deploy_llm_d_infrastructure
     else
         log_info "Skipping llm-d deployment (DEPLOY_LLM_D=false)"
     fi
-    
+
     # Deploy AP
     if [ "$DEPLOY_AP" = "true" ]; then
         deploy_ap_controller
     else
         log_info "Skipping AP deployment (DEPLOY_AP=false)"
     fi
-    
+
     # Verify deployment
     verify_deployment
-    
+
     # Print summary
     print_summary
 

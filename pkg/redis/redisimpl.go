@@ -175,7 +175,7 @@ func (r *RedisMQFlow) Start(ctx context.Context) {
 
 	go r.retryWorker(ctx, r.rdb)
 
-	go r.resultWorker(ctx, *resultQueueName)
+	go r.resultWorker(ctx, *resultQueueName) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
 }
 func (r *RedisMQFlow) RequestChannels() []pipeline.RequestChannel {
 

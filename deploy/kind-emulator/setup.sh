@@ -169,7 +169,7 @@ for i in "${!node_array[@]}"; do
     fi
 
     resource_name="${current_type}.com~1gpu"
-    
+
     # Use kubectl patch with --subresource=status to directly update node status
     # This avoids the need for kubectl proxy and raw curl requests
     kubectl patch node "${node_name}" --subresource=status --type=json -p '[

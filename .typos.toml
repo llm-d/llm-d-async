@@ -6,12 +6,11 @@ IST = "IST"
 
 [files]
 extend-exclude = [
-    "*.png", 
-    "*.jpg", 
+    "*.png",
+    "*.jpg",
     "deploy/",
     "go.mod",
     "go.sum",
     "build/",
     "testdata/"
 ]
-
