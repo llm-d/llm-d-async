@@ -23,7 +23,7 @@ type InternalRouting struct {
 // It is used on channels and for persistence; JSON uses a tagged envelope.
 type InternalRequest struct {
 	InternalRouting `json:"-"`
-	PublicRequest Request
+	PublicRequest   Request
 }
 
 // NewInternalRequest returns an InternalRequest with a non-nil PublicRequest.
@@ -41,9 +41,9 @@ const (
 )
 
 type internalRequestWire struct {
-	Internal    InternalRouting   `json:"internal"`
-	RequestKind string            `json:"request_kind"`
-	Data        json.RawMessage   `json:"data"`
+	Internal    InternalRouting `json:"internal"`
+	RequestKind string          `json:"request_kind"`
+	Data        json.RawMessage `json:"data"`
 }
 
 // MarshalJSON encodes InternalRequest as a tagged envelope so the concrete

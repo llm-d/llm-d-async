@@ -159,7 +159,7 @@ kubectl run --rm -i prom-check --image=curlimages/curl --restart=Never -n ${NAME
     curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=inference_pool_ready_pods"
 # Expected: inference_pool_ready_pods{name="optimized-baseline"} = 1
 
-# Wait for vLLM metrics with inference_pool label to appear (via PodMonitor relabeling). 
+# Wait for vLLM metrics with inference_pool label to appear (via PodMonitor relabeling).
 # The entire process might take a couple of minutes.
 echo "Waiting for vLLM metrics with inference_pool label..."
 until kubectl run --rm -i prom-wait-$RANDOM --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
