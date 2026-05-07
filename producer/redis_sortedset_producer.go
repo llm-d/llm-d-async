@@ -24,21 +24,26 @@ type RedisSortedSetProducer struct {
 }
 
 // ProducerOption is a functional option for NewRedisSortedSetProducer.
-type ProducerOption func(*RedisSortedSetProducer)
+type ProducerOption func(*RedisSortedSetProducer) error
 
 // WithRedisClient injects a pre-configured *redis.Client, allowing callers to
 // instrument it (e.g. with OpenTelemetry tracing/metrics hooks) before use.
 // When provided, RedisURL in the config is not required.
+// The caller retains ownership of the client; Close() will not close it.
 func WithRedisClient(client *redis.Client) ProducerOption {
-	return func(p *RedisSortedSetProducer) {
+	return func(p *RedisSortedSetProducer) error {
+		if client == nil {
+			return errors.New("WithRedisClient: client must not be nil")
+		}
 		p.client = client
+		return nil
 	}
 }
 
 // RedisSortedSetConfig contains configuration for the Redis sorted set producer.
 type RedisSortedSetConfig struct {
 	// RedisURL is a Redis URL (e.g. "redis://user:pass@host:port/db" or "rediss://..." for TLS).
-	// Required.
+	// Required unless a client is injected via WithRedisClient.
 	RedisURL string
 
 	// TenantID is the unique identifier for the tenant/customer.
@@ -86,7 +91,9 @@ func NewRedisSortedSetProducer(config RedisSortedSetConfig, opts ...ProducerOpti
 	}
 
 	for _, opt := range opts {
-		opt(p)
+		if err := opt(p); err != nil {
+			return nil, err
+		}
 	}
 
 	if p.client == nil {

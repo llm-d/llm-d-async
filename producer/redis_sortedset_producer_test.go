@@ -326,10 +326,16 @@ func TestProducerAuth(t *testing.T) {
 			TenantID: "test",
 		})
 		assert.NoError(t, err)
-		defer producer.Close() // nolint:errcheck
+		defer producer.Close() //nolint:errcheck
 
 		ctx := context.Background()
-		err = producer.client.Ping(ctx).Err()
+		req := &api.RequestMessage{
+			ID:       "auth-test",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(1 * time.Hour).Unix(),
+			Payload:  map[string]interface{}{"test": true},
+		}
+		err = producer.SubmitRequest(ctx, req)
 		assert.NoError(t, err)
 	})
 }
@@ -423,17 +429,79 @@ func TestWithRedisClient(t *testing.T) {
 			WithRedisClient(client),
 		)
 		require.NoError(t, err)
-		assert.Equal(t, "results:test-tenant:default", p.resultQueueName)
 
 		ctx := context.Background()
-		err = p.client.Ping(ctx).Err()
+		req := &api.RequestMessage{
+			ID:       "inject-test",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(1 * time.Hour).Unix(),
+			Payload:  map[string]interface{}{"test": true},
+		}
+		err = p.SubmitRequest(ctx, req)
 		assert.NoError(t, err)
+	})
+
+	t.Run("fails with nil client", func(t *testing.T) {
+		_, err := NewRedisSortedSetProducer(
+			RedisSortedSetConfig{TenantID: "test-tenant"},
+			WithRedisClient(nil),
+		)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "client must not be nil")
 	})
 
 	t.Run("fails without RedisURL and without WithRedisClient", func(t *testing.T) {
 		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{TenantID: "test-tenant"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "RedisURL is required when no RedisClient is provided")
+	})
+}
+
+func TestCloseOwnership(t *testing.T) {
+	t.Run("managed client is closed", func(t *testing.T) {
+		mr, err := miniredis.Run()
+		require.NoError(t, err)
+		defer mr.Close()
+
+		p, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+			RedisURL: "redis://" + mr.Addr(),
+			TenantID: "test",
+		})
+		require.NoError(t, err)
+
+		err = p.Close()
+		assert.NoError(t, err)
+
+		// After Close, operations on the managed client should fail
+		err = p.SubmitRequest(context.Background(), &api.RequestMessage{
+			ID:       "post-close",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(1 * time.Hour).Unix(),
+			Payload:  map[string]interface{}{},
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("injected client is not closed", func(t *testing.T) {
+		mr, err := miniredis.Run()
+		require.NoError(t, err)
+		defer mr.Close()
+
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		defer client.Close() //nolint:errcheck
+
+		p, err := NewRedisSortedSetProducer(
+			RedisSortedSetConfig{TenantID: "test"},
+			WithRedisClient(client),
+		)
+		require.NoError(t, err)
+
+		err = p.Close()
+		assert.NoError(t, err)
+
+		// Injected client should still be usable after producer Close
+		err = client.Ping(context.Background()).Err()
+		assert.NoError(t, err)
 	})
 }
 

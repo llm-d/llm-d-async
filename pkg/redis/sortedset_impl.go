@@ -49,7 +49,7 @@ type queueConfig struct {
 	QueueName          string            `json:"queue_name"`
 	InferenceObjective string            `json:"inference_objective"`
 	RequestPathURL     string            `json:"request_path_url"`
-	IGWBaseURl         string            `json:"igw_base_url"`
+	IGWBaseURL         string            `json:"igw_base_url"`
 	GateType           string            `json:"gate_type"`
 	GateParams         map[string]string `json:"gate_params,omitempty"`
 }
@@ -124,7 +124,7 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 			Channel:            make(chan *api.InternalRequest),
 			InferenceObjective: cfg.InferenceObjective,
 			RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
-			IGWBaseURl:         util.NormalizeBaseURL(cfg.IGWBaseURl),
+			IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
 			Gate:               gate,
 		}
 
@@ -158,7 +158,7 @@ func loadQueueConfigs() ([]queueConfig, error) {
 		QueueName:          *ssRequestQueueName,
 		InferenceObjective: *ssInferenceObjective,
 		RequestPathURL:     *ssRequestPathURL,
-		IGWBaseURl:         *ssIGWBaseURL,
+		IGWBaseURL:         *ssIGWBaseURL,
 		GateType:           *ssGateType,
 		GateParams:         parseGateParams(*ssGateParamsJSON),
 	}}, nil

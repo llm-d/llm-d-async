@@ -61,7 +61,7 @@ type RequestMergePolicy interface {
 
 type RequestChannel struct {
 	Channel            chan *api.InternalRequest
-	IGWBaseURl         string
+	IGWBaseURL         string
 	InferenceObjective string
 	RequestPathURL     string
 	Gate               DispatchGate

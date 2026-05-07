@@ -40,7 +40,7 @@ type TopicConfig struct {
 	SubscriberID       string            `json:"subscriber_id"`
 	InferenceObjective string            `json:"inference_objective"`
 	RequestPathURL     string            `json:"request_path_url"`
-	IGWBaseURl         string            `json:"igw_base_url"`
+	IGWBaseURL         string            `json:"igw_base_url"`
 	GateType           string            `json:"gate_type"`
 	GateParams         map[string]string `json:"gate_params,omitempty"`
 }
@@ -92,7 +92,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			panic(fmt.Sprintf("failed to unmarshal topics config: %v", err))
 		}
 	} else {
-		configs = []TopicConfig{{SubscriberID: *requestSubscriberID, IGWBaseURl: *igwBaseURL, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
+		configs = []TopicConfig{{SubscriberID: *requestSubscriberID, IGWBaseURL: *igwBaseURL, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
 	}
 	p := &PubSubMQFlow{
 		resultTopicID:   *resultTopicID,
@@ -129,7 +129,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		p.requestChannels = append(p.requestChannels, RequestChannelData{
 			requestChannel: pipeline.RequestChannel{
 				Channel:            ch,
-				IGWBaseURl:         util.NormalizeBaseURL(cfg.IGWBaseURl),
+				IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
 				InferenceObjective: cfg.InferenceObjective,
 				RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
 				Gate:               gate,

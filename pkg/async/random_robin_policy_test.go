@@ -28,9 +28,9 @@ func irWithEndpoint(id, endpoint string) *api.InternalRequest {
 func TestProcessAllChannels(t *testing.T) {
 	msgsPerChannel := 5
 	channels := []pipeline.RequestChannel{
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURl: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
 	}
 	policy := NewRandomRobinPolicy()
 
@@ -81,9 +81,9 @@ func TestEmptyChannelsReturnsClosed(t *testing.T) {
 func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 	// Three channels, each with distinct metadata.
 	channels := []pipeline.RequestChannel{
-		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
-		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
-		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURl: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
+		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
+		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
+		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
 	}
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(channels)
@@ -155,7 +155,7 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	ch := pipeline.RequestChannel{
 		Channel:            make(chan *api.InternalRequest, 2),
-		IGWBaseURl:         "http://gateway",
+		IGWBaseURL:         "http://gateway",
 		InferenceObjective: "obj",
 		RequestPathURL:     "/default/path",
 	}
@@ -184,6 +184,52 @@ func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	}
 	if url := results["without-ep"]; url != "http://gateway/default/path" {
 		t.Errorf("expected http://gateway/default/path, got %s", url)
+	}
+}
+
+func TestURLJoinPathHandlesSlashes(t *testing.T) {
+	tests := []struct {
+		name       string
+		base       string
+		path       string
+		endpoint   string
+		wantURL    string
+	}{
+		{"trailing slash on base", "http://gateway/", "/v1/completions", "", "http://gateway/v1/completions"},
+		{"no leading slash on path", "http://gateway", "v1/completions", "", "http://gateway/v1/completions"},
+		{"base with subpath", "http://gateway/api", "v1/completions", "", "http://gateway/api/v1/completions"},
+		{"endpoint overrides with trailing slash base", "http://gateway/", "/default", "/v1/custom", "http://gateway/v1/custom"},
+		{"no slashes at all", "http://gateway", "v1/completions", "", "http://gateway/v1/completions"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := pipeline.RequestChannel{
+				Channel:            make(chan *api.InternalRequest, 1),
+				IGWBaseURL:         tt.base,
+				InferenceObjective: "obj",
+				RequestPathURL:     tt.path,
+			}
+
+			if tt.endpoint != "" {
+				ch.Channel <- irWithEndpoint("test", tt.endpoint)
+			} else {
+				ch.Channel <- irID("test")
+			}
+			close(ch.Channel)
+
+			policy := NewRandomRobinPolicy()
+			merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch})
+
+			select {
+			case msg := <-merged.Channel:
+				if msg.RequestURL != tt.wantURL {
+					t.Errorf("expected %s, got %s", tt.wantURL, msg.RequestURL)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out")
+			}
+		})
 	}
 }
 

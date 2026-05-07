@@ -108,7 +108,7 @@ type QueueConfig struct {
 	QueueName          string `json:"queue_name"`
 	InferenceObjective string `json:"inference_objective"`
 	RequestPathURL     string `json:"request_path_url"`
-	IGWBaseURl         string `json:"igw_base_url"`
+	IGWBaseURL         string `json:"igw_base_url"`
 }
 
 type RequestChannelData struct {
@@ -142,7 +142,7 @@ func NewRedisMQFlow() (*RedisMQFlow, error) {
 			return nil, fmt.Errorf("failed to unmarshal queues config: %w", err)
 		}
 	} else {
-		configs = []QueueConfig{{QueueName: *requestQueueName, IGWBaseURl: *igwBaseURL, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
+		configs = []QueueConfig{{QueueName: *requestQueueName, IGWBaseURL: *igwBaseURL, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
 	}
 
 	var channels []RequestChannelData
@@ -154,7 +154,7 @@ func NewRedisMQFlow() (*RedisMQFlow, error) {
 			Channel:            ch,
 			InferenceObjective: cfg.InferenceObjective,
 			RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
-			IGWBaseURl:         util.NormalizeBaseURL(cfg.IGWBaseURl),
+			IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
 		}, cfg.QueueName})
 	}
 	return &RedisMQFlow{
