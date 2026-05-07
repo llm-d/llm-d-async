@@ -13,7 +13,7 @@ func TestRedisQuotaGate_Concurrency(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	gate := NewRedisQuotaGate(rdb, "userid", QuotaModeConcurrency, 2, 10*time.Second, "quota:")
 
@@ -54,7 +54,7 @@ func TestRedisQuotaGate_RateLimit(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	// 2 requests per 1 second
 	gate := NewRedisQuotaGate(rdb, "userid", QuotaModeRateLimit, 2, 1*time.Second, "quota:")
@@ -94,7 +94,7 @@ func TestRedisQuotaGate_MissingAttribute(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	gate := NewRedisQuotaGate(rdb, "userid", QuotaModeRateLimit, 1, 1*time.Second, "quota:")
 

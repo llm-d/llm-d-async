@@ -19,7 +19,7 @@ func TestGating_EndToEnd(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	flow := &PubSubMQFlow{}
 	ch := make(chan *api.InternalRequest, 10)
