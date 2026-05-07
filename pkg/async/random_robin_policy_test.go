@@ -189,11 +189,11 @@ func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 
 func TestURLJoinPathHandlesSlashes(t *testing.T) {
 	tests := []struct {
-		name       string
-		base       string
-		path       string
-		endpoint   string
-		wantURL    string
+		name     string
+		base     string
+		path     string
+		endpoint string
+		wantURL  string
 	}{
 		{"trailing slash on base", "http://gateway/", "/v1/completions", "", "http://gateway/v1/completions"},
 		{"no leading slash on path", "http://gateway", "v1/completions", "", "http://gateway/v1/completions"},

@@ -54,4 +54,3 @@ spec:
       - name: config-volume
         configMap:
           name: async-processor-quota-config
-

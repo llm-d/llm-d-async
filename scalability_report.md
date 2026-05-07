@@ -34,7 +34,7 @@ The Async Processor is built as a concurrent pipeline designed to handle high-th
 ## 4. Back-pressure Bottlenecks & Scalability Risks
 
 ### High Risk: PubSub Result Pipeline
-The PubSub implementation lacks the buffering and batching present in the Redis implementation. 
+The PubSub implementation lacks the buffering and batching present in the Redis implementation.
 - **Impact:** Under heavy load, the single `resultWorker` becomes a serial bottleneck. Because the worker channel is unbuffered, the inference workers (which are expensive resources) spend idle time waiting for the PubSub publisher.
 
 ### Moderate Risk: Single-threaded Retry Logic
@@ -42,7 +42,7 @@ The `retryWorker` and `addMsgToRetryQueue` are single goroutines handling all qu
 - **Impact:** While retries are generally a smaller fraction of traffic, a "storm" of retryable errors (e.g., inference service 503s) could overwhelm these single goroutines, causing back-pressure to propagate back to the workers and further slowing down the system.
 
 ### Moderate Risk: Unbuffered Request Channels
-While unbuffered channels provide excellent back-pressure, they offer zero "smoothing" for bursts. 
+While unbuffered channels provide excellent back-pressure, they offer zero "smoothing" for bursts.
 - **Impact:** Any jitter in the worker processing time immediately reflects back to the ingestion layer. Small buffers (e.g., equal to `concurrency`) could improve throughput by allowing the next batch of messages to be pre-fetched while workers are finishing.
 
 ## 5. Summary of Redis vs. PubSub Scalability

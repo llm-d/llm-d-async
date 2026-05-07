@@ -80,9 +80,9 @@ func (s *server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.requestLog = append(s.requestLog, reqID)
-	
+
 	delayMs := s.delay.DelayMs
-	
+
 	if s.fail.Count > 0 {
 		status := s.fail.Status
 		s.fail.Count--
