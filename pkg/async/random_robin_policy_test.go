@@ -187,6 +187,67 @@ func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	}
 }
 
+func irWithHeaders(id string, headers map[string]string) *api.InternalRequest {
+	return api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
+		ID:       id,
+		Created:  1,
+		Deadline: 9999999999,
+		Headers:  headers,
+	})
+}
+
+func TestPerRequestHeadersMerged(t *testing.T) {
+	ch := pipeline.RequestChannel{
+		Channel:            make(chan *api.InternalRequest, 3),
+		IGWBaseURl:         "http://gw",
+		InferenceObjective: "obj",
+		RequestPathURL:     "/v1/completions",
+	}
+	policy := NewRandomRobinPolicy()
+
+	ch.Channel <- irWithHeaders("custom", map[string]string{
+		"Authorization": "Bearer tok",
+		"X-Trace-ID":    "abc",
+	})
+	ch.Channel <- irWithHeaders("override-objective", map[string]string{
+		"x-gateway-inference-objective": "my-obj",
+	})
+	ch.Channel <- irID("no-headers")
+	close(ch.Channel)
+
+	merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch})
+
+	deadline := time.After(2 * time.Second)
+	results := map[string]map[string]string{}
+	for range 3 {
+		select {
+		case msg := <-merged.Channel:
+			results[msg.PublicRequest.ReqID()] = msg.HttpHeaders
+		case <-deadline:
+			t.Fatal("timed out")
+		}
+	}
+
+	// Custom headers are merged in.
+	if h := results["custom"]; h["Authorization"] != "Bearer tok" || h["X-Trace-ID"] != "abc" {
+		t.Errorf("custom headers not merged: %v", h)
+	}
+	// Default headers still present.
+	if h := results["custom"]; h["Content-Type"] != "application/json" {
+		t.Errorf("Content-Type missing: %v", h)
+	}
+
+	// User can override inference objective.
+	if h := results["override-objective"]; h["x-gateway-inference-objective"] != "my-obj" {
+		t.Errorf("expected overridden objective, got %v", h)
+	}
+
+	// No headers: defaults only.
+	if h := results["no-headers"]; h["Content-Type"] != "application/json" || h["x-gateway-inference-objective"] != "obj" {
+		t.Errorf("default headers wrong: %v", h)
+	}
+}
+
 func TestMergedChannelIsBuffered(t *testing.T) {
 	numChannels := 3
 	channels := make([]pipeline.RequestChannel, numChannels)

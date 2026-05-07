@@ -9,6 +9,7 @@ type Request interface {
 	ReqDeadline() int64
 	ReqPayload() map[string]any
 	ReqMetadata() map[string]string
+	ReqHeaders() map[string]string
 	ReqEndpoint() string
 }
 
@@ -23,6 +24,7 @@ type RequestMessage struct {
 	Deadline int64             `json:"deadline"` // Unix seconds
 	Payload  map[string]any    `json:"payload"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty"`
 	Endpoint string            `json:"endpoint,omitempty"`
 }
 
@@ -31,6 +33,7 @@ func (r *RequestMessage) ReqCreated() int64              { return r.Created }
 func (r *RequestMessage) ReqDeadline() int64             { return r.Deadline }
 func (r *RequestMessage) ReqPayload() map[string]any     { return r.Payload }
 func (r *RequestMessage) ReqMetadata() map[string]string { return r.Metadata }
+func (r *RequestMessage) ReqHeaders() map[string]string  { return r.Headers }
 func (r *RequestMessage) ReqEndpoint() string            { return r.Endpoint }
 
 // RedisRequest is the concrete Request implementation for Redis-based flows.
