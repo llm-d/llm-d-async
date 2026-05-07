@@ -11,8 +11,8 @@ backed by a real vLLM model server and the upstream llm-d stack.
 
 ```bash
 export LLM_D_REPO=/path/to/llm-d        # local checkout of github.com/llm-d/llm-d
-export ASYNC_REPO=/path/to/llm-d-async-e2e  # this repo
-export NAMESPACE=evacchi-dev-batch-processor
+export ASYNC_REPO=/path/to/llm-d-async   # this repo
+export NAMESPACE=llm-d-async              # choose your namespace
 export GAIE_VERSION=v1.5.0
 export GATEWAY_API_VERSION=v1.5.1
 export GUIDE_NAME=optimized-baseline
@@ -75,6 +75,10 @@ helm install ${GUIDE_NAME} \
 Reference: [llm-d monitoring docs](https://github.com/llm-d/llm-d/blob/main/docs/monitoring/README.md)
 
 ## Step 6: Deploy vLLM model server (Qwen/Qwen3-0.6B)
+
+The model server manifests use the same kustomize base+overlay pattern as the upstream
+[llm-d optimized-baseline guide](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline/modelserver),
+but configured for a single-replica Qwen3-0.6B on 1x GPU.
 
 ```bash
 kubectl apply -n ${NAMESPACE} -k ${ASYNC_REPO}/docs/guides/e2e-deploy/modelserver/
@@ -155,11 +159,17 @@ kubectl run --rm -i prom-check --image=curlimages/curl --restart=Never -n ${NAME
     curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=inference_pool_ready_pods"
 # Expected: inference_pool_ready_pods{name="optimized-baseline"} = 1
 
-# vLLM metrics with inference_pool label (via relabeling)
-kubectl run --rm -i prom-vllm --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
-    curl -s --data-urlencode 'query=vllm:num_requests_running{inference_pool="optimized-baseline"}' \
-    'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
-# Expected: result with inference_pool="optimized-baseline"
+# Wait for vLLM metrics with inference_pool label to appear (via PodMonitor relabeling). 
+# The entire process might take a couple of minutes.
+echo "Waiting for vLLM metrics with inference_pool label..."
+until kubectl run --rm -i prom-wait-$RANDOM --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
+    curl -sf --data-urlencode 'query=count(vllm:num_requests_running{inference_pool="optimized-baseline"})' \
+    'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query' \
+    | grep -q '"result":\[{"metric"'; do
+  echo "  not yet, retrying in 10s..."
+  sleep 10
+done
+echo "vLLM metrics available."
 
 # Full gate budget query (should return 1.0 at idle)
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
@@ -193,7 +203,7 @@ Expected: JSON with `"id":"test-1"` and a completion payload from Qwen3-0.6B.
 
 ```bash
 # Scale down — gate should close (budget=0, metrics return NaN)
-kubectl scale deployment vllm-qwen3-0-6b -n ${NAMESPACE} --replicas=0
+kubectl scale deployment vllm-qwen3-0-6b-decode -n ${NAMESPACE} --replicas=0
 
 # Push a request while gate is closed
 kubectl run --rm -i test-closed --image=redis --restart=Never -n ${NAMESPACE} -- \
@@ -209,7 +219,7 @@ kubectl run --rm -i test-queued --image=redis --restart=Never -n ${NAMESPACE} --
 kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=async-processor --tail=5
 
 # Scale back up — gate opens, queued request gets dispatched
-kubectl scale deployment vllm-qwen3-0-6b -n ${NAMESPACE} --replicas=1
+kubectl scale deployment vllm-qwen3-0-6b-decode -n ${NAMESPACE} --replicas=1
 kubectl wait --for=condition=Ready pod -l llm-d.ai/role=decode -n ${NAMESPACE} --timeout=300s
 
 # Wait for Prometheus scrape + gate to open (~30s)

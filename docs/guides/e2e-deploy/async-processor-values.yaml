@@ -3,7 +3,7 @@ ap:
     repository: ghcr.io/llm-d-incubation/llm-d-async
     tag: "4a1b0a4"
   imagePullPolicy: Always
-  igwBaseURL: "http://llm-d-inference-gateway-istio.evacchi-dev-batch-processor.svc.cluster.local:80"
+  igwBaseURL: "http://llm-d-inference-gateway-istio:80"
   messageQueueImpl: "redis-sortedset"
   concurrency: 4
   prometheusURL: "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090"

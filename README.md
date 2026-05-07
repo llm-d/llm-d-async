@@ -169,20 +169,23 @@ For more fine-grained control, configure gates per queue in your configuration f
   The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
   See [docs/dispatch-budget.md](docs/dispatch-budget.md) for the full derivation.
 
-  - `pool` (**required**): The inference pool name to filter metrics by (must match the `inference_pool` pod label).
+  - `pool` (**required**): The InferencePool name. This must match both the `name` field in
+    `inference_pool_ready_pods{name="<pool>"}` (EPP metric) and, for the vLLM fallback,
+    the `inference_pool` label on scraped vLLM metrics (added via relabeling from pod labels).
   - `max_concurrency` (optional): Per-endpoint request capacity (`MaxConcurrency` in the [inference scheduler's saturation detector](https://github.com/llm-d/llm-d-inference-scheduler/blob/main/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go)). Default is `100` (matching the inference scheduler default).
   - `baseline` (optional): Reserved baseline B. The gate closes when D ≤ B. Default is `0.05`.
   - `fallback` (optional): Fallback budget value (0.0-1.0) returned when all metric sources are unavailable. Default is `0.0` (fail closed).
 
-   **Metric prerequisites:** The primary metric source requires llm-d's flow control plugin to be
-   enabled; without it, the gate falls back to vLLM metrics. The fallback filters by `inference_pool` label, 
-   which vLLM does not emit natively: configure Prometheus relabeling to propagate it from model server pod labels
-  (the helm chart handles this)
-     ```yaml
-     relabelings:
-       - sourceLabels: [__meta_kubernetes_pod_label_inference_pool]
-         targetLabel: inference_pool
-     ```
+  **Metric prerequisites:** The primary metric source requires llm-d's flow control plugin to be
+  enabled; without it, the gate falls back to vLLM metrics. The fallback filters by `inference_pool` label,
+  which vLLM does not emit natively: configure Prometheus relabeling to propagate it from model server pod labels
+  (the helm chart handles this):
+
+  ```yaml
+  relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_label_inference_pool]
+      targetLabel: inference_pool
+  ```
 
 ## Request Messages and Consumption
 

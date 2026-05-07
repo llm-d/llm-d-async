@@ -1,37 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-qwen3-0-6b
-  labels:
-    llm-d.ai/role: decode
-    llm-d.ai/guide: optimized-baseline
-    llm-d.ai/model: Qwen3-0.6B
+  name: decode
 spec:
   replicas: 1
-  selector:
-    matchLabels:
-      llm-d.ai/role: decode
-      llm-d.ai/guide: optimized-baseline
   template:
-    metadata:
-      labels:
-        llm-d.ai/role: decode
-        llm-d.ai/guide: optimized-baseline
-        llm-d.ai/model: Qwen3-0.6B
-        inference_pool: optimized-baseline
     spec:
       containers:
         - name: modelserver
-          image: vllm/vllm-openai:v0.19.1
           command: ["vllm", "serve"]
           args:
             - "Qwen/Qwen3-0.6B"
             - "--tensor-parallel-size=1"
             - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
-          ports:
-            - name: modelserver
-              containerPort: 8000
-              protocol: TCP
           resources:
             limits:
               cpu: "8"
@@ -45,24 +26,15 @@ spec:
             - mountPath: /dev/shm
               name: shm
           startupProbe:
-            httpGet:
-              path: /v1/models
-              port: modelserver
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 60
           livenessProbe:
-            httpGet:
-              path: /health
-              port: modelserver
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
-            httpGet:
-              path: /v1/models
-              port: modelserver
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3

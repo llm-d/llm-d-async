@@ -26,6 +26,8 @@ ap:
   redis:
     enabled: false
     # Option 1: provide the URL directly — chart creates the Secret automatically.
+    # WARNING: Helm values are retrievable via `helm get values` and may expose credentials.
+    # For production or credentialed URLs, prefer Option 2 (secretName/secretKey).
     # url: "redis://redis-master.redis.svc.cluster.local:6379"
     # Option 2: reference a pre-existing Secret (used when url is not set).
     secretName: "redis-creds"

@@ -20,7 +20,7 @@ spec:
             - benchmark
             - run
             - --target
-            - "http://llm-d-inference-gateway-istio.evacchi-dev-batch-processor.svc.cluster.local"
+            - "http://llm-d-inference-gateway-istio"
             - --request-format
             - text_completions
             - --model
