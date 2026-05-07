@@ -25,13 +25,5 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install Helm
-        uses: azure/setup-helm@v5
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.11.4
-
       - name: Run pre-commit hooks
         uses: pre-commit/action@v3.0.1
