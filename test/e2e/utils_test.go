@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/redis/go-redis/v9"
 
@@ -109,11 +110,13 @@ func sendProbeRequest(envoyURL string) {
 	body := []byte(`{"model":"test-model","prompt":"probe"}`)
 	req, err := http.NewRequest(http.MethodPost, envoyURL+"/v1/completions", bytes.NewReader(body))
 	if err != nil {
+		ginkgo.GinkgoLogr.V(1).Info("probe request creation failed", "error", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		ginkgo.GinkgoLogr.V(1).Info("probe request failed", "error", err)
 		return
 	}
 	resp.Body.Close() //nolint:errcheck
@@ -127,9 +130,14 @@ func sendProbeRequest(envoyURL string) {
 func queryProm(promURL, query string) float64 {
 	resp, err := httpClient.Get(promURL + "/api/v1/query?query=" + url.QueryEscape(query))
 	if err != nil {
+		ginkgo.GinkgoLogr.V(1).Info("prom query failed", "error", err, "query", query)
 		return math.NaN()
 	}
 	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		ginkgo.GinkgoLogr.V(1).Info("prom query returned non-200", "status", resp.StatusCode, "query", query)
+		return math.NaN()
+	}
 
 	var result struct {
 		Status string `json:"status"`

@@ -323,6 +323,8 @@ func applyManifests() {
 		{"saturation", helmValuesDir + "/saturation.yaml"},
 		{"budget", helmValuesDir + "/budget.yaml"},
 		{"redis-gate", helmValuesDir + "/redis-gate.yaml"},
+		{"quota", helmValuesDir + "/quota.yaml"},
+		{"composite", helmValuesDir + "/composite.yaml"},
 	} {
 		helmInstall(r.name, r.values, map[string]string{
 			"ap.image.repository": imageRepo,
@@ -408,31 +410,27 @@ func setupClients() {
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
 
 	ginkgo.By("Waiting for Prometheus to be ready")
-	gomega.Eventually(func() error {
+	gomega.Eventually(func(g gomega.Gomega) {
 		resp, err := http.Get(promURL + "/-/ready")
-		if err != nil {
-			return err
-		}
-		return resp.Body.Close()
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 
 	ginkgo.By("Waiting for sim to be ready")
-	gomega.Eventually(func() error {
+	gomega.Eventually(func(g gomega.Gomega) {
 		resp, err := http.Get(simAdminURL + "/metrics")
-		if err != nil {
-			return err
-		}
-		return resp.Body.Close()
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 
 	ginkgo.By("Waiting for Envoy to be ready")
-	gomega.Eventually(func() error {
+	gomega.Eventually(func(g gomega.Gomega) {
 		resp, err := http.Get(envoyURL + "/v1/completions")
-		if err != nil {
-			return err
-		}
-		resp.Body.Close() //nolint:errcheck
-		return nil
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.BeNumerically("<", 500))
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
 
@@ -541,6 +539,8 @@ func doRedeployEPPWithFlowControl() {
 		"saturation-async-processor",
 		"budget-async-processor",
 		"redis-gate-async-processor",
+		"quota-async-processor",
+		"composite-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
@@ -553,6 +553,8 @@ func doRedeployEPPWithFlowControl() {
 		"saturation-async-processor",
 		"budget-async-processor",
 		"redis-gate-async-processor",
+		"quota-async-processor",
+		"composite-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")
