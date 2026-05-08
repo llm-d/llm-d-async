@@ -1,0 +1,26 @@
+ap:
+  imagePullPolicy: Never
+  messageQueueImpl: "redis-sortedset"
+  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  concurrency: 1
+  prometheusCacheTTL: "0s"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    enabled: true
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
+    requestPathURL: "/v1/completions"
+    requestQueueName: "quota-request-sortedset"
+    resultQueueName: "quota-result-list"
+    pollIntervalMs: 500
+    batchSize: 10
+    gateType: "redis-quota"
+    gateParams:
+      address: "redis.e2e-integration.svc.cluster.local:6379"
+      attribute: "userid"
+      mode: "concurrency"
+      limit: "1"
+  modelServerMonitor:
+    enabled: false
