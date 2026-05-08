@@ -58,9 +58,6 @@ func TestProcessMessages_InferenceObjectivePropagation(t *testing.T) {
 	go func() {
 		select {
 		case msg := <-ch:
-			if msg.InternalRouting.InferenceObjective != "-1" {
-				// We can't easily return error from here, so we'll check it in the main loop
-			}
 			// Simulate result worker sending back a result
 			pubsubID := msg.TransportCorrelationID
 			if val, ok := resultChannels.Load(pubsubID); ok {

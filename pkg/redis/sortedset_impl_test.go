@@ -927,8 +927,8 @@ func TestSortedSetFlow_InferenceObjectivePropagation(t *testing.T) {
 
 	select {
 	case received := <-flow.requestChannels[0].channel.Channel:
-		if received.InternalRouting.InferenceObjective != "-1" {
-			t.Errorf("Expected inferenceobjective=-1, got %s", received.InternalRouting.InferenceObjective)
+		if received.InferenceObjective != "-1" {
+			t.Errorf("Expected inferenceobjective=-1, got %s", received.InferenceObjective)
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("Timeout waiting for message")

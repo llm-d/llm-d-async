@@ -274,10 +274,10 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 				continue
 			}
 			if obj != "" {
-				ir.InternalRouting.InferenceObjective = obj
+				ir.InferenceObjective = obj
 			} else if userObj, ok := rview.ReqMetadata()["inferenceobjective"]; ok {
 				// Fallback to user metadata if gate didn't provide one
-				ir.InternalRouting.InferenceObjective = userObj
+				ir.InferenceObjective = userObj
 			}
 			release = rel
 		} else {

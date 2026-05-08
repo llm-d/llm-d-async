@@ -334,10 +334,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 				return
 			}
 			if obj != "" {
-				ir.InternalRouting.InferenceObjective = obj
+				ir.InferenceObjective = obj
 			} else if userObj, ok := msg.Attributes["inferenceobjective"]; ok {
 				// Fallback to user attribute if gate didn't provide one
-				ir.InternalRouting.InferenceObjective = userObj
+				ir.InferenceObjective = userObj
 			}
 			release = rel
 		} else {

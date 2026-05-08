@@ -305,7 +305,7 @@ func TestInferenceObjectiveOverride(t *testing.T) {
 
 	// 1st message: using InternalRouting override
 	ir1 := irID("msg1")
-	ir1.InternalRouting.InferenceObjective = "override-obj"
+	ir1.InferenceObjective = "override-obj"
 	ch.Channel <- ir1
 
 	// 2nd message: using default
