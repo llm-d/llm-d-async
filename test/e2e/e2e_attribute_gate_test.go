@@ -19,8 +19,8 @@ var _ = ginkgo.Describe("Attribute Gating E2E", func() {
 
 	ginkgo.BeforeEach(func() {
 		ctx = context.Background()
-		rdb.Del(ctx, quotaRequestQueue)           //nolint:errcheck
-		rdb.Del(ctx, quotaResultQueue)             //nolint:errcheck
+		rdb.Del(ctx, quotaRequestQueue)              //nolint:errcheck
+		rdb.Del(ctx, quotaResultQueue)               //nolint:errcheck
 		rdb.Del(ctx, quotaKeyPrefix+"userid:user-a") //nolint:errcheck
 	})
 

@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"sync"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,12 +32,12 @@ const (
 	nsName          = "e2e-integration"
 
 	// Manifests
-	redisManifest     = "./yaml/redis.yaml"
-	simManifest       = "./yaml/sim.yaml"
-	eppManifest       = "./yaml/epp.yaml"
-	eppConfigNoFC     = "./yaml/epp-config-no-fc.yaml"
-	eppConfigFC       = "./yaml/epp-config-fc.yaml"
-	simDeployManifest = "./yaml/sim-deploy.yaml"
+	redisManifest      = "./yaml/redis.yaml"
+	simManifest        = "./yaml/sim.yaml"
+	eppManifest        = "./yaml/epp.yaml"
+	eppConfigNoFC      = "./yaml/epp-config-no-fc.yaml"
+	eppConfigFC        = "./yaml/epp-config-fc.yaml"
+	simDeployManifest  = "./yaml/sim-deploy.yaml"
 	envoyManifest      = "./yaml/envoy.yaml"
 	prometheusManifest = "./yaml/prometheus.yaml"
 
@@ -396,7 +396,6 @@ func helmInstall(releaseName, valuesFile string, sets map[string]string) {
 	gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
 }
 
-
 func setupClients() {
 	promURL = "http://localhost:" + promPort
 	simAdminURL = "http://localhost:" + simPort
@@ -583,7 +582,6 @@ func doRedeployEPPWithFlowControl() {
 		return nil
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
-
 
 const kindClusterConfig = `
 kind: Cluster

@@ -23,9 +23,9 @@ var _ = ginkgo.Describe("Composite Gate E2E", ginkgo.Ordered, func() {
 
 	ginkgo.BeforeEach(func() {
 		ctx = context.Background()
-		rdb.Del(ctx, compositeRequestQueue)                    //nolint:errcheck
-		rdb.Del(ctx, compositeResultQueue)                     //nolint:errcheck
-		rdb.Del(ctx, compositeQuotaPrefix+"userid:user-b")     //nolint:errcheck
+		rdb.Del(ctx, compositeRequestQueue)                //nolint:errcheck
+		rdb.Del(ctx, compositeResultQueue)                 //nolint:errcheck
+		rdb.Del(ctx, compositeQuotaPrefix+"userid:user-b") //nolint:errcheck
 		setSimWaitingRequests(simAdminURL, 0)
 	})
 
