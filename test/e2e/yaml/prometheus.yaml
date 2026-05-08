@@ -2,13 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: prometheus
-  namespace: e2e-integration
+  namespace: ${NAMESPACE}
 ---
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: prometheus-pod-reader
-  namespace: e2e-integration
+  namespace: ${NAMESPACE}
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -18,11 +18,11 @@ kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: prometheus-pod-reader-binding
-  namespace: e2e-integration
+  namespace: ${NAMESPACE}
 subjects:
   - kind: ServiceAccount
     name: prometheus
-    namespace: e2e-integration
+    namespace: ${NAMESPACE}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -32,7 +32,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: prometheus-config
-  namespace: e2e-integration
+  namespace: ${NAMESPACE}
 data:
   prometheus.yml: |
     global:
@@ -68,7 +68,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: prometheus
-  namespace: e2e-integration
+  namespace: ${NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -108,7 +108,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: prometheus
-  namespace: e2e-integration
+  namespace: ${NAMESPACE}
 spec:
   selector:
     app: prometheus

@@ -1,0 +1,27 @@
+# EPP plugins config with flow control enabled.
+# maxRequests limits total requests in the flow control system (queued +
+# in-flight). With a slow sim (30s TTFT), some requests are in-flight at
+# the sim while others queue behind them. We set this high enough that
+# there is room for both in-flight and queued requests. In production
+# this would be much higher (or unlimited).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: epp-plugins-config
+  namespace: ${NAMESPACE}
+data:
+  default-plugins.yaml: |
+    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    kind: EndpointPickerConfig
+    featureGates:
+    - flowControl
+    plugins:
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+    flowControl:
+      maxRequests: "10"

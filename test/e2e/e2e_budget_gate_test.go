@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -71,12 +72,16 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", ginkgo.Ordered, func(
 		ctx = context.Background()
 		rdb.Del(ctx, budgetRequestQueue) //nolint:errcheck
 		rdb.Del(ctx, budgetResultQueue)  //nolint:errcheck
+		// Reset saturation and wait for EPP's flow control queue to drain.
+		// Previous tests may have left probes queued.
 		setSimWaitingRequests(simAdminURL, 0)
+		gomega.Eventually(func() bool {
+			v := queryProm(promURL, budgetPromQL)
+			return !math.IsNaN(v) && v > 0.5
+		}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to recover between tests")
 	})
 
 	ginkgo.It("processes a message when dispatch budget is positive", func() {
-		setSimWaitingRequests(simAdminURL, 0)
-		waitForBudget(promURL, envoyURL, func(b float64) bool { return b > 0.5 })
 
 		msg := makeRequestMessage("budget-positive", 5*time.Minute)
 		enqueueMessage(ctx, rdb, budgetRequestQueue, msg)
@@ -91,22 +96,21 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", ginkgo.Ordered, func(
 	})
 
 	ginkgo.It("blocks messages when dispatch budget is zero", func() {
-		// Drive saturation high and wait for EPP to detect it, so its
-		// flow control layer starts throttling incoming requests.
-		setSimWaitingRequests(simAdminURL, 10)
-		waitForSaturation(promURL, envoyURL, func(v float64) bool { return v >= 0.7 })
+		// Drive saturation high.
+		setSimWaitingRequests(simAdminURL, 100)
 
-		// Now flood EPP with concurrent probes — they will queue up in
-		// EPP's flow control admission layer, driving queue_size > 0.
-		stopFlood := floodProbes(envoyURL, 5)
+		// Start flooding immediately — the flood goroutines send probes
+		// that trigger EPP's admission layer and fill the flow control
+		// queue once EPP detects saturation and starts throttling.
+		stopFlood := floodProbes(envoyURL, 20)
 		defer stopFlood()
 
-		// Wait longer: sim → EPP scrape → throttle → probes queue →
-		// Prometheus scrape is a multi-hop propagation chain.
+		// Wait for the budget to drop. The propagation chain is:
+		// sim fake_metrics → EPP scrapes sim → EPP detects saturation →
+		// EPP throttles flood probes → queue_size rises → Prometheus scrapes.
 		gomega.Eventually(func() bool {
-			sendProbeRequest(envoyURL)
 			v := queryProm(promURL, budgetPromQL)
-			return v >= 0 && v <= 0
+			return !math.IsNaN(v) && v < 0.05
 		}, 120*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to reach zero")
 
 		msg := makeRequestMessage("budget-zero", 5*time.Minute)
@@ -131,16 +135,14 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", ginkgo.Ordered, func(
 	})
 
 	ginkgo.It("resumes processing when dispatch budget is restored", func() {
-		setSimWaitingRequests(simAdminURL, 10)
-		waitForSaturation(promURL, envoyURL, func(v float64) bool { return v >= 0.7 })
+		setSimWaitingRequests(simAdminURL, 100)
 
-		stopFlood := floodProbes(envoyURL, 5)
+		stopFlood := floodProbes(envoyURL, 20)
 		defer stopFlood()
 
 		gomega.Eventually(func() bool {
-			sendProbeRequest(envoyURL)
 			v := queryProm(promURL, budgetPromQL)
-			return v >= 0 && v <= 0
+			return !math.IsNaN(v) && v < 0.05
 		}, 120*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to reach zero")
 
 		for i := 1; i <= 3; i++ {

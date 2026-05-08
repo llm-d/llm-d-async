@@ -99,25 +99,28 @@ var _ = ginkgo.Describe("General Integration", func() {
 		gomega.Expect(result.ID).To(gomega.Equal("retry-msg"))
 	})
 
-	ginkgo.It("skips expired messages", func() {
+	ginkgo.It("drops expired messages and processes valid ones", func() {
 		expiredMsg := makeRequestMessage("expired-msg", -100*time.Second)
 		validMsg := makeRequestMessage("valid-msg", 5*time.Minute)
 
 		enqueueMessage(ctx, rdb, integrationRequestQueue, expiredMsg)
 		enqueueMessage(ctx, rdb, integrationRequestQueue, validMsg)
 
+		// The expired message is silently dropped at dequeue time (deadline
+		// already in the past). Only the valid message produces a result.
 		gomega.Eventually(func() int64 {
 			return getResultCount(ctx, rdb, integrationResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
 
-		// Only the valid message should appear.
-		gomega.Consistently(func() int64 {
-			return getResultCount(ctx, rdb, integrationResultQueue)
-		}, 5*time.Second, 1*time.Second).Should(gomega.BeNumerically("<=", 1))
-
 		result := popResult(ctx, rdb, integrationResultQueue)
 		gomega.Expect(result).NotTo(gomega.BeNil())
 		gomega.Expect(result.ID).To(gomega.Equal("valid-msg"))
+
+		// Verify the expired message was removed from the request queue
+		// without producing a result.
+		gomega.Consistently(func() int64 {
+			return getResultCount(ctx, rdb, integrationResultQueue)
+		}, 3*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(0)))
 	})
 
 	ginkgo.It("collects all results from a batch of messages", func() {

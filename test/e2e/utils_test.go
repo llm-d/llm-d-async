@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -119,11 +120,14 @@ func sendProbeRequest(envoyURL string) {
 }
 
 // queryProm runs a PromQL instant query and returns the first result's scalar
-// value. Returns -1 if the query fails or returns no results.
+// value. Returns NaN if the query fails or returns no results; callers must
+// check with math.IsNaN. Do NOT use a numeric sentinel like -1: budget PromQL
+// (1 - queue_size/capacity) legitimately returns negative values when queue_size
+// exceeds capacity.
 func queryProm(promURL, query string) float64 {
 	resp, err := httpClient.Get(promURL + "/api/v1/query?query=" + url.QueryEscape(query))
 	if err != nil {
-		return -1
+		return math.NaN()
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -136,14 +140,14 @@ func queryProm(promURL, query string) float64 {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return -1
+		return math.NaN()
 	}
 	if result.Status != "success" || len(result.Data.Result) == 0 {
-		return -1
+		return math.NaN()
 	}
 	v, err := strconv.ParseFloat(result.Data.Result[0].Value[1].(string), 64)
 	if err != nil {
-		return -1
+		return math.NaN()
 	}
 	return v
 }
@@ -163,7 +167,7 @@ func waitForBudget(promURL, envoyURL string, pred func(float64) bool) {
 	gomega.EventuallyWithOffset(1, func() bool {
 		sendProbeRequest(envoyURL)
 		v := queryProm(promURL, budgetPromQL)
-		return v >= 0 && pred(v)
+		return !math.IsNaN(v) && pred(v)
 	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to satisfy condition")
 }
 
@@ -174,7 +178,7 @@ func waitForSaturation(promURL, envoyURL string, pred func(float64) bool) {
 	gomega.EventuallyWithOffset(1, func() bool {
 		sendProbeRequest(envoyURL)
 		v := queryProm(promURL, `inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"}`)
-		return v >= 0 && pred(v)
+		return !math.IsNaN(v) && pred(v)
 	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for saturation to satisfy condition")
 }
 
@@ -184,9 +188,18 @@ func waitForSaturation(promURL, envoyURL string, pred func(float64) bool) {
 // Uses a long HTTP timeout so throttled requests stay in EPP's queue long
 // enough for Prometheus to scrape the non-zero queue_size.
 // Call the returned cancel function to stop the flood.
+// A single shared Transport with MaxConnsPerHost is used to cap the number of
+// TCP connections and avoid exhausting ephemeral ports, which would break
+// subsequent tests that need to connect to other services.
 func floodProbes(envoyURL string, concurrency int) context.CancelFunc {
 	ctx, cancel := context.WithCancel(context.Background())
-	floodClient := &http.Client{Timeout: 120 * time.Second}
+	tr := &http.Transport{
+		MaxConnsPerHost: concurrency,
+	}
+	client := &http.Client{
+		Timeout:   120 * time.Second,
+		Transport: tr,
+	}
 	for i := 0; i < concurrency; i++ {
 		go func() {
 			for {
@@ -197,7 +210,7 @@ func floodProbes(envoyURL string, concurrency int) context.CancelFunc {
 					body := []byte(`{"model":"test-model","prompt":"probe"}`)
 					req, _ := http.NewRequestWithContext(ctx, http.MethodPost, envoyURL+"/v1/completions", bytes.NewReader(body))
 					req.Header.Set("Content-Type", "application/json")
-					resp, err := floodClient.Do(req)
+					resp, err := client.Do(req)
 					if err == nil {
 						resp.Body.Close() //nolint:errcheck
 					}
@@ -205,7 +218,10 @@ func floodProbes(envoyURL string, concurrency int) context.CancelFunc {
 			}
 		}()
 	}
-	return cancel
+	return func() {
+		cancel()
+		tr.CloseIdleConnections()
+	}
 }
 
 // setEnvoyFaultAbort configures Envoy's fault injection filter via the admin

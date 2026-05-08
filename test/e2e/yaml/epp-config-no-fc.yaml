@@ -1,0 +1,19 @@
+# EPP plugins config without flow control.
+# The budget gate's CascadeMetricSource will fall back to vLLM metrics.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: epp-plugins-config
+  namespace: ${NAMESPACE}
+data:
+  default-plugins.yaml: |
+    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer

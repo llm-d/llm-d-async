@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,10 +32,12 @@ const (
 	nsName          = "e2e-integration"
 
 	// Manifests
-	redisManifest      = "./yaml/redis.yaml"
-	simManifest        = "./yaml/sim.yaml"
-	eppFCManifest      = "./yaml/epp-fc.yaml"
-	eppNoFCManifest    = "./yaml/epp-no-fc.yaml"
+	redisManifest     = "./yaml/redis.yaml"
+	simManifest       = "./yaml/sim.yaml"
+	eppManifest       = "./yaml/epp.yaml"
+	eppConfigNoFC     = "./yaml/epp-config-no-fc.yaml"
+	eppConfigFC       = "./yaml/epp-config-fc.yaml"
+	simDeployManifest = "./yaml/sim-deploy.yaml"
 	envoyManifest      = "./yaml/envoy.yaml"
 	prometheusManifest = "./yaml/prometheus.yaml"
 
@@ -79,6 +82,7 @@ func TestEndToEnd(t *testing.T) {
 
 var _ = ginkgo.BeforeSuite(func() {
 	setupK8sCluster()
+	gomega.Expect(os.Setenv("KUBECONFIG", kindKubeconfig)).To(gomega.Succeed())
 	testConfig = testutils.NewTestConfig(nsName, "")
 	setupK8sClient()
 	setupNameSpace()
@@ -249,7 +253,6 @@ func kindLoadImage(image string) {
 }
 
 func setupK8sClient() {
-	os.Setenv("KUBECONFIG", kindKubeconfig) //nolint:errcheck
 	k8sCfg, err := config.GetConfigWithContext("kind-" + kindClusterName)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.ExpectWithOffset(1, k8sCfg).NotTo(gomega.BeNil())
@@ -293,12 +296,14 @@ func applyManifests() {
 	kubectlApplyFile(redisManifest, nil)
 
 	ginkgo.By("Applying sim manifest")
-	kubectlApplyFile(simManifest, map[string]string{"${SIM_IMAGE}": simImage})
+	kubectlApplyFile(simManifest, nil)
+	kubectlApplyFile(simDeployManifest, map[string]string{"${SIM_IMAGE}": simImage})
 
 	// Deploy EPP without flow control initially so the cascade test
 	// (which runs first) sees no primary metric.
 	ginkgo.By("Applying EPP manifest (without flow control)")
-	kubectlApplyFile(eppNoFCManifest, map[string]string{"${EPP_IMAGE}": eppImage})
+	kubectlApplyFile(eppManifest, map[string]string{"${EPP_IMAGE}": eppImage})
+	kubectlApplyFile(eppConfigNoFC, nil)
 
 	ginkgo.By("Applying Prometheus manifest")
 	kubectlApplyFile(prometheusManifest, nil)
@@ -349,6 +354,7 @@ func kubectlApplyFileInNamespace(path, namespace string, substitutions map[strin
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred(), "reading manifest %s", path)
 
 	yaml := string(content)
+	yaml = strings.ReplaceAll(yaml, "${NAMESPACE}", nsName)
 	for k, v := range substitutions {
 		yaml = strings.ReplaceAll(yaml, k, v)
 	}
@@ -366,6 +372,8 @@ func kubectlApplyFileInNamespace(path, namespace string, substitutions map[strin
 	gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
 }
 
+// splitImage splits a container image reference into repo and tag.
+// Does not handle digest references (repo@sha256:...).
 func splitImage(image string) (string, string) {
 	if i := strings.LastIndex(image, ":"); i >= 0 {
 		return image[:i], image[i+1:]
@@ -475,10 +483,10 @@ func fetchGAIECRDs() []string {
 	for i, name := range gaieInferencePoolCRDs {
 		resp, err := http.Get(baseURL + "/" + name) //nolint:gosec
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-		defer resp.Body.Close() //nolint:errcheck
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"failed to fetch CRD %s at version %s", name, version)
 		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close() //nolint:errcheck
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Expect(os.WriteFile(paths[i], data, 0644)).To(gomega.Succeed())
 	}
@@ -492,7 +500,13 @@ func projectRoot() string {
 
 // redeployEPPWithFlowControl re-applies the EPP manifest with flow control
 // enabled, restarts the deployment, and waits for the new pod to be ready.
+var redeployEPPOnce sync.Once
+
 func redeployEPPWithFlowControl() {
+	redeployEPPOnce.Do(doRedeployEPPWithFlowControl)
+}
+
+func doRedeployEPPWithFlowControl() {
 	ginkgo.By("Redeploying EPP with flow control enabled")
 	// Delete the existing ConfigMap first so kubectl apply detects the change.
 	// Without this, kubectl apply sometimes reports "unchanged" when only the
@@ -503,7 +517,7 @@ func redeployEPPWithFlowControl() {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 
-	kubectlApplyFile(eppFCManifest, map[string]string{"${EPP_IMAGE}": eppImage})
+	kubectlApplyFile(eppConfigFC, nil)
 
 	// Rollout restart to pick up the new ConfigMap.
 	command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
@@ -567,6 +581,7 @@ func redeployEPPWithFlowControl() {
 		return nil
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
+
 
 const kindClusterConfig = `
 kind: Cluster
