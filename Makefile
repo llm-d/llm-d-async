@@ -177,6 +177,16 @@ test-e2e: ## Run e2e integration tests against a Kind cluster
 		$(if $(FOCUS),-ginkgo.focus="$(FOCUS)",) \
 		$(if $(SKIP),-ginkgo.skip="$(SKIP)",)
 
+.PHONY: test-integration
+test-integration: ## Run integration tests (each test spawns its own mock server)
+	@echo "Running integration tests..."
+	@go test -v -tags=integration $$(go list ./... | grep -v /e2e) || \
+		(echo "❌ Integration tests failed" && exit 1)
+	@echo "✅ Integration tests passed!"
+
+.PHONY: test-all
+test-all: test test-integration ## Run all tests (unit + integration)
+
 .PHONY: check-dco
 check-dco: ## Check that all commits since main have a DCO Signed-off-by trailer
 	@scripts/check-dco.sh

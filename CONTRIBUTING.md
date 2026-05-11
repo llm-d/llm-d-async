@@ -88,6 +88,32 @@ We use three tiers of testing:
 
 Strong e2e coverage is required for deployed systems to prevent performance regression. Appropriate test coverage is an important part of code review.
 
+### Running Tests Locally
+
+```bash
+# Unit tests (default, no external dependencies)
+make test
+
+# Integration tests (each test spawns its own in-process mock server)
+make test-integration
+
+# Both unit and integration tests
+make test-all
+
+# E2E tests (requires docker/podman, kind, helm, kubectl)
+make test-e2e
+```
+
+Integration tests use the `//go:build integration` build tag and live in `test/integration/`. They are excluded from `make test` and only run when the tag is explicitly passed via `make test-integration`. Each test spawns its own mock server (miniredis, `httptest.Server`) — no external services are required.
+
+To add a new integration test, create a `*_test.go` file in `test/integration/` with the build tag:
+
+```go
+//go:build integration
+
+package integration_test
+```
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for our vulnerability disclosure process.

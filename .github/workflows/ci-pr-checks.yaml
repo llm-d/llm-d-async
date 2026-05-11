@@ -58,6 +58,9 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Integration tests
+        run: make test-integration
+
   # Python: lint (only if Python files exist)
   python-lint:
     runs-on: ubuntu-latest
