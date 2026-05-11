@@ -67,7 +67,7 @@ func TestWorkerDispatch_MockIGW(t *testing.T) {
 		HttpHeaders: map[string]string{
 			"Content-Type":                  "application/json",
 			"x-gateway-inference-objective": "latency",
-			"x-custom-header":              "custom-value",
+			"x-custom-header":               "custom-value",
 		},
 		RequestURL: server.URL + "/v1/completions",
 	}

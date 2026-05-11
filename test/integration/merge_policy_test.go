@@ -8,8 +8,8 @@ import (
 	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
-	ap "github.com/llm-d-incubation/llm-d-async/pkg/async"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	ap "github.com/llm-d-incubation/llm-d-async/pkg/async"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
