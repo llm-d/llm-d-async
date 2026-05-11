@@ -255,7 +255,11 @@ func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.
 		case <-ctx.Done():
 			return
 
-		case rmsg := <-ch:
+		case rmsg, ok := <-ch:
+			if !ok {
+				logger.V(logutil.DEFAULT).Info("Redis subscription channel closed, exiting request worker")
+				return
+			}
 			var ir api.InternalRequest
 
 			err := json.Unmarshal([]byte(rmsg.Payload), &ir)
