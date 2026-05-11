@@ -142,7 +142,11 @@ func main() {
 	}
 	restConfig := ctrl.GetConfigOrDie()
 
-	msrv, _ := metricsserver.NewServer(metricsServerOptions, restConfig, http.DefaultClient)
+	msrv, err := metricsserver.NewServer(metricsServerOptions, restConfig, http.DefaultClient)
+	if err != nil {
+		setupLog.Error(err, "Failed to create metrics server")
+		os.Exit(1)
+	}
 	go msrv.Start(ctx) // nolint:errcheck
 
 	tlsConfig, err := buildTLSConfig(tlsCACert, tlsCert, tlsKey, tlsInsecureSkipVerify)
