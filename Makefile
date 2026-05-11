@@ -180,7 +180,7 @@ test-e2e: ## Run e2e integration tests against a Kind cluster
 .PHONY: test-integration
 test-integration: ## Run integration tests (each test spawns its own mock server)
 	@echo "Running integration tests..."
-	@go test -v -tags=integration $$(go list ./... | grep -v /e2e) || \
+	@go test -v -tags=integration ./test/integration/ || \
 		(echo "❌ Integration tests failed" && exit 1)
 	@echo "✅ Integration tests passed!"
 
