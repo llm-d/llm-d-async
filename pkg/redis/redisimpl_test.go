@@ -525,3 +525,50 @@ func TestPopDueRetryMessages_ConcurrentCallers_NoDuplicatePops(t *testing.T) {
 		t.Fatalf("expected queue to be empty after concurrent pops, got %d", remaining)
 	}
 }
+
+func TestRequestWorker_ReconnectsAfterChannelClose(t *testing.T) {
+	s := miniredis.RunT(t)
+	addr := s.Addr()
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	queueName := "reconnect-test-queue"
+	msgChannel := make(chan *api.InternalRequest, 10)
+
+	go requestWorker(ctx, rdb, msgChannel, queueName)
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Restart miniredis on the same address to force subscription channel close and reconnect
+	s.Close()
+	s2 := miniredis.NewMiniRedis()
+	if err := s2.StartAddr(addr); err != nil {
+		t.Fatalf("failed to restart miniredis on same addr: %v", err)
+	}
+	defer s2.Close()
+
+	// Wait for reconnectDelay (10s) + subscribe time
+	time.Sleep(reconnectDelay + time.Second)
+
+	now := time.Now().Unix()
+	ir := api.NewInternalRequest(
+		api.InternalRouting{},
+		&api.RequestMessage{ID: "after-reconnect", Created: now, Deadline: now + 3600},
+	)
+	bytes, _ := json.Marshal(ir)
+	rdb2 := redis.NewClient(&redis.Options{Addr: addr})
+	defer rdb2.Close() // nolint:errcheck
+	rdb2.Publish(ctx, queueName, string(bytes))
+
+	select {
+	case msg := <-msgChannel:
+		if msg.PublicRequest == nil || msg.PublicRequest.ReqID() != "after-reconnect" {
+			t.Fatalf("expected after-reconnect, got %v", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: requestWorker did not recover after reconnect")
+	}
+}

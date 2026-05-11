@@ -243,8 +243,31 @@ func marshalResultMessage(msg api.ResultMessage) string {
 	return string(fallbackBytes)
 }
 
-// pulls from Redis channel and put in the request channel
+// pulls from Redis channel and put in the request channel.
+const (
+	reconnectDelay = 10 * time.Second
+)
+
+// Automatically reconnects when the subscription channel closes.
 func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string) {
+	logger := log.FromContext(ctx)
+	for ctx.Err() == nil {
+		shouldReconnect := consumeSubscription(ctx, rdb, msgChannel, queueName)
+		if ctx.Err() != nil {
+			return
+		}
+		if shouldReconnect {
+			logger.V(logutil.DEFAULT).Info("Redis subscription interrupted, reconnecting", "delay", reconnectDelay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(reconnectDelay):
+			}
+		}
+	}
+}
+
+func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string) bool {
 	logger := log.FromContext(ctx)
 	sub := rdb.Subscribe(ctx, queueName)
 	defer sub.Close() // nolint:errcheck
@@ -253,15 +276,12 @@ func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.
 	for {
 		select {
 		case <-ctx.Done():
-			return
-
+			return false
 		case rmsg, ok := <-ch:
 			if !ok {
-				logger.V(logutil.DEFAULT).Info("Redis subscription channel closed, exiting request worker")
-				return
+				return true
 			}
 			var ir api.InternalRequest
-
 			err := json.Unmarshal([]byte(rmsg.Payload), &ir)
 			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to unmarshal message from request channel")
@@ -274,7 +294,6 @@ func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.
 			msgChannel <- &ir
 		}
 	}
-
 }
 
 func (r *RedisMQFlow) Characteristics() pipeline.Characteristics {
