@@ -148,13 +148,15 @@ func NewRedisMQFlow() (*RedisMQFlow, error) {
 	var channels []RequestChannelData
 
 	for _, cfg := range configs {
-		ch := make(chan *api.InternalRequest)
+		ch := make(chan *pipeline.EmbelishedRequestMessage)
 
 		channels = append(channels, RequestChannelData{pipeline.RequestChannel{
 			Channel:            ch,
 			InferenceObjective: cfg.InferenceObjective,
 			RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
 			IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
+			PoolID:             cfg.QueueName,
+			Labels:             pipeline.Labels{"pool": cfg.QueueName},
 		}, cfg.QueueName})
 	}
 	return &RedisMQFlow{
@@ -168,7 +170,7 @@ func NewRedisMQFlow() (*RedisMQFlow, error) {
 func (r *RedisMQFlow) Start(ctx context.Context) {
 
 	for _, channelData := range r.requestChannels {
-		go requestWorker(ctx, r.rdb, channelData.requestChannel.Channel, channelData.queueName)
+		go requestWorker(ctx, r.rdb, channelData.requestChannel.Channel, channelData.queueName, channelData.requestChannel)
 	}
 
 	go addMsgToRetryWorker(ctx, r.rdb, r.retryChannel, *retryQueueName)
@@ -249,10 +251,10 @@ const (
 )
 
 // Automatically reconnects when the subscription channel closes.
-func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string) {
+func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *pipeline.EmbelishedRequestMessage, queueName string, requestChannel pipeline.RequestChannel) {
 	logger := log.FromContext(ctx)
 	for ctx.Err() == nil {
-		shouldReconnect := consumeSubscription(ctx, rdb, msgChannel, queueName)
+		shouldReconnect := consumeSubscription(ctx, rdb, msgChannel, queueName, requestChannel)
 		if ctx.Err() != nil {
 			return
 		}
@@ -267,7 +269,7 @@ func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.
 	}
 }
 
-func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string) bool {
+func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan *pipeline.EmbelishedRequestMessage, queueName string, requestChannel pipeline.RequestChannel) bool {
 	logger := log.FromContext(ctx)
 	sub := rdb.Subscribe(ctx, queueName)
 	defer sub.Close() // nolint:errcheck
@@ -291,7 +293,25 @@ func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan
 				continue
 			}
 			ir.RequestQueueName = queueName
-			msgChannel <- &ir
+			ir.Labels = requestChannel.Labels.Clone()
+
+			// Build the fully-embellished message
+			requestURL := requestChannel.IGWBaseURL + requestChannel.RequestPathURL
+			if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
+				requestURL = requestChannel.IGWBaseURL + ep
+			}
+			headers := map[string]string{"Content-Type": "application/json"}
+			if requestChannel.InferenceObjective != "" {
+				headers["x-gateway-inference-objective"] = requestChannel.InferenceObjective
+			}
+			emb := &pipeline.EmbelishedRequestMessage{
+				InternalRequest: &ir,
+				HttpHeaders:     headers,
+				RequestURL:      requestURL,
+				Labels:          pipeline.Labels(ir.Labels),
+				PoolID:          requestChannel.PoolID,
+			}
+			msgChannel <- emb
 		}
 	}
 }
@@ -301,6 +321,18 @@ func (r *RedisMQFlow) Characteristics() pipeline.Characteristics {
 		HasExternalBackoff:     false,
 		SupportsMessageLatency: false,
 	}
+}
+
+// Pools synthesizes one pool per queue, preserving the pre-pool-topology behavior.
+func (r *RedisMQFlow) Pools() []pipeline.Pool {
+	out := make([]pipeline.Pool, 0, len(r.requestChannels))
+	for _, cd := range r.requestChannels {
+		out = append(out, pipeline.Pool{
+			ID:         cd.queueName,
+			GatewayURL: cd.requestChannel.IGWBaseURL,
+		})
+	}
+	return out
 }
 
 // Puts msgs from the retry channel into a Redis sorted-set with a duration Score.
@@ -339,7 +371,7 @@ func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel ch
 func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 	logger := log.FromContext(ctx)
 	// create a map of queuename to channel based on requestchannels
-	msgChannels := make(map[string]chan *api.InternalRequest)
+	msgChannels := make(map[string]chan *pipeline.EmbelishedRequestMessage)
 	for _, channelData := range r.requestChannels {
 		msgChannels[channelData.queueName] = channelData.requestChannel.Channel
 	}
@@ -381,8 +413,33 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 						continue
 					}
 
+					// Find the requestChannel for this queue to build emb
+					var requestChannel pipeline.RequestChannel
+					for _, cd := range r.requestChannels {
+						if cd.queueName == queueName {
+							requestChannel = cd.requestChannel
+							break
+						}
+					}
+					message.Labels = requestChannel.Labels.Clone()
+					retryURL := requestChannel.IGWBaseURL + requestChannel.RequestPathURL
+					if ep := message.PublicRequest.ReqEndpoint(); ep != "" {
+						retryURL = requestChannel.IGWBaseURL + ep
+					}
+					retryHeaders := map[string]string{"Content-Type": "application/json"}
+					if requestChannel.InferenceObjective != "" {
+						retryHeaders["x-gateway-inference-objective"] = requestChannel.InferenceObjective
+					}
+					emb := &pipeline.EmbelishedRequestMessage{
+						InternalRequest: &message,
+						HttpHeaders:     retryHeaders,
+						RequestURL:      retryURL,
+						Labels:          pipeline.Labels(message.Labels),
+						PoolID:          requestChannel.PoolID,
+					}
+
 					select {
-					case msgChannel <- &message:
+					case msgChannel <- emb:
 					case <-ctx.Done():
 						r.requeueRetryMessages(rdb, results[i:])
 						return

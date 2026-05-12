@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -29,35 +27,24 @@ var (
 	ssQueuesConfigFile   = flag.String("redis.ss.queues-config-file", "", "Multiple queues config file")
 	ssPollIntervalMs     = flag.Int("redis.ss.poll-interval-ms", 1000, "Poll interval in milliseconds")
 	ssBatchSize          = flag.Int("redis.ss.batch-size", 10, "Number of messages to process per poll")
-	ssGateType           = flag.String("redis.ss.gate-type", "", "Gate type for single-queue mode (e.g. redis, prometheus-saturation, prometheus-budget)")
-	ssGateParamsJSON     = flag.String("redis.ss.gate-params", "{}", "JSON-encoded gate params map for single-queue mode")
 )
-
-// parseGateParams parses a JSON-encoded string (from --redis.ss.gate-params)
-// into a map[string]string for gate parameter configuration.
-// Used to pass gate parameters from CLI or YAML to the gate factory.
-func parseGateParams(s string) map[string]string {
-	m := map[string]string{}
-	if s == "" || s == "{}" {
-		return m
-	}
-	_ = json.Unmarshal([]byte(s), &m)
-	return m
-}
 
 type queueConfig struct {
 	QueueName          string            `json:"queue_name"`
 	InferenceObjective string            `json:"inference_objective"`
 	RequestPathURL     string            `json:"request_path_url"`
 	IGWBaseURL         string            `json:"igw_base_url"`
-	GateType           string            `json:"gate_type"`
-	GateParams         map[string]string `json:"gate_params,omitempty"`
+	HTTPHeaders        map[string]string `json:"http_headers,omitempty"`
+	ModelNameOverride  string            `json:"model_name_override,omitempty"`
+	// Labels is the queue's static label set. The redis sortedset Flow
+	// doesn't model pools natively, so each queue is its own singleton
+	// pool — the queue name is auto-injected as labels["pool"].
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type requestChannelData struct {
 	channel   pipeline.RequestChannel
 	queueName string
-	gate      pipeline.DispatchGate
 }
 
 var _ pipeline.Flow = (*RedisSortedSetFlow)(nil)
@@ -69,16 +56,15 @@ type RedisSortedSetFlow struct {
 	resultChannel   chan api.ResultMessage
 	pollInterval    time.Duration
 	batchSize       int
-	activeReleases  sync.Map
-	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 }
 
-// SortedSetOption is a functional option for configuring RedisSortedSetFlow
+// SortedSetOption is a functional option for configuring RedisSortedSetFlow.
 type SortedSetOption func(*RedisSortedSetFlow)
 
-// WithGateFactory sets a GateFactory for per-queue gate instantiation.
-// When set, gates are created per queue from config, overriding any global gate.
+// WithGateFactory sets a GateFactory for subscription/pool gate
+// instantiation. Currently retained for forward compatibility; the
+// sortedset flow does not yet wire subscription or pool gate chains.
 func WithGateFactory(factory pipeline.GateFactory) SortedSetOption {
 	return func(r *RedisSortedSetFlow) {
 		r.gateFactory = factory
@@ -108,35 +94,35 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 	}
 
 	for _, cfg := range configs {
-		var gate pipeline.DispatchGate
-		if r.gateFactory != nil && cfg.GateType != "" {
-			gate, err = r.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create gate for queue %q (gate_type=%q): %w", cfg.QueueName, cfg.GateType, err)
-			}
-		} else if r.gate != nil {
-			gate = r.gate
-		} else {
-			gate = pipeline.ConstOpenGate()
+		headers, err := util.ExpandEnvMapValues(cfg.HTTPHeaders)
+		if err != nil {
+			panic(fmt.Sprintf("failed to expand http_headers for queue %q: %v", cfg.QueueName, err))
+		}
+
+		// Build effective static labels: auto-injected pool ID (the
+		// queue name, since the sortedset flow models each queue as
+		// its own singleton pool) layered under the queue's
+		// declared labels.
+		channelLabels := pipeline.Labels{"pool": cfg.QueueName}
+		for k, v := range cfg.Labels {
+			channelLabels[k] = v
 		}
 
 		ch := pipeline.RequestChannel{
-			Channel:            make(chan *api.InternalRequest),
+			Channel:            make(chan *pipeline.EmbelishedRequestMessage),
 			InferenceObjective: cfg.InferenceObjective,
 			RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
 			IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
-			Gate:               gate,
+			HTTPHeaders:        headers,
+			ModelNameOverride:  cfg.ModelNameOverride,
+			Labels:             channelLabels,
+			PoolID:             cfg.QueueName,
 		}
 
 		r.requestChannels = append(r.requestChannels, requestChannelData{
 			channel:   ch,
 			queueName: cfg.QueueName,
-			gate:      gate,
 		})
-	}
-
-	if r.gate == nil {
-		r.gate = pipeline.ConstOpenGate()
 	}
 
 	return r, nil
@@ -159,8 +145,6 @@ func loadQueueConfigs() ([]queueConfig, error) {
 		InferenceObjective: *ssInferenceObjective,
 		RequestPathURL:     *ssRequestPathURL,
 		IGWBaseURL:         *ssIGWBaseURL,
-		GateType:           *ssGateType,
-		GateParams:         parseGateParams(*ssGateParamsJSON),
 	}}, nil
 }
 
@@ -168,8 +152,8 @@ func (r *RedisSortedSetFlow) Start(ctx context.Context) {
 	for _, ch := range r.requestChannels {
 		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName)
 	}
-	go r.retryWorker(ctx)  // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
-	go r.resultWorker(ctx) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+	go r.retryWorker(ctx)
+	go r.resultWorker(ctx)
 }
 
 func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {
@@ -178,6 +162,21 @@ func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {
 		channels[i] = ch.channel
 	}
 	return channels
+}
+
+// Pools synthesizes one pool per queue. The Redis sortedset flow
+// doesn't model pools natively, so each queue is its own singleton
+// pool — preserves existing single-channel behavior under the new
+// per-pool topology.
+func (r *RedisSortedSetFlow) Pools() []pipeline.Pool {
+	out := make([]pipeline.Pool, 0, len(r.requestChannels))
+	for _, cd := range r.requestChannels {
+		out = append(out, pipeline.Pool{
+			ID:         cd.queueName,
+			GatewayURL: cd.channel.IGWBaseURL,
+		})
+	}
+	return out
 }
 
 func (r *RedisSortedSetFlow) RetryChannel() chan pipeline.RetryMessage {
@@ -193,21 +192,17 @@ func (r *RedisSortedSetFlow) Characteristics() pipeline.Characteristics {
 }
 
 // Polls sorted set and processes messages by deadline priority (earliest first)
-func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string) {
+func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan *pipeline.EmbelishedRequestMessage, queueName string) {
 	logger := log.FromContext(ctx)
 	ticker := time.NewTicker(r.pollInterval)
 	defer ticker.Stop()
 
-	// Find the gate for this queue
-	var gate pipeline.DispatchGate
+	var requestChannel pipeline.RequestChannel
 	for _, ch := range r.requestChannels {
 		if ch.queueName == queueName {
-			gate = ch.gate
+			requestChannel = ch.channel
 			break
 		}
-	}
-	if gate == nil {
-		gate = r.gate
 	}
 
 	for {
@@ -215,18 +210,15 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.processMessages(ctx, msgChannel, queueName, gate, logger)
+			r.processMessages(ctx, msgChannel, queueName, requestChannel, logger)
 		}
 	}
 }
 
-func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, gate pipeline.DispatchGate, logger logr.Logger) {
+func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *pipeline.EmbelishedRequestMessage, queueName string, requestChannel pipeline.RequestChannel, logger logr.Logger) {
 	currentTime := float64(time.Now().Unix())
 
-	budget := gate.Budget(ctx)
-	batchSize := int(math.Floor(float64(r.batchSize) * budget))
-
-	for i := 0; i < batchSize; i++ {
+	for i := 0; i < r.batchSize; i++ {
 		results, err := r.rdb.ZPopMin(ctx, queueName, 1).Result()
 		if err == redis.Nil || len(results) == 0 {
 			break
@@ -255,37 +247,38 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		if ir.RequestQueueName == "" {
 			ir.RequestQueueName = queueName
 		}
+		// channelLabels is the operator-defined static label set
+		// (auto-injected pool=queue_name + queue's declared labels),
+		// already merged at startup. Producer-controlled per-message
+		// data rides on body.Metadata, not Labels.
+		ir.Labels = requestChannel.Labels.Clone()
 
-		// Per-attribute gating
-		var release func()
-		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			allowed, rel, err := attrGate.Acquire(ctx, rview.ReqMetadata())
-			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to acquire attribute quota")
-				// Re-enqueue the message if acquisition fails
-				member, _ := json.Marshal(ir)
-				r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
-				continue
-			}
-			if !allowed {
-				// Re-enqueue the message (wait for quota)
-				member, _ := json.Marshal(ir)
-				r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
-				continue
-			}
-			release = rel
-		} else {
-			release = func() {}
+		// Build the fully-embellished message so the merge policy and
+		// worker receive it with all HTTP dispatch fields set.
+		requestURL := requestChannel.IGWBaseURL + requestChannel.RequestPathURL
+		if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
+			requestURL = requestChannel.IGWBaseURL + ep
 		}
-
-		if release != nil {
-			r.activeReleases.Store(rview.ReqID(), release)
+		headers := map[string]string{"Content-Type": "application/json"}
+		if requestChannel.InferenceObjective != "" {
+			headers["x-gateway-inference-objective"] = requestChannel.InferenceObjective
+		}
+		for k, v := range requestChannel.HTTPHeaders {
+			headers[k] = v
+		}
+		emb := &pipeline.EmbelishedRequestMessage{
+			InternalRequest:   ir,
+			HttpHeaders:       headers,
+			RequestURL:        requestURL,
+			Gate:              requestChannel.Gate,
+			ModelNameOverride: requestChannel.ModelNameOverride,
+			Labels:            pipeline.Labels(ir.Labels),
+			PoolID:            requestChannel.PoolID,
 		}
 
 		select {
-		case msgChannel <- ir:
+		case msgChannel <- emb:
 		case <-ctx.Done():
-			r.activeReleases.Delete(rview.ReqID())
 			if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
 				return r.rdb.ZAdd(ctx, queueName, redis.Z{
 					Score:  results[0].Score,
@@ -293,9 +286,6 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 				}).Err()
 			}); err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to re-queue message on shutdown", "id", rview.ReqID())
-			}
-			if release != nil {
-				release()
 			}
 			return
 		}
@@ -397,12 +387,6 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 	processMsg := func(flushCtx context.Context, msg api.ResultMessage) {
 		batch := drainBatch(msg, r.resultChannel, maxBatchSize)
-		// Release quota for all messages in the batch
-		for _, m := range batch {
-			if rel, ok := r.activeReleases.LoadAndDelete(m.ID); ok {
-				rel.(func())()
-			}
-		}
 		r.flushResultBatch(flushCtx, batch)
 	}
 

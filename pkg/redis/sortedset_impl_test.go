@@ -3,10 +3,8 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,11 +13,6 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/redis/go-redis/v9"
 )
-
-// noopGate returns a gate that always returns full budget (1.0)
-func noopGate() pipeline.DispatchGate {
-	return pipeline.ConstOpenGate()
-}
 
 // Test helper to create test flow and Redis
 func setupTest(t *testing.T) (*miniredis.Miniredis, *redis.Client, context.Context, context.CancelFunc) {
@@ -43,15 +36,15 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 	defer cancel()
 
 	queue := "test-queue"
+	ch := make(chan *pipeline.EmbelishedRequestMessage)
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			channel:   pipeline.RequestChannel{Channel: ch},
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	// Add message with valid deadline
@@ -63,10 +56,10 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, ch, queue)
 
 	select {
-	case received := <-flow.requestChannels[0].channel.Channel:
+	case received := <-ch:
 		if received.PublicRequest == nil || received.PublicRequest.ReqID() != "msg-1" {
 			t.Errorf("Expected msg-1, got %v", received.PublicRequest)
 		}
@@ -94,7 +87,6 @@ func TestSortedSetFlow_DeadlineOrdering(t *testing.T) {
 		rdb:          rdb,
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	now := time.Now().Unix()
@@ -112,7 +104,7 @@ func TestSortedSetFlow_DeadlineOrdering(t *testing.T) {
 		rdb.ZAdd(ctx, queue, redis.Z{Score: float64(m.deadline), Member: envelopeJSON(msg)})
 	}
 
-	msgChannel := make(chan *api.InternalRequest, 10)
+	msgChannel := make(chan *pipeline.EmbelishedRequestMessage, 10)
 	go flow.requestWorker(ctx, msgChannel, queue)
 
 	var processed []string
@@ -140,25 +132,25 @@ func TestSortedSetFlow_ExpiredMessages(t *testing.T) {
 	defer cancel()
 
 	queue := "expired-queue"
+	ch := make(chan *pipeline.EmbelishedRequestMessage)
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			channel:   pipeline.RequestChannel{Channel: ch},
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	pastDeadline := time.Now().Unix() - 100
 	msg := api.RequestMessage{ID: "expired", Created: time.Now().Unix(), Deadline: pastDeadline}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(pastDeadline), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, ch, queue)
 
 	select {
-	case msg := <-flow.requestChannels[0].channel.Channel:
+	case msg := <-ch:
 		t.Fatalf("Should not receive expired message: %s", msg.PublicRequest.ReqID())
 	case <-time.After(300 * time.Millisecond):
 		// Expected - message expired
@@ -177,15 +169,15 @@ func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 	defer cancel()
 
 	queue := "malformed-queue"
+	ch := make(chan *pipeline.EmbelishedRequestMessage)
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
-			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			channel:   pipeline.RequestChannel{Channel: ch},
 			queueName: queue,
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	testCases := []struct {
@@ -205,11 +197,11 @@ func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 	validMsg := api.RequestMessage{ID: "valid", Created: time.Now().Unix(), Deadline: 9999999999}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(validMsg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, ch, queue)
 
 	// Should skip malformed and receive valid message
 	select {
-	case msg := <-flow.requestChannels[0].channel.Channel:
+	case msg := <-ch:
 		if msg.PublicRequest == nil || msg.PublicRequest.ReqID() != "valid" {
 			t.Errorf("Expected valid message, got %v", msg.PublicRequest)
 		}
@@ -230,7 +222,6 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 		retryChannel: make(chan pipeline.RetryMessage, 1),
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	go flow.retryWorker(ctx)
@@ -279,7 +270,6 @@ func TestSortedSetFlow_ResultFIFO(t *testing.T) {
 		resultChannel: make(chan api.ResultMessage, 2),
 		pollInterval:  50 * time.Millisecond,
 		batchSize:     10,
-		gate:          noopGate(),
 	}
 
 	go flow.resultWorker(ctx)
@@ -317,7 +307,6 @@ func TestSortedSetFlow_ResultBatch(t *testing.T) {
 		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
 		pollInterval:  50 * time.Millisecond,
 		batchSize:     10,
-		gate:          noopGate(),
 	}
 
 	// Pre-fill the channel before starting the worker so all messages
@@ -371,7 +360,6 @@ func TestSortedSetFlow_ResultBatchMultiQueue(t *testing.T) {
 		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
 		pollInterval:  50 * time.Millisecond,
 		batchSize:     10,
-		gate:          noopGate(),
 	}
 
 	// Send messages targeting different queues in a single batch.
@@ -423,8 +411,8 @@ func TestSortedSetFlow_NoRaceCondition(t *testing.T) {
 
 	for w := 0; w < 3; w++ {
 		wg.Add(1)
-		flow := &RedisSortedSetFlow{rdb: rdb, pollInterval: 20 * time.Millisecond, batchSize: 10, gate: noopGate()}
-		msgChan := make(chan *api.InternalRequest, 10)
+		flow := &RedisSortedSetFlow{rdb: rdb, pollInterval: 20 * time.Millisecond, batchSize: 10}
+		msgChan := make(chan *pipeline.EmbelishedRequestMessage, 10)
 
 		go func() {
 			defer wg.Done()
@@ -473,11 +461,10 @@ func TestSortedSetFlow_ContextCancellation(t *testing.T) {
 		resultChannel: make(chan api.ResultMessage),
 		pollInterval:  50 * time.Millisecond,
 		batchSize:     10,
-		gate:          noopGate(),
 	}
 
 	workerCtx, cancel := context.WithCancel(ctx)
-	msgChan := make(chan *api.InternalRequest)
+	msgChan := make(chan *pipeline.EmbelishedRequestMessage)
 
 	done := make(chan bool)
 	go func() {
@@ -535,72 +522,6 @@ func TestSortedSetFlow_Integration(t *testing.T) {
 	}
 }
 
-func TestSortedSetFlow_ZeroBudget(t *testing.T) {
-	s, rdb, ctx, cancel := setupTest(t)
-	defer s.Close()
-	defer rdb.Close() // nolint:errcheck
-	defer cancel()
-
-	queue := "zero-budget-queue"
-
-	// Create a gate with zero budget initially
-	var budgetValue atomic.Uint64 // Store as bits to represent float64
-
-	budgetValue.Store(math.Float64bits(0.0))
-	gate := pipeline.DispatchGateFunc(func(ctx context.Context) float64 {
-		return math.Float64frombits(budgetValue.Load())
-	})
-
-	flow := &RedisSortedSetFlow{
-		rdb: rdb,
-		requestChannels: []requestChannelData{{
-			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
-			queueName: queue,
-		}},
-		pollInterval: 50 * time.Millisecond,
-		batchSize:    10,
-		gate:         gate,
-	}
-
-	// Add message with valid deadline
-	msg := api.RequestMessage{
-		ID:       "test-zero-budget",
-		Created:  time.Now().Unix(),
-		Deadline: 9999999999,
-		Payload:  map[string]any{"test": "data"},
-	}
-	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
-
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
-
-	// Wait for several poll cycles - message should NOT be pulled (budget=0)
-	select {
-	case <-flow.requestChannels[0].channel.Channel:
-		t.Fatal("Should not receive message when budget is 0")
-	case <-time.After(200 * time.Millisecond):
-		// Expected - no message pulled
-	}
-
-	// Message should still be in Redis
-	count, _ := rdb.ZCard(ctx, queue).Result()
-	if count != 1 {
-		t.Errorf("Expected message to remain in Redis with budget=0, got count=%d", count)
-	}
-
-	// Increase budget to full capacity
-	budgetValue.Store(math.Float64bits(1.0))
-
-	// Message should now be pulled
-	select {
-	case received := <-flow.requestChannels[0].channel.Channel:
-		if received.PublicRequest == nil || received.PublicRequest.ReqID() != "test-zero-budget" {
-			t.Errorf("Expected test-zero-budget, got %v", received.PublicRequest)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Message should be pulled after budget increased")
-	}
-}
-
 func TestSortedSetFlow_ResultRetryAfterFailure(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()
@@ -617,7 +538,6 @@ func TestSortedSetFlow_ResultRetryAfterFailure(t *testing.T) {
 		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
 		pollInterval:  50 * time.Millisecond,
 		batchSize:     10,
-		gate:          noopGate(),
 	}
 
 	// Inject an error so the first Exec fails.
@@ -648,10 +568,10 @@ func TestSortedSetFlow_ResultRetryAfterFailure(t *testing.T) {
 	}
 
 	raw, _ := rdb.RPop(ctx, queue).Result()
-	var msg api.ResultMessage
-	json.Unmarshal([]byte(raw), &msg) // nolint:errcheck
-	if msg.ID != "retry-msg" {
-		t.Errorf("Expected retry-msg, got %s", msg.ID)
+	var resultMsg api.ResultMessage
+	json.Unmarshal([]byte(raw), &resultMsg) // nolint:errcheck
+	if resultMsg.ID != "retry-msg" {
+		t.Errorf("Expected retry-msg, got %s", resultMsg.ID)
 	}
 }
 
@@ -668,7 +588,6 @@ func TestSortedSetFlow_RetryWorkerDrainsOnShutdown(t *testing.T) {
 		retryChannel: make(chan pipeline.RetryMessage, totalMessages),
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
@@ -724,7 +643,6 @@ func TestSortedSetFlow_RetryBatchAfterFailure(t *testing.T) {
 		retryChannel: make(chan pipeline.RetryMessage, 10),
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	// Inject an error so the first pipeline flush fails.
@@ -762,53 +680,6 @@ func TestSortedSetFlow_RetryBatchAfterFailure(t *testing.T) {
 	t.Fatal("Expected retry message to be enqueued after transient Redis failure")
 }
 
-func TestSortedSetFlow_PartialBudget(t *testing.T) {
-	s, rdb, ctx, cancel := setupTest(t)
-	defer s.Close()
-	defer rdb.Close() // nolint:errcheck
-	defer cancel()
-
-	queue := "partial-budget-queue"
-
-	// Gate with 30% budget - should process floor(10*0.3)=3 messages per cycle
-	gate := pipeline.DispatchGateFunc(func(ctx context.Context) float64 {
-		return 0.3
-	})
-
-	flow := &RedisSortedSetFlow{
-		rdb: rdb,
-		requestChannels: []requestChannelData{{
-			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 20)},
-			queueName: queue,
-		}},
-		pollInterval: 200 * time.Millisecond,
-		batchSize:    10,
-		gate:         gate,
-	}
-
-	// Add 10 messages
-	for i := 0; i < 10; i++ {
-		msg := api.RequestMessage{
-			ID:       "msg-" + strconv.Itoa(i),
-			Created:  time.Now().Unix(),
-			Deadline: 9999999999,
-		}
-		rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix() + int64(i)), Member: envelopeJSON(msg)})
-	}
-
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
-
-	// Wait for one poll cycle (200ms interval + buffer)
-	time.Sleep(250 * time.Millisecond)
-
-	// With 30% budget and batchSize=10, floor(10*0.3)=3 messages should be processed per cycle
-	// After one cycle, 7 messages should remain
-	remaining, _ := rdb.ZCard(ctx, queue).Result()
-	if remaining != 7 {
-		t.Errorf("Expected 7 messages remaining with 30%% budget (3 pulled), got %d remaining", remaining)
-	}
-}
-
 func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()
@@ -818,19 +689,16 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	queue := "requeue-shutdown-queue"
 	// Unbuffered channel with no reader: the worker's channel send will block
 	// indefinitely, so ctx.Done() is the only way to unblock the select.
-	// This guarantees the re-queue path is exercised deterministically.
-	msgChan := make(chan *api.InternalRequest)
+	msgChan := make(chan *pipeline.EmbelishedRequestMessage)
 
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
 			channel:   pipeline.RequestChannel{Channel: msgChan},
 			queueName: queue,
-			gate:      noopGate(),
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
-		gate:         noopGate(),
 	}
 
 	ir := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{

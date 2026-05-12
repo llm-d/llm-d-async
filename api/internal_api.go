@@ -17,6 +17,13 @@ type InternalRouting struct {
 	RequestQueueName       string `json:"request_queue_name,omitempty"`
 	ResultQueueName        string `json:"result_queue_name,omitempty"`
 	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
+	// Labels is the framework's per-message label set. Seeded by the
+	// Flow at pull time from the originating channel's effective
+	// static label set (auto-injected pool ID + pool.Labels +
+	// subscription.Labels, merged at startup). Gates and the merge
+	// policy read and mutate this map in place. Producer-controlled
+	// per-message correlation data rides on body.Metadata, not Labels.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // InternalRequest is the internal envelope: routing data plus a concrete Request.

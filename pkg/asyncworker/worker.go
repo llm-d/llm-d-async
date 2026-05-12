@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
 	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
@@ -19,6 +20,8 @@ import (
 const (
 	baseDelaySeconds = 2
 	maxDelaySeconds  = 60
+
+	maxErrorResponseBodyBytes = 4096
 )
 
 func Worker(ctx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
@@ -31,74 +34,126 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 			logger.V(logutil.DEFAULT).Info("Worker finishing.")
 			return
 		case msg := <-requestChannel:
-			if msg.InternalRequest == nil || msg.PublicRequest == nil {
-				continue
-			}
-			if msg.RetryCount == 0 {
-				// Only count first attempt as a new request.
-				metrics.AsyncReqs.Inc()
-			}
-			payloadBytes := validateAndMarshal(ctx, resultChannel, msg)
-			if payloadBytes == nil {
-				continue
-			}
+			func() {
+				// Fire any Releases accumulated on the message (by gates
+				// upstream or by the merge policy) on any terminal path
+				// out of this message's processing — success, fatal error,
+				// retry, validation failure, or ctx cancellation.
+				defer msg.FireReleases()
 
-			// Using a function object for easy boundaries for 'return' and 'defer'!
-			sendInferenceRequest := func() {
-				// Create a per-request context bounded by both the message deadline
-				// and the configured request timeout, whichever comes first.
-				reqDeadline := time.Now().Add(requestTimeout)
-				if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
-					if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
-						reqDeadline = msgDeadline
-					}
+				if msg.InternalRequest == nil || msg.PublicRequest == nil {
+					return
 				}
-				reqCtx, cancel := context.WithDeadline(ctx, reqDeadline)
-				defer cancel()
-
-				logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
-				responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
-
-				if err == nil {
-					// Success - got a valid response
-					metrics.SuccessfulReqs.Inc()
-					select {
-					case resultChannel <- asyncapi.ResultMessage{
-						ID:       msg.PublicRequest.ReqID(),
-						Payload:  string(responseBody),
-						Routing:  msg.InternalRouting,
-						Metadata: msg.PublicRequest.ReqMetadata(),
-					}:
-					case <-ctx.Done():
-					}
+				if msg.RetryCount == 0 {
+					// Only count first attempt as a new request.
+					metrics.AsyncReqs.Inc()
+				}
+				payloadBytes := validateAndMarshal(ctx, resultChannel, msg)
+				if payloadBytes == nil {
 					return
 				}
 
-				// Check if error implements InferenceError
-				var inferenceErr asyncapi.InferenceError
-				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
-					// Unknown error type or fatal error - fail immediately
-					metrics.FailedReqs.Inc()
-					select {
-					case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
-					case <-ctx.Done():
+				// Run the per-subscription DispatchGate.Budget at the worker.
+				// Legacy path: gates that implement the DispatchGate interface
+				// use the Budget/Acquire pattern.
+				if msg.Gate != nil {
+					if attrGate, ok := msg.Gate.(pipeline.AttributeGate); ok {
+						var metadata map[string]string
+						if msg.PublicRequest != nil {
+							metadata = msg.PublicRequest.ReqMetadata()
+						}
+						allowed, release, err := attrGate.Acquire(ctx, metadata)
+						if err != nil {
+							retryMessageWithReason(ctx, msg, retryChannel, resultChannel, time.Second, "gate_error")
+							return
+						}
+						if !allowed {
+							retryMessageWithReason(ctx, msg, retryChannel, resultChannel, 30*time.Second, "gate_refused")
+							return
+						}
+						if release != nil {
+							msg.AttachRelease(release)
+						}
 					}
-					return
 				}
 
-				// Retryable error - check if it's due to rate limiting
-				if inferenceErr.Category().Sheddable() {
-					metrics.SheddedRequests.Inc()
+				// Using a function object for easy boundaries for 'return' and 'defer'!
+				sendInferenceRequest := func() {
+					// Create a per-request context bounded by both the message deadline
+					// and the configured request timeout, whichever comes first.
+					reqDeadline := time.Now().Add(requestTimeout)
+					if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
+						if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
+							reqDeadline = msgDeadline
+						}
+					}
+					reqCtx, cancel := context.WithDeadline(ctx, reqDeadline)
+					defer cancel()
+
+					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
+					responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
+
+					if err == nil {
+						// Success - got a valid response
+						metrics.SuccessfulReqs.Inc()
+						select {
+						case resultChannel <- asyncapi.ResultMessage{
+							ID:       msg.PublicRequest.ReqID(),
+							Payload:  string(responseBody),
+							Routing:  msg.InternalRouting,
+							Metadata: msg.PublicRequest.ReqMetadata(),
+							Labels:   msg.Labels,
+						}:
+						case <-ctx.Done():
+						}
+						return
+					}
+
+					// Check if error implements InferenceError
+					var inferenceErr asyncapi.InferenceError
+					errorCategory := asyncapi.ErrCategoryUnknown
+					isInferenceErr := errors.As(err, &inferenceErr)
+					if isInferenceErr {
+						errorCategory = inferenceErr.Category()
+					}
+					if !isInferenceErr || errorCategory.Fatal() {
+						// Unknown error type or fatal error - fail immediately
+						logger.V(logutil.DEFAULT).Error(err, "Inference request failed",
+							"id", msg.PublicRequest.ReqID(),
+							"category", string(errorCategory),
+							"retryCount", msg.RetryCount)
+						metrics.FailedReqs.Inc()
+						select {
+						case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, inferenceErrorMessage(err, responseBody)):
+						case <-ctx.Done():
+						}
+						return
+					}
+
+					// Retryable error - check if it's due to rate limiting
+					retryReason := ""
+					if inferenceErr.Category().Sheddable() {
+						metrics.SheddedRequests.Inc()
+						retryReason = "rate_limit_429"
+					}
+					// Pass server-specified Retry-After duration if available.
+					var retryAfter time.Duration
+					var clientErr *asyncapi.ClientError
+					if errors.As(err, &clientErr) {
+						retryAfter = clientErr.RetryAfter
+					}
+					if !errorCategory.Sheddable() {
+						logger.V(logutil.DEFAULT).Info("Inference request will retry",
+							"id", msg.PublicRequest.ReqID(),
+							"category", string(errorCategory),
+							"retryCount", msg.RetryCount,
+							"retryAfter", retryAfter.String(),
+							"error", err.Error())
+					}
+					retryMessageWithReason(ctx, msg, retryChannel, resultChannel, retryAfter, retryReason)
 				}
-				// Pass server-specified Retry-After duration if available.
-				var retryAfter time.Duration
-				var clientErr *asyncapi.ClientError
-				if errors.As(err, &clientErr) {
-					retryAfter = clientErr.RetryAfter
-				}
-				retryMessage(ctx, msg, retryChannel, resultChannel, retryAfter)
-			}
-			sendInferenceRequest()
+				sendInferenceRequest()
+			}()
 		}
 	}
 }
@@ -128,7 +183,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 		return nil
 	}
 
-	payloadBytes, err := json.Marshal(r.ReqPayload())
+	payloadBytes, err := json.Marshal(payloadWithModelNameOverride(r.ReqPayload(), msg.ModelNameOverride))
 	if err != nil {
 		metrics.FailedReqs.Inc()
 		select {
@@ -140,8 +195,24 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	return payloadBytes
 }
 
+func payloadWithModelNameOverride(payload map[string]any, modelNameOverride string) map[string]any {
+	if modelNameOverride == "" {
+		return payload
+	}
+	rewrittenPayload := make(map[string]any, len(payload)+1)
+	for key, value := range payload {
+		rewrittenPayload[key] = value
+	}
+	rewrittenPayload["model"] = modelNameOverride
+	return rewrittenPayload
+}
+
 // If it is not after deadline, just publish again.
 func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration) {
+	retryMessageWithReason(ctx, msg, retryChannel, resultChannel, retryAfter, "")
+}
+
+func retryMessageWithReason(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, retryReason string) {
 	if msg.PublicRequest == nil {
 		return
 	}
@@ -178,24 +249,48 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	case retryChannel <- pipeline.RetryMessage{
 		EmbelishedRequestMessage: msg,
 		BackoffDurationSeconds:   finalDuration,
+		RetryReason:              retryReason,
 	}:
 	case <-ctx.Done():
 	}
 }
 
+// inferenceErrorMessage builds the error message for an inference error.
+func inferenceErrorMessage(err error, responseBody []byte) string {
+	message := fmt.Sprintf("Failed to send request to inference: %s", err.Error())
+	if len(responseBody) == 0 {
+		return message
+	}
+	body := responseBody
+	if len(body) > maxErrorResponseBodyBytes {
+		body = body[:maxErrorResponseBodyBytes]
+		return fmt.Sprintf("%s; response body: %s...<truncated>", message, string(body))
+	}
+	return fmt.Sprintf("%s; response body: %s", message, string(body))
+}
+
 // CreateErrorResultMessage builds a ResultMessage using the public request identity;
 // metadata is read directly from req.ReqMetadata().
 func CreateErrorResultMessage(req asyncapi.Request, routing asyncapi.InternalRouting, errMsg string) asyncapi.ResultMessage {
-	errorPayload := map[string]string{"error": errMsg}
+	errorPayload := map[string]any{
+		"error":       errMsg,
+		"retry_count": routing.RetryCount,
+	}
 	payloadBytes, err := json.Marshal(errorPayload)
 	if err != nil {
 		payloadBytes = []byte(`{"error": "internal error"}`)
 	}
+	metadata := make(map[string]string, len(req.ReqMetadata())+1)
+	for k, v := range req.ReqMetadata() {
+		metadata[k] = v
+	}
+	metadata["retry_count"] = strconv.Itoa(routing.RetryCount)
 	return asyncapi.ResultMessage{
 		ID:       req.ReqID(),
 		Payload:  string(payloadBytes),
 		Routing:  routing,
-		Metadata: req.ReqMetadata(),
+		Metadata: metadata,
+		Labels:   routing.Labels,
 	}
 }
 

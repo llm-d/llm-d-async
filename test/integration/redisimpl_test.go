@@ -64,10 +64,20 @@ func TestRedisImpl(t *testing.T) {
 	}
 	time.Sleep(3 * time.Second)
 
-	mergedChannel := ap.NewRandomRobinPolicy().MergeRequestChannels(flow.RequestChannels())
+	dispatch := ap.NewRandomRobinPolicy().MergeRequestChannels(flow.RequestChannels())
+
+	// Pick any pool's channel — the redis flow synthesizes one pool per queue.
+	var mergedCh chan pipeline.EmbelishedRequestMessage
+	for _, ch := range dispatch.Channels {
+		mergedCh = ch
+		break
+	}
+	if mergedCh == nil {
+		t.Fatal("Expected at least one pool channel in dispatch")
+	}
 
 	select {
-	case req := <-mergedChannel.Channel:
+	case req := <-mergedCh:
 		if req.PublicRequest == nil || req.PublicRequest.ReqID() != "test-id" {
 			t.Errorf("Expected message id to be test-id, got %v", req.PublicRequest)
 		}

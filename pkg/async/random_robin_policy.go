@@ -1,12 +1,16 @@
 package async
 
 import (
-	"net/url"
 	"reflect"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
+
+func init() {
+	pipeline.RegisterMergePolicy("random-robin", func(_ pipeline.MergePolicyDeps) (pipeline.RequestMergePolicy, error) {
+		return NewRandomRobinPolicy(), nil
+	})
+}
 
 func NewRandomRobinPolicy() pipeline.RequestMergePolicy {
 	return &RandomRobinPolicy{}
@@ -14,66 +18,60 @@ func NewRandomRobinPolicy() pipeline.RequestMergePolicy {
 
 var _ pipeline.RequestMergePolicy = (*RandomRobinPolicy)(nil)
 
-type RandomRobinPolicy struct {
+// RandomRobinPolicy fans subscription channels into per-pool merged
+// channels via reflect.Select. Within a pool, sources interleave by
+// the Go runtime's randomized select tie-breaking.
+type RandomRobinPolicy struct{}
+
+func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChannel) pipeline.PoolDispatch {
+	poolToInputs := map[string][]pipeline.RequestChannel{}
+	for _, ch := range channels {
+		poolToInputs[ch.PoolID] = append(poolToInputs[ch.PoolID], ch)
+	}
+
+	out := make(map[string]chan pipeline.EmbelishedRequestMessage, len(poolToInputs))
+	for poolID, inputs := range poolToInputs {
+		bufSize := len(inputs) * 100
+		if bufSize < 256 {
+			bufSize = 256
+		}
+		out[poolID] = make(chan pipeline.EmbelishedRequestMessage, bufSize)
+	}
+
+	for poolID, inputs := range poolToInputs {
+		go runPoolMerge(poolID, inputs, out[poolID])
+	}
+
+	return pipeline.PoolDispatch{Channels: out}
 }
 
-func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChannel) pipeline.EmbelishedRequestChannel {
-	mergedChannel := make(chan pipeline.EmbelishedRequestMessage, len(channels))
-
-	// reflect.Select blocks forever on an empty cases slice, so return
-	// a closed channel immediately to avoid goroutine leaks.
+// runPoolMerge drains all input channels for a single pool and forwards
+// to the pool's output channel. Messages arrive fully embellished (with
+// subscription-gate releases attached) from the Flow's pull callback.
+func runPoolMerge(poolID string, channels []pipeline.RequestChannel, out chan<- pipeline.EmbelishedRequestMessage) {
 	if len(channels) == 0 {
-		close(mergedChannel)
-		return pipeline.EmbelishedRequestChannel{Channel: mergedChannel}
+		close(out)
+		return
 	}
-
-	cases := make([]reflect.SelectCase, len(channels)) //nolint:staticcheck
-	meta := make([]pipeline.RequestChannel, len(channels))
+	cases := make([]reflect.SelectCase, len(channels))
 	for i, ch := range channels {
 		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.Channel)}
-		meta[i] = ch
 	}
 
-	go func() {
-		for {
-			i1, val, ok := reflect.Select(cases)
-			if !ok {
-				// one of the channels is closed, remove it
-				cases = append(cases[:i1], cases[i1+1:]...)
-				meta = append(meta[:i1], meta[i1+1:]...)
-				if len(cases) == 0 {
-					close(mergedChannel)
-					break
-				}
-			} else {
-				ir, ok := val.Interface().(*api.InternalRequest)
-				if !ok || ir == nil {
-					continue
-				}
-				requestPath := meta[i1].RequestPathURL
-				if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
-					requestPath = ep
-				}
-				requestURL, _ := url.JoinPath(meta[i1].IGWBaseURL, requestPath)
-				headers := map[string]string{
-					"Content-Type":                  "application/json",
-					"x-gateway-inference-objective": meta[i1].InferenceObjective,
-				}
-				for k, v := range ir.PublicRequest.ReqHeaders() {
-					headers[k] = v
-				}
-				erm := pipeline.EmbelishedRequestMessage{
-					InternalRequest: ir,
-					HttpHeaders:     headers,
-					RequestURL:      requestURL,
-				}
-				mergedChannel <- erm
+	for {
+		i1, val, ok := reflect.Select(cases)
+		if !ok {
+			cases = append(cases[:i1], cases[i1+1:]...)
+			if len(cases) == 0 {
+				close(out)
+				return
 			}
-
+			continue
 		}
-	}()
-
-	return pipeline.EmbelishedRequestChannel{
-		Channel: mergedChannel,
+		emb, ok := val.Interface().(*pipeline.EmbelishedRequestMessage)
+		if !ok || emb == nil {
+			continue
+		}
+		out <- *emb
 	}
 }

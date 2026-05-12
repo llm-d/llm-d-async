@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -12,7 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	"github.com/llm-d-incubation/llm-d-async/pkg/async"
+	_ "github.com/llm-d-incubation/llm-d-async/pkg/async" // register built-in merge policies
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
@@ -56,6 +57,8 @@ func main() {
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
 
+	var mergePolicyConfigJSON = flag.String("merge-policy-config", "{}", "JSON-encoded free-form config map passed to the selected merge policy's factory (see policy package docs for recognized keys).")
+
 	flag.StringVar(&tlsCACert, "tls-ca-cert", "", "Path to CA certificate file (PEM) for verifying the inference gateway")
 	flag.StringVar(&tlsCert, "tls-cert", "", "Path to client certificate file (PEM) for mTLS")
 	flag.StringVar(&tlsKey, "tls-key", "", "Path to client key file (PEM) for mTLS")
@@ -89,15 +92,6 @@ func main() {
 		}
 	}()
 
-	var policy pipeline.RequestMergePolicy
-	switch requestMergePolicy {
-	case "random-robin":
-		policy = async.NewRandomRobinPolicy()
-	default:
-		setupLog.Error(fmt.Errorf("unknown request merge policy: %s", requestMergePolicy), "Unknown request merge policy", "request-merge-policy",
-			requestMergePolicy)
-		os.Exit(1)
-	}
 	var impl pipeline.Flow
 	switch messageQueueImpl {
 	case "redis-pubsub":
@@ -123,6 +117,16 @@ func main() {
 	default:
 		setupLog.Error(fmt.Errorf("unknown message queue implementation: %s", messageQueueImpl), "Unknown message queue implementation",
 			"message-queue-impl", messageQueueImpl)
+		os.Exit(1)
+	}
+
+	// Build the merge policy via the registry after the Flow is constructed.
+	policy, err := pipeline.NewMergePolicy(requestMergePolicy, pipeline.MergePolicyDeps{
+		GateFactory: gateFactory,
+		Config:      parseStringMap(*mergePolicyConfigJSON),
+	})
+	if err != nil {
+		setupLog.Error(err, "Failed to construct merge policy", "request-merge-policy", requestMergePolicy)
 		os.Exit(1)
 	}
 
@@ -170,11 +174,33 @@ func main() {
 	inferenceHTTPClient := &http.Client{Transport: inferenceTransport}
 	inferenceClient := asyncworker.NewHTTPInferenceClient(inferenceHTTPClient)
 
-	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel
-	for w := 1; w <= concurrency; w++ {
-
-		go asyncworker.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
+	// Per-pool dispatch: the merge policy fans subscriptions into one
+	// channel per inference pool. Each pool gets its own dedicated
+	// worker pool so backpressure on one pool's downstream endpoint
+	// stays local — a saturated pool's workers and prefetch stall
+	// without affecting any other pool's throughput.
+	dispatch := policy.MergeRequestChannels(impl.RequestChannels())
+	poolByID := map[string]pipeline.Pool{}
+	for _, p := range impl.Pools() {
+		poolByID[p.ID] = p
 	}
+	totalWorkers := 0
+	for poolID, ch := range dispatch.Channels {
+		pool := poolByID[poolID]
+		workers := pool.Workers
+		if workers <= 0 {
+			workers = concurrency
+		}
+		totalWorkers += workers
+		setupLog.Info("Spawning per-pool worker pool",
+			"poolID", poolID,
+			"gatewayURL", pool.GatewayURL,
+			"workers", workers)
+		for w := 0; w < workers; w++ {
+			go asyncworker.Worker(ctx, impl.Characteristics(), inferenceClient, ch, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
+		}
+	}
+	setupLog.Info("Per-pool worker pools started", "pools", len(dispatch.Channels), "totalWorkers", totalWorkers)
 
 	impl.Start(ctx)
 	<-ctx.Done()
@@ -219,6 +245,20 @@ func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify boo
 	}
 
 	return tlsConfig, nil
+}
+
+// parseStringMap parses a JSON object string into a map[string]string.
+// Empty / "{}" yields an empty map; parse failures yield nil. Callers
+// reading individual keys are not affected by missing entries.
+func parseStringMap(s string) map[string]string {
+	if s == "" || s == "{}" {
+		return map[string]string{}
+	}
+	out := map[string]string{}
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 func printAllFlags(setupLog logr.Logger) {

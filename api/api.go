@@ -59,10 +59,14 @@ var (
 )
 
 // ResultMessage is the async inference result returned to callers. ID and Payload are
-// JSON fields; Routing and Metadata are infrastructure pass-through (json:"-").
+// JSON fields; Routing, Metadata, and Labels are infrastructure pass-through (json:"-").
+// Labels carries the request's working label set forward so the Flow's result-publish
+// path can stamp transport-native attributes for consumer-side filtering, without
+// reaching back into the request envelope.
 type ResultMessage struct {
 	ID       string            `json:"id"`
 	Payload  string            `json:"payload"`
 	Routing  InternalRouting   `json:"-"`
 	Metadata map[string]string `json:"-"`
+	Labels   map[string]string `json:"-"`
 }

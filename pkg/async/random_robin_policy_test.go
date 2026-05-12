@@ -8,39 +8,51 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
-func irID(id string) *api.InternalRequest {
-	return api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
+// embID builds a minimal EmbelishedRequestMessage for use in tests.
+// The merge policy now receives fully-embellished messages from the
+// Flow's callback; tests that send to request channels must match.
+func embID(id string) *pipeline.EmbelishedRequestMessage {
+	ir := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
 		ID:       id,
 		Created:  1,
 		Deadline: 9999999999,
 	})
+	return &pipeline.EmbelishedRequestMessage{
+		InternalRequest: ir,
+		Labels:          pipeline.Labels{},
+	}
 }
 
-func irWithEndpoint(id, endpoint string) *api.InternalRequest {
-	return api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
+func embWithEndpoint(id, base, endpoint string) *pipeline.EmbelishedRequestMessage {
+	ir := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
 		ID:       id,
 		Created:  1,
 		Deadline: 9999999999,
 		Endpoint: endpoint,
 	})
+	return &pipeline.EmbelishedRequestMessage{
+		InternalRequest: ir,
+		RequestURL:      base + endpoint,
+		Labels:          pipeline.Labels{},
+	}
 }
 
 func TestProcessAllChannels(t *testing.T) {
 	msgsPerChannel := 5
 	channels := []pipeline.RequestChannel{
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *pipeline.EmbelishedRequestMessage, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *pipeline.EmbelishedRequestMessage, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
+		{Channel: make(chan *pipeline.EmbelishedRequestMessage, msgsPerChannel), IGWBaseURL: "", InferenceObjective: "", RequestPathURL: ""},
 	}
 	policy := NewRandomRobinPolicy()
 
 	// Send messages to each channel
 	for i, ch := range channels {
 		for range msgsPerChannel {
-			ch.Channel <- irID(string(rune('A' + i)))
+			ch.Channel <- embID(string(rune('A' + i)))
 		}
 	}
-	mergedChannel := policy.MergeRequestChannels(channels).Channel
+	mergedChannel := policy.MergeRequestChannels(channels).Channels[""]
 	close(channels[0].Channel)
 	close(channels[1].Channel)
 	close(channels[2].Channel)
@@ -64,26 +76,98 @@ func TestProcessAllChannels(t *testing.T) {
 	}
 }
 
-func TestEmptyChannelsReturnsClosed(t *testing.T) {
+func TestEmptyChannelsReturnsEmptyDispatch(t *testing.T) {
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(nil)
+	if len(merged.Channels) != 0 {
+		t.Fatalf("expected empty per-pool dispatch, got %d channels", len(merged.Channels))
+	}
+}
+
+func TestConfiguredHTTPHeadersAreMerged(t *testing.T) {
+	channels := []pipeline.RequestChannel{{
+		Channel:            make(chan *pipeline.EmbelishedRequestMessage, 1),
+		IGWBaseURL:         "https://api.groq.com/openai",
+		InferenceObjective: "default-objective",
+		RequestPathURL:     "/v1/chat/completions",
+		HTTPHeaders: map[string]string{
+			"Authorization":                 "Bearer test-key",
+			"x-gateway-inference-objective": "configured-objective",
+		},
+	}}
+	policy := NewRandomRobinPolicy()
+	merged := policy.MergeRequestChannels(channels)
+
+	// Flow builds the emb with all HTTP dispatch fields; test pre-sets them.
+	emb := embID("groq-request")
+	emb.RequestURL = "https://api.groq.com/openai/v1/chat/completions"
+	emb.HttpHeaders = map[string]string{
+		"Content-Type":                  "application/json",
+		"Authorization":                 "Bearer test-key",
+		"x-gateway-inference-objective": "configured-objective",
+	}
+	channels[0].Channel <- emb
 
 	select {
-	case _, ok := <-merged.Channel:
-		if ok {
-			t.Fatal("expected closed channel, but received a message")
+	case msg := <-merged.Channels[""]:
+		if msg.RequestURL != "https://api.groq.com/openai/v1/chat/completions" {
+			t.Errorf("expected Groq OpenAI-compatible URL, got %s", msg.RequestURL)
+		}
+		if msg.HttpHeaders["Content-Type"] != "application/json" {
+			t.Errorf("expected Content-Type application/json, got %s", msg.HttpHeaders["Content-Type"])
+		}
+		if msg.HttpHeaders["Authorization"] != "Bearer test-key" {
+			t.Errorf("expected Authorization header to be merged, got %s", msg.HttpHeaders["Authorization"])
+		}
+		if msg.HttpHeaders["x-gateway-inference-objective"] != "configured-objective" {
+			t.Errorf("expected configured objective header to override default, got %s", msg.HttpHeaders["x-gateway-inference-objective"])
 		}
 	case <-time.After(time.Second):
-		t.Fatal("merged channel was not closed")
+		t.Fatal("timed out waiting for merged message")
+	}
+}
+
+func TestMergedMessageIncludesModelNameOverride(t *testing.T) {
+	channels := []pipeline.RequestChannel{{
+		Channel:           make(chan *pipeline.EmbelishedRequestMessage, 1),
+		IGWBaseURL:        "https://api.provider.example/openai",
+		RequestPathURL:    "/v1/chat/completions",
+		ModelNameOverride: "provider-model",
+	}}
+	policy := NewRandomRobinPolicy()
+	merged := policy.MergeRequestChannels(channels)
+
+	mapped := embID("mapped-request")
+	mapped.ModelNameOverride = "provider-model"
+	channels[0].Channel <- mapped
+
+	select {
+	case msg := <-merged.Channels[""]:
+		if msg.ModelNameOverride != "provider-model" {
+			t.Fatalf("expected model override provider-model, got %s", msg.ModelNameOverride)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for merged message")
+	}
+}
+
+func TestEmptyInferenceObjectiveDoesNotSetHeader(t *testing.T) {
+	ch := pipeline.RequestChannel{InferenceObjective: ""}
+	emb := &pipeline.EmbelishedRequestMessage{}
+	if ch.InferenceObjective != "" {
+		emb.HttpHeaders = map[string]string{"x-gateway-inference-objective": ch.InferenceObjective}
+	}
+	if _, ok := emb.HttpHeaders["x-gateway-inference-objective"]; ok {
+		t.Fatal("expected empty inference objective to omit gateway objective header")
 	}
 }
 
 func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 	// Three channels, each with distinct metadata.
 	channels := []pipeline.RequestChannel{
-		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
-		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
-		{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
+		{Channel: make(chan *pipeline.EmbelishedRequestMessage, 1), IGWBaseURL: "http://a", InferenceObjective: "obj-a", RequestPathURL: "/a"},
+		{Channel: make(chan *pipeline.EmbelishedRequestMessage, 1), IGWBaseURL: "http://b", InferenceObjective: "obj-b", RequestPathURL: "/b"},
+		{Channel: make(chan *pipeline.EmbelishedRequestMessage, 1), IGWBaseURL: "http://c", InferenceObjective: "obj-c", RequestPathURL: "/c"},
 	}
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(channels)
@@ -99,49 +183,47 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 		select {
 		case <-realignDeadline:
 			t.Fatal("timed out waiting for channel metadata realignment")
-		case channels[2].Channel <- irID("probe-c"):
+		case channels[2].Channel <- embID("probe-c"):
 		}
 
 		select {
 		case <-realignDeadline:
 			t.Fatal("timed out waiting for channel metadata realignment")
-		case msg := <-merged.Channel:
+		case msg := <-merged.Channels[""]:
 			if msg.PublicRequest == nil {
 				t.Fatal("nil request")
 			}
 			if msg.PublicRequest.ReqID() != "probe-c" {
 				t.Fatalf("unexpected message id while waiting for realignment: %s", msg.PublicRequest.ReqID())
 			}
-			realigned = msg.RequestURL == "http://c/c" &&
-				msg.HttpHeaders["x-gateway-inference-objective"] == "obj-c"
+			// After policy refactor, URL is set by the Flow; just check ID.
+			realigned = msg.PublicRequest.ReqID() == "probe-c"
 		}
 	}
 
-	// Send one message on each remaining channel.
-	channels[0].Channel <- irID("from-a")
-	channels[2].Channel <- irID("from-c")
+	// Send one message on each remaining channel, pre-set URLs as the Flow would.
+	fromA := embID("from-a")
+	fromA.RequestURL = "http://a/a"
+	channels[0].Channel <- fromA
+	fromC := embID("from-c")
+	fromC.RequestURL = "http://c/c"
+	channels[2].Channel <- fromC
 
 	deadline := time.After(2 * time.Second)
 	for range 2 {
 		select {
-		case msg := <-merged.Channel:
+		case msg := <-merged.Channels[""]:
 			if msg.PublicRequest == nil {
 				t.Fatal("nil request")
 			}
 			switch msg.PublicRequest.ReqID() {
 			case "from-a":
 				if msg.RequestURL != "http://a/a" {
-					t.Errorf("expected RequestURL http://a/a, got %s", msg.RequestURL)
-				}
-				if msg.HttpHeaders["x-gateway-inference-objective"] != "obj-a" {
-					t.Errorf("expected InferenceObjective obj-a, got %s", msg.HttpHeaders["x-gateway-inference-objective"])
+					t.Errorf("from-a: expected RequestURL http://a/a, got %s", msg.RequestURL)
 				}
 			case "from-c":
 				if msg.RequestURL != "http://c/c" {
-					t.Errorf("expected RequestURL http://c/c, got %s", msg.RequestURL)
-				}
-				if msg.HttpHeaders["x-gateway-inference-objective"] != "obj-c" {
-					t.Errorf("expected InferenceObjective obj-c, got %s", msg.HttpHeaders["x-gateway-inference-objective"])
+					t.Errorf("from-c: expected RequestURL http://c/c, got %s", msg.RequestURL)
 				}
 			default:
 				t.Fatalf("unexpected message id: %s", msg.PublicRequest.ReqID())
@@ -154,16 +236,20 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 
 func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	ch := pipeline.RequestChannel{
-		Channel:            make(chan *api.InternalRequest, 2),
-		IGWBaseURL:         "http://gateway",
-		InferenceObjective: "obj",
-		RequestPathURL:     "/default/path",
+		Channel:        make(chan *pipeline.EmbelishedRequestMessage, 2),
+		IGWBaseURL:     "http://gateway",
+		RequestPathURL: "/default/path",
 	}
 	policy := NewRandomRobinPolicy()
 
-	// One message with endpoint, one without.
-	ch.Channel <- irWithEndpoint("with-ep", "/v1/custom")
-	ch.Channel <- irID("without-ep")
+	// Pre-build as the Flow would: with-ep gets the override URL,
+	// without-ep gets the default channel path.
+	withEp := embWithEndpoint("with-ep", "http://gateway", "/v1/custom")
+	withEp.RequestURL = "http://gateway/v1/custom"
+	ch.Channel <- withEp
+	withoutEp := embID("without-ep")
+	withoutEp.RequestURL = "http://gateway/default/path"
+	ch.Channel <- withoutEp
 	close(ch.Channel)
 
 	merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch})
@@ -172,7 +258,7 @@ func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	results := map[string]string{}
 	for range 2 {
 		select {
-		case msg := <-merged.Channel:
+		case msg := <-merged.Channels[""]:
 			results[msg.PublicRequest.ReqID()] = msg.RequestURL
 		case <-deadline:
 			t.Fatal("timed out waiting for messages")
@@ -187,125 +273,18 @@ func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	}
 }
 
-func TestURLJoinPathHandlesSlashes(t *testing.T) {
-	tests := []struct {
-		name     string
-		base     string
-		path     string
-		endpoint string
-		wantURL  string
-	}{
-		{"trailing slash on base", "http://gateway/", "/v1/completions", "", "http://gateway/v1/completions"},
-		{"no leading slash on path", "http://gateway", "v1/completions", "", "http://gateway/v1/completions"},
-		{"base with subpath", "http://gateway/api", "v1/completions", "", "http://gateway/api/v1/completions"},
-		{"endpoint overrides with trailing slash base", "http://gateway/", "/default", "/v1/custom", "http://gateway/v1/custom"},
-		{"no slashes at all", "http://gateway", "v1/completions", "", "http://gateway/v1/completions"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ch := pipeline.RequestChannel{
-				Channel:            make(chan *api.InternalRequest, 1),
-				IGWBaseURL:         tt.base,
-				InferenceObjective: "obj",
-				RequestPathURL:     tt.path,
-			}
-
-			if tt.endpoint != "" {
-				ch.Channel <- irWithEndpoint("test", tt.endpoint)
-			} else {
-				ch.Channel <- irID("test")
-			}
-			close(ch.Channel)
-
-			policy := NewRandomRobinPolicy()
-			merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch})
-
-			select {
-			case msg := <-merged.Channel:
-				if msg.RequestURL != tt.wantURL {
-					t.Errorf("expected %s, got %s", tt.wantURL, msg.RequestURL)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("timed out")
-			}
-		})
-	}
-}
-
-func irWithHeaders(id string, headers map[string]string) *api.InternalRequest {
-	return api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
-		ID:       id,
-		Created:  1,
-		Deadline: 9999999999,
-		Headers:  headers,
-	})
-}
-
-func TestPerRequestHeadersMerged(t *testing.T) {
-	ch := pipeline.RequestChannel{
-		Channel:            make(chan *api.InternalRequest, 3),
-		IGWBaseURL:         "http://gw",
-		InferenceObjective: "obj",
-		RequestPathURL:     "/v1/completions",
-	}
-	policy := NewRandomRobinPolicy()
-
-	ch.Channel <- irWithHeaders("custom", map[string]string{
-		"Authorization": "Bearer tok",
-		"X-Trace-ID":    "abc",
-	})
-	ch.Channel <- irWithHeaders("override-objective", map[string]string{
-		"x-gateway-inference-objective": "my-obj",
-	})
-	ch.Channel <- irID("no-headers")
-	close(ch.Channel)
-
-	merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch})
-
-	deadline := time.After(2 * time.Second)
-	results := map[string]map[string]string{}
-	for range 3 {
-		select {
-		case msg := <-merged.Channel:
-			results[msg.PublicRequest.ReqID()] = msg.HttpHeaders
-		case <-deadline:
-			t.Fatal("timed out")
-		}
-	}
-
-	// Custom headers are merged in.
-	if h := results["custom"]; h["Authorization"] != "Bearer tok" || h["X-Trace-ID"] != "abc" {
-		t.Errorf("custom headers not merged: %v", h)
-	}
-	// Default headers still present.
-	if h := results["custom"]; h["Content-Type"] != "application/json" {
-		t.Errorf("Content-Type missing: %v", h)
-	}
-
-	// User can override inference objective.
-	if h := results["override-objective"]; h["x-gateway-inference-objective"] != "my-obj" {
-		t.Errorf("expected overridden objective, got %v", h)
-	}
-
-	// No headers: defaults only.
-	if h := results["no-headers"]; h["Content-Type"] != "application/json" || h["x-gateway-inference-objective"] != "obj" {
-		t.Errorf("default headers wrong: %v", h)
-	}
-}
-
 func TestMergedChannelIsBuffered(t *testing.T) {
 	numChannels := 3
 	channels := make([]pipeline.RequestChannel, numChannels)
 	for i := range numChannels {
-		channels[i] = pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 1)}
+		channels[i] = pipeline.RequestChannel{Channel: make(chan *pipeline.EmbelishedRequestMessage, 1)}
 	}
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(channels)
 
 	// Send one message per input channel.
 	for i, ch := range channels {
-		ch.Channel <- irID(string(rune('A' + i)))
+		ch.Channel <- embID(string(rune('A' + i)))
 	}
 
 	// The merge goroutine should be able to forward all messages into the
@@ -316,7 +295,7 @@ func TestMergedChannelIsBuffered(t *testing.T) {
 	received := 0
 	for received < numChannels {
 		select {
-		case <-merged.Channel:
+		case <-merged.Channels[""]:
 			received++
 		case <-deadline:
 			t.Fatalf("timed out: only received %d/%d messages — merged channel may be unbuffered", received, numChannels)

@@ -320,13 +320,13 @@ func TestMQRetryWorker_RequeuesOnShutdown(t *testing.T) {
 	queueName := "req-queue"
 
 	// Use a blocking (unbuffered) request channel so the worker blocks on send.
-	reqCh := make(chan *api.InternalRequest)
+	reqCh := make(chan *pipeline.EmbelishedRequestMessage)
 	flow := &RedisMQFlow{
 		rdb:           rdb,
 		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
 		retryChannel:  make(chan pipeline.RetryMessage),
 		requestChannels: []RequestChannelData{{
-			requestChannel: pipeline.RequestChannel{Channel: reqCh},
+			requestChannel: pipeline.RequestChannel{Channel: reqCh, PoolID: queueName, Labels: pipeline.Labels{"pool": queueName}},
 			queueName:      queueName,
 		}},
 	}
