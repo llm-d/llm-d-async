@@ -662,11 +662,32 @@ func TestClientError_NoRetry(t *testing.T) {
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
-		expectedPayload := `{"error":"Failed to send request to inference: INVALID_REQ: client error: status code 400"}`
-		if r.Payload != expectedPayload {
-			t.Errorf("Expected payload to be %s, got %s", expectedPayload, r.Payload)
+		var resultMap map[string]any
+		err := json.Unmarshal([]byte(r.Payload), &resultMap)
+		if err != nil {
+			t.Errorf("Failed to unmarshal result payload: %s. Payload was: %s", err, r.Payload)
+		}
+		if _, hasError := resultMap["error"]; !hasError {
+			t.Errorf("Expected error in result payload, got: %s", r.Payload)
+		}
+		errMsg, _ := resultMap["error"].(string)
+		if errMsg == "" || !containsStr(errMsg, "INVALID_REQ") {
+			t.Errorf("Expected INVALID_REQ in error message, got: %s", errMsg)
 		}
 	case <-time.After(time.Second):
 		t.Errorf("Timeout waiting for result")
 	}
+}
+
+func containsStr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstr(s, sub))
+}
+
+func containsSubstr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

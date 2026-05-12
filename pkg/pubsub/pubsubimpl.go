@@ -99,7 +99,6 @@ type PubSubMQFlow struct {
 	pools           []pipeline.Pool
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
-	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 }
 
@@ -125,7 +124,7 @@ type resultTracker struct {
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
 	subscriberID   string
-	gate           pipeline.DispatchGate
+	gate           pipeline.Gate
 	stats          *progressStats
 }
 
@@ -184,19 +183,16 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 	// Create per-topic channels with gates
 	for _, cfg := range configs {
 		// Determine gate for this topic
-		var gate pipeline.DispatchGate
+		var gate pipeline.Gate
 		if p.gateFactory != nil && cfg.GateType != "" {
 			// Use factory to create per-topic gate
 			gate, err = p.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
 			if err != nil {
 				panic(fmt.Sprintf("failed to create gate for topic subscriber %q (gate_type=%q): %v", cfg.SubscriberID, cfg.GateType, err))
 			}
-		} else if p.gate != nil {
-			// Fall back to global gate if provided
-			gate = p.gate
 		} else {
-			// Default to always-open gate
-			gate = pipeline.ConstOpenGate()
+			// Default to always-continue gate
+			gate = pipeline.AlwaysContinue
 		}
 
 		headers, err := util.ExpandEnvMapValues(cfg.HTTPHeaders)
@@ -283,11 +279,6 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		})
 	}
 
-	// Set default gate if not already set
-	if p.gate == nil {
-		p.gate = pipeline.ConstOpenGate()
-	}
-
 	return p
 }
 
@@ -323,7 +314,7 @@ func (r *PubSubMQFlow) RequestChannels() []pipeline.RequestChannel {
 
 func (r *PubSubMQFlow) Start(ctx context.Context) {
 	for _, channelData := range r.requestChannels {
-		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel, channelData.stats)
+		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel, channelData.stats, channelData.gate)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	for i := 0; i < 4; i++ {
@@ -435,10 +426,9 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, requestChannel pipeline.RequestChannel, stats *progressStats) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, requestChannel pipeline.RequestChannel, stats *progressStats, gate pipeline.Gate) {
 	ch := requestChannel.Channel
 	channelLabels := requestChannel.Labels
-	gate := requestChannel.Gate
 	logger := log.FromContext(ctx)
 
 	sub := pubSubClient.Subscriber(subscriberID)
@@ -493,28 +483,36 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		irout.Labels = channelLabels.Clone()
 		ir := api.NewInternalRequest(irout, &body)
 
-		// Per-attribute gating (legacy DispatchGate/AttributeGate path).
-		var release func()
-		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			allowed, rel, err := attrGate.Acquire(ctx, msg.Attributes)
+		// Build the fully-embellished message so the gate and merge
+		// policy receive it with all HTTP dispatch fields set.
+		emb := buildEmbelishedFromChannel(ir, requestChannel)
+
+		// Gate evaluation: run Gate.Apply before dispatching.
+		if gate != nil {
+			v, err := gate.Apply(ctx, emb)
 			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to acquire attribute quota")
-				resultsChannel <- ackAction{ack: false}
-				return
-			}
-			if !allowed {
-				stats.gateDenied++
+				logger.V(logutil.DEFAULT).Error(err, "gate error; treating as Refuse", "subscriberID", subscriberID)
+				emb.FireReleases()
 				resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
 				return
 			}
-			release = rel
-		} else {
-			release = func() {}
+			if v.Terminate {
+				stats.gateDenied++
+				emb.FireReleases()
+				if v.Result != nil {
+					select {
+					case r.resultChannel <- *v.Result:
+					case <-ctx.Done():
+					}
+				}
+				if v.Redeliver {
+					resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
+				} else {
+					resultsChannel <- ackAction{ack: true}
+				}
+				return
+			}
 		}
-
-		// Build the fully-embellished message so the merge policy and
-		// worker receive it with all HTTP dispatch fields set.
-		emb := buildEmbelishedFromChannel(ir, requestChannel)
 
 		ch <- emb
 		stats.dispatched++
@@ -527,9 +525,6 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			defer func() {
 				resultChannels.Delete(msg.ID)
 				stats.inFlight--
-				if release != nil {
-					release()
-				}
 				emb.FireReleases()
 			}()
 			var result ackAction

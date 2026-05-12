@@ -25,40 +25,9 @@ type Characteristics struct {
 	SupportsMessageLatency bool
 }
 
-// DispatchGate defines the interface to determine whether there is enough capacity to forward a request.
-type DispatchGate interface {
-	// Budget returns the Dispatch Budget in the range [0.0, 1.0], representing
-	// the fraction of system capacity available for new requests.
-	// A value of 0.0 indicates no available capacity (system at max allowed).
-	// A value of 1.0 indicates full capacity available (system is idle).
-	// The system always returns a valid value, even in case of internal error.
-	Budget(ctx context.Context) float64
-}
-
-// AttributeGate defines the interface to determine if a request is allowed based on its attributes.
-type AttributeGate interface {
-	// Acquire attempts to acquire quota for the given attributes.
-	// Returns allowed=true if successful, and a release function to be called when processing is complete.
-	// If the gate does not support the given attributes or is not a quota gate, it should return true, nil, nil.
-	Acquire(ctx context.Context, attributes map[string]string) (allowed bool, release func(), err error)
-}
-
-// GateFactory defines the interface for creating DispatchGate instances.
+// GateFactory defines the interface for creating Gate instances.
 type GateFactory interface {
-	CreateGate(gateType string, params map[string]string) (DispatchGate, error)
-}
-
-var _ DispatchGate = DispatchGateFunc(nil)
-
-// DispatchGateFunc is a function type that implements DispatchGate.
-type DispatchGateFunc func(context.Context) float64
-
-func (f DispatchGateFunc) Budget(ctx context.Context) float64 {
-	return f(ctx)
-}
-
-func ConstOpenGate() DispatchGate {
-	return DispatchGateFunc(func(ctx context.Context) float64 { return 1.0 })
+	CreateGate(gateType string, params map[string]string) (Gate, error)
 }
 
 type RequestMergePolicy interface {
@@ -93,7 +62,7 @@ type RequestChannel struct {
 	RequestPathURL     string
 	HTTPHeaders        map[string]string
 	ModelNameOverride  string
-	Gate               DispatchGate
+	Gate               Gate
 	// Labels is the static label set declared by the subscription's
 	// TopicConfig. It is the operator's source of truth for per-subscription
 	// classification (e.g. tier, team, model). Flow impls seed each pulled
@@ -117,7 +86,7 @@ type EmbelishedRequestMessage struct {
 	*api.InternalRequest
 	HttpHeaders       map[string]string
 	RequestURL        string
-	Gate              DispatchGate
+	Gate              Gate
 	ModelNameOverride string
 	// Labels is the message's working label set. Seeded by the Flow at pull
 	// time from a merge of the originating channel's static labels and the
@@ -135,12 +104,8 @@ type EmbelishedRequestMessage struct {
 	// policy as the message moves through the pipeline. They are fired in
 	// LIFO order by FireReleases when the message terminates (worker
 	// completion, fail-fast in the merge policy, or Drop/Refuse in the Flow).
-	releases []Release
+	releases []Release // Release is defined in gate.go
 }
-
-// Release is a callback invoked when a message terminates. It returns any
-// state taken by a gate (e.g. an in-flight slot in a reservation counter).
-type Release func()
 
 // AttachRelease appends r to the message's release stack. A nil r is a
 // no-op so call sites need not branch on whether their gate emitted state.

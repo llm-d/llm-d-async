@@ -86,11 +86,6 @@ func main() {
 	printAllFlags(setupLog)
 	// Create Gate Factory for per-queue gate instantiation
 	gateFactory := flowcontrol.NewGateFactoryWithCacheTTL(*prometheusURL, *prometheusCacheTTL)
-	defer func() {
-		if err := gateFactory.Close(); err != nil {
-			setupLog.Error(err, "Failed to close gate factory")
-		}
-	}()
 
 	var impl pipeline.Flow
 	switch messageQueueImpl {

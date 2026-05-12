@@ -53,27 +53,35 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 					return
 				}
 
-				// Run the per-subscription DispatchGate.Budget at the worker.
-				// Legacy path: gates that implement the DispatchGate interface
-				// use the Budget/Acquire pattern.
+				// Run the per-subscription Gate.Apply at the worker. Gates
+				// that should block until capacity is available (sem-style
+				// LocalMaxConcurrencyGate, token-bucket LocalRateLimitGate)
+				// do so inside Apply — the worker parks rather than nacking,
+				// keeping the message buffered and ready to dispatch the
+				// instant a slot frees. Releases from Apply are attached to
+				// the message and fired by the deferred msg.FireReleases()
+				// above on every terminal path.
 				if msg.Gate != nil {
-					if attrGate, ok := msg.Gate.(pipeline.AttributeGate); ok {
-						var metadata map[string]string
-						if msg.PublicRequest != nil {
-							metadata = msg.PublicRequest.ReqMetadata()
-						}
-						allowed, release, err := attrGate.Acquire(ctx, metadata)
-						if err != nil {
-							retryMessageWithReason(ctx, msg, retryChannel, resultChannel, time.Second, "gate_error")
-							return
-						}
-						if !allowed {
+					v, err := msg.Gate.Apply(ctx, &msg)
+					if err != nil {
+						retryMessageWithReason(ctx, msg, retryChannel, resultChannel, time.Second, "gate_error")
+						return
+					}
+					if v.Terminate {
+						switch {
+						case v.Redeliver:
 							retryMessageWithReason(ctx, msg, retryChannel, resultChannel, 30*time.Second, "gate_refused")
-							return
+						case v.Result != nil:
+							// Fail-fast: publish the gate-supplied result
+							// (e.g. 429-shaped) and ack-discard.
+							select {
+							case resultChannel <- *v.Result:
+							case <-ctx.Done():
+							}
+						default:
+							// Silent drop.
 						}
-						if release != nil {
-							msg.AttachRelease(release)
-						}
+						return
 					}
 				}
 
