@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloud.google.com/go/pubsub/v2"
@@ -76,16 +77,22 @@ type TopicConfig struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// Gates is the chain of subscription gates evaluated in the Flow
 	// callback at pull time, before the message is forwarded to the
-	// merge policy. Gates here may mutate labels (e.g. a classifier
-	// stamping `class=reserved` or `class=overflow`) and the merge
-	// policy will see the mutations when it buckets the message. Must
-	// be fast — slow gates here block the receive callback and stall
-	// prefetch.
+	// merge policy. Gates here may mutate labels (e.g. a reservation
+	// classifier stamping `class=reserved` or `class=overflow`) and
+	// the merge policy will see the mutations when it buckets the
+	// message. Must be fast — slow gates here block the receive
+	// callback and stall prefetch. Stateful gates whose releases need
+	// to survive past dispatch are not currently supported as
+	// subscription gates; put those on the pool's Gates instead, where
+	// they are evaluated downstream of the merge policy with full
+	// release plumbing.
 	Gates []pipeline.GateConfig `json:"gates,omitempty"`
 	// Pool identifies which inference pool (declared in the FlowConfig's
 	// Pools list) this subscription routes to. If empty in the new config
 	// format, the Flow synthesizes a singleton pool from the legacy
-	// per-subscription fields so existing deployments keep working unmodified.
+	// per-subscription fields (IGWBaseURL, RequestPathURL, HTTPHeaders,
+	// ModelNameOverride, GateType, GateParams) so existing deployments
+	// keep working unmodified.
 	Pool string `json:"pool,omitempty"`
 }
 
@@ -111,32 +118,41 @@ type PubSubMQFlow struct {
 }
 
 type progressStats struct {
-	subscriberID    string
-	pulled          int64
-	dispatched      int64
-	succeeded       int64
-	failed          int64
-	retrying        int64
-	rateLimited     int64
-	acked           int64
-	delayedNacks    int64
-	gateDenied      int64
-	inFlight        int64
-	dispatchInFlight int64
-}
+	subscriberID string
+	pulled       atomic.Int64
+	dispatched   atomic.Int64
+	succeeded    atomic.Int64
+	failed       atomic.Int64
+	retrying     atomic.Int64
+	rateLimited  atomic.Int64
+	acked        atomic.Int64
+	delayedNacks atomic.Int64
+	gateDenied   atomic.Int64
+	inFlight     atomic.Int64
 
-type resultTracker struct {
-	resultCh chan ackAction
-	stats    *progressStats
+	// dispatchInFlight tracks how many requests currently sit between a
+	// successful pool-gate admission and the matching Release — i.e.
+	// the gate-level in-flight count. Useful for verifying that a
+	// concurrency-cap gate (local-max-concurrency) is actually biting:
+	// dispatchInFlightPeak should saturate at max_concurrency.
+	dispatchInFlight     atomic.Int64
+	dispatchInFlightPeak atomic.Int64
 }
 
 type countingGate struct {
 	// gates is the pool gate chain for the pool this subscription
 	// routes to. countingGate is a stats-instrumentation wrapper that
 	// runs the chain via pipeline.ApplyChain and tracks per-subscription
-	// dispatch in-flight and gate-denied counters.
+	// dispatch in-flight and gate-denied counters. Multiple
+	// subscriptions in the same pool share an underlying chain via
+	// reference equality of the gates slice.
 	gates []pipeline.Gate
 	stats *progressStats
+}
+
+type resultTracker struct {
+	resultCh chan ackAction
+	stats    *progressStats
 }
 
 // Apply implements pipeline.Gate by running the pool gate chain via
@@ -150,20 +166,70 @@ func (g *countingGate) Apply(ctx context.Context, msg *pipeline.EmbelishedReques
 		return v, err
 	}
 	if !v.Terminate {
-		g.stats.dispatchInFlight++
-		msg.AttachRelease(func() { g.stats.dispatchInFlight-- })
+		current := g.stats.dispatchInFlight.Add(1)
+		updatePeak(&g.stats.dispatchInFlightPeak, current)
+		msg.AttachRelease(func() { g.stats.dispatchInFlight.Add(-1) })
 		return v, nil
 	}
 	if v.Redeliver {
-		g.stats.gateDenied++
+		g.stats.gateDenied.Add(1)
 	}
 	return v, nil
 }
 
+// updatePeak is a CAS-loop helper for tracking the maximum value seen
+// by an atomic.Int64 over time.
+func updatePeak(peak *atomic.Int64, current int64) {
+	for {
+		p := peak.Load()
+		if current <= p {
+			return
+		}
+		if peak.CompareAndSwap(p, current) {
+			return
+		}
+	}
+}
+
+func (s *progressStats) logProgress(ctx context.Context) {
+	logger := log.FromContext(ctx)
+	ticker := time.NewTicker(progressLogInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			currentDispatch := s.dispatchInFlight.Load()
+			dispatchPeak := s.dispatchInFlightPeak.Swap(currentDispatch)
+			logger.V(logutil.DEFAULT).Info("Async processor progress",
+				"subscriberID", s.subscriberID,
+				"pulled", s.pulled.Swap(0),
+				"dispatched", s.dispatched.Swap(0),
+				"succeeded", s.succeeded.Swap(0),
+				"failed", s.failed.Swap(0),
+				"retrying", s.retrying.Swap(0),
+				"rateLimited429", s.rateLimited.Swap(0),
+				"acked", s.acked.Swap(0),
+				"delayedNacks", s.delayedNacks.Swap(0),
+				"gateDenied", s.gateDenied.Swap(0),
+				"inFlight", s.inFlight.Load(),
+				"dispatchInFlight", currentDispatch,
+				"dispatchInFlightPeak", dispatchPeak)
+		}
+	}
+}
+
 type RequestChannelData struct {
-	requestChannel    pipeline.RequestChannel
-	subscriberID      string
-	gate              pipeline.Gate
+	requestChannel pipeline.RequestChannel
+	subscriberID   string
+	gate           pipeline.Gate
+	// subscriptionGates is the chain run in the receive callback, after
+	// the message is unmarshaled and labels are stamped, before
+	// forwarding to the merge policy. Sourced from TopicConfig.Gates.
+	// Gates here may mutate labels (the merge policy sees the mutations
+	// when bucketing) but must be fast — slow gates block the receive
+	// callback and stall prefetch.
 	subscriptionGates []pipeline.Gate
 	stats             *progressStats
 }
@@ -224,6 +290,14 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 	// subscriptions in a pool is the whole point of pool-scoped
 	// admission control: a LocalMaxConcurrencyGate with cap=N caps
 	// in-flight to N for the pool as a whole, not N per subscription.
+	// Per-pool stats track gate-level in-flight; per-subscription stats
+	// (defined later in the construction loop) continue to track
+	// transport-level metrics (pulled, dispatched, etc.).
+	// Each pool gets one chain of pool gates, shared across all
+	// subscriptions routing to it. The worker walks the chain via
+	// pipeline.ApplyChain at dispatch time. countingGate wraps the
+	// chain output for per-sub stats accounting (still applied per
+	// subscription below).
 	gatesByPoolID := map[string][]pipeline.Gate{}
 	for _, pool := range p.pools {
 		gates, err := buildPoolGateChain(p.gateFactory, pool)
@@ -244,7 +318,12 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 
 		stats := &progressStats{subscriberID: cfg.SubscriberID}
 
-		// Resolve the subscription's pool.
+		// Resolve the subscription's pool. Pool fields (gateway URL,
+		// request path, headers, model-name override, pool gate chain)
+		// take precedence over the subscription's legacy per-topic
+		// fields when both are present; the synthesizer covers legacy
+		// configs by copying those legacy fields onto a singleton
+		// pool, so the result is uniform downstream.
 		poolID := cfg.Pool
 		if poolID == "" {
 			poolID = cfg.SubscriberID
@@ -300,8 +379,17 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			"subscriptionGates", subscriptionGateTypesOf(cfg.Gates))
 
 		// Build the effective static label set for this subscription.
-		// Auto-inject pool ID as the base; subscription labels layer on top.
+		// Precedence (lowest to highest): auto-injected pool ID,
+		// pool's declared labels, subscription's declared labels.
+		// Higher layers override lower on key collision. Operators
+		// can manually set a "pool" key in subscription/pool labels
+		// to override the auto-injection (rarely useful — flagged
+		// for the few cases where the pool label needs a value
+		// distinct from the Pool.ID).
 		channelLabels := pipeline.Labels{"pool": pool.ID}
+		for k, v := range pool.Labels {
+			channelLabels[k] = v
+		}
 		for k, v := range cfg.Labels {
 			channelLabels[k] = v
 		}
@@ -366,7 +454,8 @@ func (r *PubSubMQFlow) RequestChannels() []pipeline.RequestChannel {
 
 func (r *PubSubMQFlow) Start(ctx context.Context) {
 	for _, channelData := range r.requestChannels {
-		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel, channelData.stats, channelData.gate, channelData.subscriptionGates)
+		go channelData.stats.logProgress(ctx)
+		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel, channelData.stats, channelData.subscriptionGates)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	for i := 0; i < 4; i++ {
@@ -393,6 +482,12 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 			} else {
 				msgBytes = bytes
 			}
+			// Result attributes come from the producer-stamped metadata
+			// round-trip plus the per-pod processor identity
+			// (cluster/region/pod env). The Labels namespace is
+			// operator-controlled and intentionally does not bleed into
+			// result attrs — consumer filtering relies on the metadata
+			// round-trip path.
 			attrs := resultAttributes(msg.Metadata)
 			publishPubSub(ctx, publisher, msgBytes, attrs)
 			pubsubID := msg.Routing.TransportCorrelationID
@@ -402,9 +497,13 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 				continue
 			}
 			if resultHasError(msg.Payload) {
-				tracker.stats.failed++
+				if tracker.stats != nil {
+					tracker.stats.failed.Add(1)
+				}
 			} else {
-				tracker.stats.succeeded++
+				if tracker.stats != nil {
+					tracker.stats.succeeded.Add(1)
+				}
 			}
 			tracker.resultCh <- ackAction{ack: true}
 
@@ -467,9 +566,11 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 				continue
 			}
 			nackDelay := time.Duration(msg.BackoffDurationSeconds * float64(time.Second))
-			tracker.stats.retrying++
-			if msg.RetryReason == retryReasonRateLimit {
-				tracker.stats.rateLimited++
+			if tracker.stats != nil {
+				tracker.stats.retrying.Add(1)
+				if msg.RetryReason == retryReasonRateLimit {
+					tracker.stats.rateLimited.Add(1)
+				}
 			}
 			tracker.resultCh <- ackAction{ack: false, nackDelay: nackDelay}
 
@@ -478,7 +579,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, requestChannel pipeline.RequestChannel, stats *progressStats, gate pipeline.Gate, subscriptionGates []pipeline.Gate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, requestChannel pipeline.RequestChannel, stats *progressStats, subscriptionGates []pipeline.Gate) {
 	ch := requestChannel.Channel
 	channelLabels := requestChannel.Labels
 	logger := log.FromContext(ctx)
@@ -489,6 +590,13 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 	// so MaxOutstandingMessages controls the prefetch buffer depth, not
 	// concurrency. Set high so the stream continuously pulls while
 	// workers process the current batch.
+	//
+	// NumGoroutines MUST be 1. The Go Pub/Sub client has a known bug
+	// where NumGoroutines > 1 causes flow control issues:
+	// https://github.com/googleapis/google-cloud-go/wiki/Fine-Tuning-PubSub-Receive-Performance
+	//
+	// MaxOutstandingBytes = -1 removes the bytes-based limit (default
+	// 1GB) so only message count gates prefetch.
 	prefetchDepth := *batchSize * 5
 	if prefetchDepth < 1000 {
 		prefetchDepth = 1000
@@ -497,6 +605,11 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 	sub.ReceiveSettings.MaxOutstandingBytes = -1
 	sub.ReceiveSettings.NumGoroutines = 1
 	sub.ReceiveSettings.MaxExtension = 10 * time.Minute
+	logger.V(logutil.DEFAULT).Info("PubSub prefetch configured",
+		"subscriberID", subscriberID,
+		"MaxOutstandingMessages", prefetchDepth,
+		"NumGoroutines", 1,
+		"MaxExtension", "10m")
 
 	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 
@@ -509,7 +622,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			msg.Ack()
 			return
 		}
-		stats.pulled++
+		stats.pulled.Add(1)
 
 		if body.Metadata == nil {
 			body.Metadata = make(map[string]string)
@@ -519,7 +632,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			resultCh: resultsChannel,
 			stats:    stats,
 		})
-		stats.inFlight++
+		stats.inFlight.Add(1)
 
 		for k, v := range msg.Attributes {
 			if k == PUBSUB_ID {
@@ -532,11 +645,18 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		if deliveryAttempt != nil {
 			irout.RetryCount = *deliveryAttempt - 1
 		}
+		// channelLabels is the operator-defined static label set (pool ID
+		// + pool.Labels + subscription.Labels), already merged at
+		// startup. Producers cannot influence Labels — per-message
+		// transport attributes round-trip via body.Metadata /
+		// result.Metadata instead, not via the Labels namespace.
 		irout.Labels = channelLabels.Clone()
 		ir := api.NewInternalRequest(irout, &body)
 
-		// Build the fully-embellished message so the gate and merge
-		// policy receive it with all HTTP dispatch fields set.
+		// Build the full EmbelishedRequestMessage now so subscription-gate
+		// releases ride with the message all the way to the worker. With
+		// the channel type carrying *EmbelishedRequestMessage, we build
+		// once here and send directly.
 		emb := buildEmbelishedFromChannel(ir, requestChannel)
 
 		// Subscription gates: run the chain on emb. Labels are aliased
@@ -544,6 +664,11 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		// Must be fast — slow gates block the receive callback and stall
 		// prefetch. On Continue, releases stay attached to emb and fire
 		// at worker terminal via defer msg.FireReleases().
+		//
+		// Pool gates are NOT applied here — they run in the per-pool
+		// worker pool downstream of the merge policy, via emb.Gate.
+		// Running them here would stall prefetch on saturated pools,
+		// which is precisely what this design avoids.
 		if len(subscriptionGates) > 0 {
 			v, err := pipeline.ApplyChain(ctx, emb, subscriptionGates)
 			if err != nil {
@@ -553,34 +678,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 				return
 			}
 			if v.Terminate {
-				stats.gateDenied++
-				emb.FireReleases()
-				if v.Result != nil {
-					select {
-					case r.resultChannel <- *v.Result:
-					case <-ctx.Done():
-					}
-				}
-				if v.Redeliver {
-					resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
-				} else {
-					resultsChannel <- ackAction{ack: true}
-				}
-				return
-			}
-		}
-
-		// Pool gate evaluation: run Gate.Apply before dispatching.
-		if gate != nil {
-			v, err := gate.Apply(ctx, emb)
-			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "gate error; treating as Refuse", "subscriberID", subscriberID)
-				emb.FireReleases()
-				resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
-				return
-			}
-			if v.Terminate {
-				stats.gateDenied++
+				stats.gateDenied.Add(1)
 				emb.FireReleases()
 				if v.Result != nil {
 					select {
@@ -598,7 +696,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		}
 
 		ch <- emb
-		stats.dispatched++
+		stats.dispatched.Add(1)
 
 		// Return from the callback immediately so sub.Receive can
 		// pull more messages. The library keeps extending the ack
@@ -607,20 +705,22 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		go func() {
 			defer func() {
 				resultChannels.Delete(msg.ID)
-				stats.inFlight--
-				emb.FireReleases()
+				stats.inFlight.Add(-1)
 			}()
 			var result ackAction
 			select {
 			case result = <-resultsChannel:
 			case <-ctx.Done():
+				// Worker pool exited before this message reached a
+				// terminal state. Nack so Pub/Sub redelivers it
+				// rather than waiting for the ack deadline to expire.
 				msg.Nack()
 				return
 			}
 			if result.ack {
 				metrics.MessageLatencyTime.Observe(float64(time.Since(msg.PublishTime).Milliseconds()))
 				msg.Ack()
-				stats.acked++
+				stats.acked.Add(1)
 				return
 			}
 
@@ -635,7 +735,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			}
 			if !result.ack {
 				msg.Nack()
-				stats.delayedNacks++
+				stats.delayedNacks.Add(1)
 			}
 		}()
 	})
@@ -666,7 +766,19 @@ func resultHasError(payload string) bool {
 }
 
 // loadTopicsConfig reads the topics-config file and returns the
-// subscription list plus a map of pool ID -> Pool.
+// subscription list plus a map of pool ID -> Pool. Both formats are
+// supported:
+//
+//  1. Legacy: JSON array of TopicConfig. Each subscription is wrapped
+//     in a synthesized singleton pool named after its subscriber_id
+//     that inherits the subscription's legacy HTTP/gate fields.
+//  2. New:    JSON object { "pools": [...], "subscriptions": [...] }.
+//     Pools are declared explicitly; subscriptions reference them by
+//     ID. Subscriptions that do not declare a Pool get a synthesized
+//     one (same as legacy mode).
+//
+// When no config file is provided the flag-based legacy single-topic
+// fallback is used.
 func loadTopicsConfig() ([]TopicConfig, map[string]pipeline.Pool) {
 	if *topicsConfigFile == "" {
 		cfg := TopicConfig{
@@ -706,7 +818,8 @@ func loadTopicsConfig() ([]TopicConfig, map[string]pipeline.Pool) {
 		pools[p.ID] = p
 	}
 	// Subscriptions that don't reference a declared pool get a
-	// synthesized singleton pool.
+	// synthesized singleton pool. This handles half-migrations
+	// gracefully.
 	for _, s := range fc.Subscriptions {
 		if s.Pool == "" {
 			pools[s.SubscriberID] = synthesizePool(s)
@@ -718,7 +831,8 @@ func loadTopicsConfig() ([]TopicConfig, map[string]pipeline.Pool) {
 }
 
 // synthesizePoolsForLegacy creates one synthesized pool per subscription
-// for the legacy config format.
+// for the legacy config format, where pool-level config lived alongside
+// subscription-level config on each TopicConfig.
 func synthesizePoolsForLegacy(subs []TopicConfig) map[string]pipeline.Pool {
 	pools := make(map[string]pipeline.Pool, len(subs))
 	for _, s := range subs {
@@ -728,7 +842,11 @@ func synthesizePoolsForLegacy(subs []TopicConfig) map[string]pipeline.Pool {
 }
 
 // synthesizePool builds a Pool from a TopicConfig's legacy fields,
-// named after the subscription.
+// named after the subscription. The pool's Gates list contains the
+// subscription's legacy gate as its sole entry (the legacy
+// per-subscription gate is morally a pool gate by the new semantics,
+// since it ran at the worker site, so it slots into the pool's Gates
+// chain naturally).
 func synthesizePool(s TopicConfig) pipeline.Pool {
 	pool := pipeline.Pool{
 		ID:                s.SubscriberID,
@@ -747,6 +865,8 @@ func synthesizePool(s TopicConfig) pipeline.Pool {
 }
 
 // bytesTrimLeftSpace returns b with leading ASCII whitespace removed.
+// Tiny helper to peek at the first non-whitespace byte without pulling
+// in the unicode/strings packages for one use site.
 func bytesTrimLeftSpace(b []byte) []byte {
 	for i, c := range b {
 		switch c {
@@ -783,6 +903,37 @@ func gateTypesOf(gs []pipeline.GateConfig) string {
 		out += g.Type
 	}
 	return out
+}
+
+// buildEmbelishedFromChannel creates a fully-populated EmbelishedRequestMessage
+// from the pulled InternalRequest and the subscription's RequestChannel metadata.
+// All HTTP dispatch fields are set here so the message is ready for the merge
+// policy and worker without any re-wrapping step. Labels are aliased from
+// ir.Labels (which the callback seeds from channelLabels), so subscription-gate
+// label mutations are reflected in the routing without copying.
+func buildEmbelishedFromChannel(ir *api.InternalRequest, ch pipeline.RequestChannel) *pipeline.EmbelishedRequestMessage {
+	requestURL := ch.IGWBaseURL + ch.RequestPathURL
+	if ir.PublicRequest != nil {
+		if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
+			requestURL = ch.IGWBaseURL + ep
+		}
+	}
+	headers := map[string]string{"Content-Type": "application/json"}
+	if ch.InferenceObjective != "" {
+		headers["x-gateway-inference-objective"] = ch.InferenceObjective
+	}
+	for k, v := range ch.HTTPHeaders {
+		headers[k] = v
+	}
+	return &pipeline.EmbelishedRequestMessage{
+		InternalRequest:   ir,
+		HttpHeaders:       headers,
+		RequestURL:        requestURL,
+		Gate:              ch.Gate,
+		ModelNameOverride: ch.ModelNameOverride,
+		Labels:            pipeline.Labels(ir.Labels),
+		PoolID:            ch.PoolID,
+	}
 }
 
 // buildPoolGateChain constructs the chain of pool gates for a single
@@ -827,31 +978,4 @@ func buildSubscriptionGateChain(factory pipeline.GateFactory, subID string, gate
 		out = append(out, g)
 	}
 	return out, nil
-}
-
-// buildEmbelishedFromChannel creates a fully-populated EmbelishedRequestMessage
-// from the pulled InternalRequest and the subscription's RequestChannel metadata.
-func buildEmbelishedFromChannel(ir *api.InternalRequest, ch pipeline.RequestChannel) *pipeline.EmbelishedRequestMessage {
-	requestURL := ch.IGWBaseURL + ch.RequestPathURL
-	if ir.PublicRequest != nil {
-		if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
-			requestURL = ch.IGWBaseURL + ep
-		}
-	}
-	headers := map[string]string{"Content-Type": "application/json"}
-	if ch.InferenceObjective != "" {
-		headers["x-gateway-inference-objective"] = ch.InferenceObjective
-	}
-	for k, v := range ch.HTTPHeaders {
-		headers[k] = v
-	}
-	return &pipeline.EmbelishedRequestMessage{
-		InternalRequest:   ir,
-		HttpHeaders:       headers,
-		RequestURL:        requestURL,
-		Gate:              ch.Gate,
-		ModelNameOverride: ch.ModelNameOverride,
-		Labels:            pipeline.Labels(ir.Labels),
-		PoolID:            ch.PoolID,
-	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pkg/pubsub"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
 	"github.com/llm-d-incubation/llm-d-async/pkg/version"
+	goredis "github.com/redis/go-redis/v9"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -91,10 +92,25 @@ func main() {
 	// for tier-priority-admission) are driven by the signal-handler ctx.
 	ctx := ctrl.SetupSignalHandler()
 
-	// Create Gate Factory for per-queue gate instantiation
-	gateFactory := flowcontrol.NewGateFactoryWithCacheTTL(*prometheusURL, *prometheusCacheTTL,
+	// Shared redis client for gates that need it (e.g.
+	// reservation-classifier, tier-priority-admission redis-counter).
+	// Best-effort: if --redis.url is not set, those gates will fail at
+	// construction. Other gate types and Flow impls that don't need
+	// redis are unaffected.
+	var gateRedisClient *goredis.Client
+	if redisOpts, err := redis.RedisOptions(); err == nil {
+		gateRedisClient = goredis.NewClient(redisOpts)
+	} else {
+		setupLog.Info("Redis client for gates not available; redis-backed gates will not initialize", "reason", err.Error())
+	}
+
+	gateFactoryOpts := []flowcontrol.GateFactoryOption{
 		flowcontrol.WithBackgroundContext(ctx),
-	)
+	}
+	if gateRedisClient != nil {
+		gateFactoryOpts = append(gateFactoryOpts, flowcontrol.WithRedisClient(gateRedisClient))
+	}
+	gateFactory := flowcontrol.NewGateFactoryWithCacheTTL(*prometheusURL, *prometheusCacheTTL, gateFactoryOpts...)
 
 	var impl pipeline.Flow
 	switch messageQueueImpl {

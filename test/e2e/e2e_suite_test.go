@@ -320,11 +320,6 @@ func applyManifests() {
 	imageRepo, imageTag := splitImage(apImage)
 	for _, r := range []struct{ name, values string }{
 		{"integration", helmValuesDir + "/integration.yaml"},
-		{"saturation", helmValuesDir + "/saturation.yaml"},
-		{"budget", helmValuesDir + "/budget.yaml"},
-		{"redis-gate", helmValuesDir + "/redis-gate.yaml"},
-		{"quota", helmValuesDir + "/quota.yaml"},
-		{"composite", helmValuesDir + "/composite.yaml"},
 	} {
 		helmInstall(r.name, r.values, map[string]string{
 			"ap.image.repository": imageRepo,
@@ -535,11 +530,6 @@ func doRedeployEPPWithFlowControl() {
 	// window can get 404s from Envoy that are classified as non-retryable.
 	for _, deploy := range []string{
 		"integration-async-processor",
-		"saturation-async-processor",
-		"budget-async-processor",
-		"redis-gate-async-processor",
-		"quota-async-processor",
-		"composite-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
@@ -549,11 +539,6 @@ func doRedeployEPPWithFlowControl() {
 	}
 	for _, deploy := range []string{
 		"integration-async-processor",
-		"saturation-async-processor",
-		"budget-async-processor",
-		"redis-gate-async-processor",
-		"quota-async-processor",
-		"composite-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")

@@ -2,11 +2,15 @@
 // that emits one channel per inference pool.
 //
 // The policy buckets each pulled message by (pool, tier, class) labels
-// and within each pool runs a strict-priority loop across passes (class)
-// and tiers, with round-robin across (team × model) source channels
-// within each (tier, class) bucket. Per-pool buckets share no state
-// with other pools' buckets — each pool dispatches independently to its
-// own output channel.
+// and within each pool dispatches in (class, tier) priority order —
+// class is the dominant axis, tier is the tiebreaker. With default
+// ordering [reserved, overflow] × [interactive, async, batch],
+// that means reserved/batch outranks overflow/interactive: reserved
+// capacity is a floor that overflow at any tier cannot displace.
+// Round-robin across (team × model) source channels within each
+// (class, tier) bucket. Per-pool buckets share no state with other
+// pools' buckets — each pool dispatches independently to its own
+// output channel.
 //
 // Reserved/Overflow class names are policy-internal strings; upstream
 // pipeline knows nothing about them. Operators configure the label key

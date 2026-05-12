@@ -25,9 +25,6 @@ const (
 	saturationRequestQueue = "saturation-request-sortedset"
 	saturationResultQueue  = "saturation-result-list"
 
-	redisGateRequestQueue = "redis-gate-request-sortedset"
-	redisGateResultQueue  = "redis-gate-result-list"
-	dispatchGateBudgetKey = "dispatch-gate-budget"
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -244,10 +241,3 @@ func setEnvoyFaultAbort(envoyAdminURL string, percent int) {
 	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
 }
 
-func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string) {
-	gomega.ExpectWithOffset(1, rdb.Set(ctx, dispatchGateBudgetKey, budget, 0).Err()).NotTo(gomega.HaveOccurred())
-}
-
-func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
-	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
-}

@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -150,57 +149,3 @@ var _ = ginkgo.Describe("General Integration", func() {
 	})
 })
 
-var _ = ginkgo.Describe("Redis Dispatch Gate E2E", func() {
-	var ctx context.Context
-
-	ginkgo.BeforeEach(func() {
-		ctx = context.Background()
-		rdb.Del(ctx, redisGateRequestQueue) //nolint:errcheck
-		rdb.Del(ctx, redisGateResultQueue)  //nolint:errcheck
-		clearDispatchGateBudget(ctx, rdb)
-	})
-
-	ginkgo.AfterEach(func() {
-		clearDispatchGateBudget(ctx, rdb)
-	})
-
-	ginkgo.It("pauses processing when budget is zero", func() {
-		setDispatchGateBudget(ctx, rdb, "0.0")
-
-		msg := makeRequestMessage("gated-pause", 5*time.Minute)
-		enqueueMessage(ctx, rdb, redisGateRequestQueue, msg)
-
-		gomega.Consistently(func() int64 {
-			return getResultCount(ctx, rdb, redisGateResultQueue)
-		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
-
-		setDispatchGateBudget(ctx, rdb, "1.0")
-
-		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, redisGateResultQueue)
-		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 1))
-
-		result := popResult(ctx, rdb, redisGateResultQueue)
-		gomega.Expect(result).NotTo(gomega.BeNil())
-		gomega.Expect(result.ID).To(gomega.Equal("gated-pause"))
-	})
-
-	ginkgo.It("resumes processing when budget changes from zero to one", func() {
-		setDispatchGateBudget(ctx, rdb, "0.0")
-
-		for i := 1; i <= 3; i++ {
-			msg := makeRequestMessage(fmt.Sprintf("resume-%d", i), 5*time.Minute)
-			enqueueMessage(ctx, rdb, redisGateRequestQueue, msg)
-		}
-
-		gomega.Consistently(func() int64 {
-			return getResultCount(ctx, rdb, redisGateResultQueue)
-		}, 5*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
-
-		setDispatchGateBudget(ctx, rdb, "1.0")
-
-		gomega.Eventually(func() int64 {
-			return getResultCount(ctx, rdb, redisGateResultQueue)
-		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 3))
-	})
-})

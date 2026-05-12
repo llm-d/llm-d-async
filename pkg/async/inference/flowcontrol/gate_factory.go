@@ -84,6 +84,17 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration, op
 //   - "tier-priority-admission": pool saturation gate with three-way verdict.
 //     Params: source (prometheus|redis-counter, required), plus source-specific
 //     params. See TierPriorityAdmissionConfig and PoolLoadSource for details.
+//   - "reservation-classifier": redis-backed multi-key reservation
+//     classifier. Stamps a `class` label (configurable key) with
+//     reserved/overflow based on per-bucket in-flight vs cap.
+//     Requires WithRedisClient. Params:
+//     bucket_keys (required, comma-separated label keys),
+//     class_label (default "class"),
+//     reserved_value (default "reserved"),
+//     overflow_value (default "overflow"),
+//     key_prefix (default "rmp"),
+//     ttl_seconds (default 86400),
+//     fallback_cap (default 0).
 //
 // For unknown gate types, returns the always-Continue gate as a safe default.
 func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pipeline.Gate, error) {
@@ -128,6 +139,36 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 
 	case "tier-priority-admission":
 		return f.createTierPriorityAdmission(params)
+
+	case "reservation-classifier":
+		if f.rdb == nil {
+			return nil, fmt.Errorf("reservation-classifier gate requires a redis client (use WithRedisClient on the gate factory)")
+		}
+		raw := strings.TrimSpace(params["bucket_keys"])
+		if raw == "" {
+			return nil, fmt.Errorf("reservation-classifier gate: bucket_keys is required")
+		}
+		bucketKeys := splitAndTrimCSV(raw)
+		if len(bucketKeys) == 0 {
+			return nil, fmt.Errorf("reservation-classifier gate: bucket_keys must contain at least one label key")
+		}
+		ttl, err := parseInt("ttl_seconds", params["ttl_seconds"], defaultClassifierTTLSeconds)
+		if err != nil {
+			return nil, err
+		}
+		fallbackCap, err := parseInt("fallback_cap", params["fallback_cap"], 0)
+		if err != nil {
+			return nil, err
+		}
+		return NewReservationClassifierGate(f.rdb, ReservationClassifierConfig{
+			BucketKeys:    bucketKeys,
+			ClassKey:      params["class_label"],
+			ReservedValue: params["reserved_value"],
+			OverflowValue: params["overflow_value"],
+			KeyPrefix:     params["key_prefix"],
+			TTLSeconds:    ttl,
+			FallbackCap:   fallbackCap,
+		})
 
 	default:
 		// Unknown gate types default to always-Continue gate
@@ -279,6 +320,3 @@ func splitAndTrimCSV(s string) []string {
 	}
 	return out
 }
-
-// splitAndTrimCSV is exported for use by gate config parsers.
-var _ = splitAndTrimCSV
