@@ -14,7 +14,7 @@ replace github.com/llm-d-incubation/llm-d-async/pipeline => ./pipeline
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.6.0
-	github.com/alicebob/miniredis/v2 v2.37.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/go-logr/logr v1.4.3
 	github.com/onsi/ginkgo/v2 v2.28.3
 	github.com/onsi/gomega v1.40.0
