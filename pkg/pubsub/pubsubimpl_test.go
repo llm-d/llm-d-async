@@ -8,6 +8,7 @@ import (
 
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
 type mockAttributeGate struct {
@@ -17,9 +18,13 @@ type mockAttributeGate struct {
 }
 
 func (m *mockAttributeGate) Budget(ctx context.Context) float64 { return 1.0 }
-func (m *mockAttributeGate) Acquire(ctx context.Context, attrs map[string]string) (bool, func(), error) {
+func (m *mockAttributeGate) Acquire(ctx context.Context, attrs map[string]string) (pipeline.AcquireResult, error) {
 	m.acquireCalled = true
-	return m.allowed, func() { m.releaseCalled = true }, nil
+	return pipeline.AcquireResult{
+		Allowed:        m.allowed,
+		Classification: api.ClassificationReserved,
+		Release:        func() { m.releaseCalled = true },
+	}, nil
 }
 
 func TestProcessMessages_QuotaGating(t *testing.T) {

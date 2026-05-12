@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"context"
 
+	"github.com/llm-d-incubation/llm-d-async/api"
 	pipeline "github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
@@ -58,7 +59,7 @@ func (c *CompositeGate) Budget(ctx context.Context) float64 {
 // Acquire implements AttributeGate.
 // It attempts to acquire quota across all inner AttributeGates.
 // If any gate denies the request or fails, it releases the quota acquired from previous gates.
-func (c *CompositeGate) Acquire(ctx context.Context, attributes map[string]string) (bool, func(), error) {
+func (c *CompositeGate) Acquire(ctx context.Context, attributes map[string]string) (pipeline.AcquireResult, error) {
 	var releases []func()
 	releaseAll := func() {
 		for i := len(releases) - 1; i >= 0; i-- {
@@ -66,22 +67,34 @@ func (c *CompositeGate) Acquire(ctx context.Context, attributes map[string]strin
 		}
 	}
 
+	finalClassification := api.ClassificationNone
 	for _, gate := range c.gates {
 		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			allowed, release, err := attrGate.Acquire(ctx, attributes)
+			res, err := attrGate.Acquire(ctx, attributes)
 			if err != nil {
 				releaseAll()
-				return false, nil, err
+				return pipeline.AcquireResult{}, err
 			}
-			if !allowed {
+			if !res.Allowed {
 				releaseAll()
-				return false, nil, nil
+				return pipeline.AcquireResult{Allowed: false, Classification: api.ClassificationOverflow}, nil
 			}
-			if release != nil {
-				releases = append(releases, release)
+			if res.Release != nil {
+				releases = append(releases, res.Release)
+			}
+
+			// Aggregate classification: Overflow dominates.
+			if res.Classification == api.ClassificationOverflow {
+				finalClassification = api.ClassificationOverflow
+			} else if res.Classification == api.ClassificationReserved && finalClassification == api.ClassificationNone {
+				finalClassification = api.ClassificationReserved
 			}
 		}
 	}
 
-	return true, releaseAll, nil
+	return pipeline.AcquireResult{
+		Allowed:        true,
+		Classification: finalClassification,
+		Release:        releaseAll,
+	}, nil
 }

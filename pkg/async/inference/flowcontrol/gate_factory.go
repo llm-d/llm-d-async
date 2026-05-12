@@ -166,7 +166,13 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 			prefix = "quota:"
 		}
 
-		return redisgate.NewRedisQuotaGate(client, attr, mode, limit, window, prefix), nil
+		gate := redisgate.NewRedisQuotaGate(client, attr, mode, limit, window, prefix)
+		gatingMode := redisgate.GatingMode(params["gating_mode"])
+		if gatingMode != "" {
+			gate.WithGatingMode(gatingMode)
+		}
+
+		return gate, nil
 
 	case "prometheus-saturation":
 		if f.prometheusURL == "" {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -20,24 +21,38 @@ const (
 	QuotaModeConcurrency QuotaMode = "concurrency"
 )
 
+type GatingMode string
+
+const (
+	GatingModeBlocking    GatingMode = "blocking"
+	GatingModeClassifying GatingMode = "classifying"
+)
+
 type RedisQuotaGate struct {
-	rdb       *redis.Client
-	attribute string
-	mode      QuotaMode
-	limit     int
-	window    time.Duration
-	prefix    string
+	rdb        *redis.Client
+	attribute  string
+	mode       QuotaMode
+	gatingMode GatingMode
+	limit      int
+	window     time.Duration
+	prefix     string
 }
 
 func NewRedisQuotaGate(client *redis.Client, attribute string, mode QuotaMode, limit int, window time.Duration, prefix string) *RedisQuotaGate {
 	return &RedisQuotaGate{
-		rdb:       client,
-		attribute: attribute,
-		mode:      mode,
-		limit:     limit,
-		window:    window,
-		prefix:    prefix,
+		rdb:        client,
+		attribute:  attribute,
+		mode:       mode,
+		gatingMode: GatingModeBlocking,
+		limit:      limit,
+		window:     window,
+		prefix:     prefix,
 	}
+}
+
+func (g *RedisQuotaGate) WithGatingMode(mode GatingMode) *RedisQuotaGate {
+	g.gatingMode = mode
+	return g
 }
 
 // Budget implements api.DispatchGate. For quota gates, we return 1.0 (open)
@@ -47,27 +62,45 @@ func (g *RedisQuotaGate) Budget(ctx context.Context) float64 {
 }
 
 // Acquire implements api.AttributeGate.
-func (g *RedisQuotaGate) Acquire(ctx context.Context, attributes map[string]string) (bool, func(), error) {
+func (g *RedisQuotaGate) Acquire(ctx context.Context, attributes map[string]string) (pipeline.AcquireResult, error) {
 	val, ok := attributes[g.attribute]
 	if !ok {
 		// If the attribute is missing, we allow it by default (or we could reject it).
-		// For now, let's allow it but log a warning.
-		return true, func() {}, nil
+		return pipeline.AcquireResult{Allowed: true, Classification: api.ClassificationNone}, nil
 	}
 
 	key := fmt.Sprintf("%s%s:%s", g.prefix, g.attribute, val)
 
+	var classification api.QuotaClassification
+	var release func()
+	var err error
+
 	switch g.mode {
 	case QuotaModeConcurrency:
-		return g.acquireConcurrency(ctx, key)
+		classification, release, err = g.acquireConcurrency(ctx, key)
 	case QuotaModeRateLimit:
-		return g.acquireRateLimit(ctx, key)
+		classification, release, err = g.acquireRateLimit(ctx, key)
 	default:
-		return true, func() {}, nil
+		return pipeline.AcquireResult{Allowed: true, Classification: api.ClassificationNone}, nil
 	}
+
+	if err != nil {
+		return pipeline.AcquireResult{}, err
+	}
+
+	allowed := true
+	if g.gatingMode == GatingModeBlocking {
+		allowed = (classification == api.ClassificationReserved)
+	}
+
+	return pipeline.AcquireResult{
+		Allowed:        allowed,
+		Classification: classification,
+		Release:        release,
+	}, nil
 }
 
-func (g *RedisQuotaGate) acquireConcurrency(ctx context.Context, key string) (bool, func(), error) {
+func (g *RedisQuotaGate) acquireConcurrency(ctx context.Context, key string) (api.QuotaClassification, func(), error) {
 	// Use Lua script for atomic check and increment
 	script := `
 		local current = redis.call("GET", KEYS[1])
@@ -88,11 +121,11 @@ func (g *RedisQuotaGate) acquireConcurrency(ctx context.Context, key string) (bo
 
 	res, err := g.rdb.Eval(ctx, script, []string{key}, g.limit, ttl).Result()
 	if err != nil {
-		return false, nil, err
+		return api.ClassificationNone, nil, err
 	}
 
 	if res.(int64) == 0 {
-		return false, nil, nil
+		return api.ClassificationOverflow, nil, nil
 	}
 
 	release := func() {
@@ -109,10 +142,10 @@ func (g *RedisQuotaGate) acquireConcurrency(ctx context.Context, key string) (bo
 		}
 	}
 
-	return true, release, nil
+	return api.ClassificationReserved, release, nil
 }
 
-func (g *RedisQuotaGate) acquireRateLimit(ctx context.Context, key string) (bool, func(), error) {
+func (g *RedisQuotaGate) acquireRateLimit(ctx context.Context, key string) (api.QuotaClassification, func(), error) {
 	// Sliding window rate limit using Sorted Set
 	now := time.Now().UnixNano()
 	windowNano := g.window.Nanoseconds()
@@ -136,12 +169,12 @@ func (g *RedisQuotaGate) acquireRateLimit(ctx context.Context, key string) (bool
 
 	res, err := g.rdb.Eval(ctx, script, []string{key}, min, g.limit, now, ttl).Result()
 	if err != nil {
-		return false, nil, err
+		return api.ClassificationNone, nil, err
 	}
 
 	if res.(int64) == 0 {
-		return false, nil, nil
+		return api.ClassificationOverflow, nil, nil
 	}
 
-	return true, func() {}, nil
+	return api.ClassificationReserved, func() {}, nil
 }

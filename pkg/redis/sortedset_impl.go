@@ -259,7 +259,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		// Per-attribute gating
 		var release func()
 		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			allowed, rel, err := attrGate.Acquire(ctx, rview.ReqMetadata())
+			res, err := attrGate.Acquire(ctx, rview.ReqMetadata())
 			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to acquire attribute quota")
 				// Re-enqueue the message if acquisition fails
@@ -267,13 +267,14 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 				r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
 				continue
 			}
-			if !allowed {
+			if !res.Allowed {
 				// Re-enqueue the message (wait for quota)
 				member, _ := json.Marshal(ir)
 				r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
 				continue
 			}
-			release = rel
+			release = res.Release
+			ir.Classification = res.Classification
 		} else {
 			release = func() {}
 		}

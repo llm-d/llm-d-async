@@ -315,13 +315,13 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		// Per-attribute gating
 		var release func()
 		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			allowed, rel, err := attrGate.Acquire(ctx, msg.Attributes)
+			res, err := attrGate.Acquire(ctx, msg.Attributes)
 			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to acquire attribute quota")
 				msg.Nack()
 				return
 			}
-			if !allowed {
+			if !res.Allowed {
 				logger.V(logutil.DEBUG).Info("Quota exceeded, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)
 				go func() {
 					select {
@@ -333,7 +333,8 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 				}()
 				return
 			}
-			release = rel
+			release = res.Release
+			ir.Classification = res.Classification
 		} else {
 			release = func() {}
 		}

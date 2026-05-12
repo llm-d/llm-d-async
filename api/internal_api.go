@@ -5,6 +5,14 @@ import (
 	"fmt"
 )
 
+type QuotaClassification string
+
+const (
+	ClassificationNone     QuotaClassification = ""
+	ClassificationReserved QuotaClassification = "reserved"
+	ClassificationOverflow QuotaClassification = "overflow"
+)
+
 // InternalRouting holds the resolved, authoritative routing fields used by
 // infrastructure (producers, workers, retry logic). These are not part of the
 // caller-facing contract and should not be set by callers directly.
@@ -13,10 +21,11 @@ import (
 // values here. All internal pipeline code reads routing exclusively from this
 // struct rather than reaching back into the typed request.
 type InternalRouting struct {
-	RetryCount             int    `json:"retry_count,omitempty"`
-	RequestQueueName       string `json:"request_queue_name,omitempty"`
-	ResultQueueName        string `json:"result_queue_name,omitempty"`
-	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
+	RetryCount             int                 `json:"retry_count,omitempty"`
+	RequestQueueName       string              `json:"request_queue_name,omitempty"`
+	ResultQueueName        string              `json:"result_queue_name,omitempty"`
+	TransportCorrelationID string              `json:"transport_correlation_id,omitempty"`
+	Classification         QuotaClassification `json:"classification,omitempty"`
 }
 
 // InternalRequest is the internal envelope: routing data plus a concrete Request.

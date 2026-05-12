@@ -21,6 +21,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/llm-d-incubation/llm-d-async/api"
+	pipeline "github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -34,21 +36,30 @@ func (m *mockDispatchGate) Budget(ctx context.Context) float64 {
 
 type mockAttributeGate struct {
 	mockDispatchGate
-	allowed bool
-	err     error
-	calls   int
-	release bool
+	allowed        bool
+	classification api.QuotaClassification
+	err            error
+	calls          int
+	release        bool
 }
 
-func (m *mockAttributeGate) Acquire(ctx context.Context, attributes map[string]string) (bool, func(), error) {
+func (m *mockAttributeGate) Acquire(ctx context.Context, attributes map[string]string) (pipeline.AcquireResult, error) {
 	m.calls++
 	if m.err != nil {
-		return false, nil, m.err
+		return pipeline.AcquireResult{}, m.err
 	}
 	if !m.allowed {
-		return false, nil, nil
+		return pipeline.AcquireResult{Allowed: false, Classification: api.ClassificationOverflow}, nil
 	}
-	return true, func() { m.release = true }, nil
+	class := m.classification
+	if class == "" {
+		class = api.ClassificationReserved
+	}
+	return pipeline.AcquireResult{
+		Allowed:        true,
+		Classification: class,
+		Release:        func() { m.release = true },
+	}, nil
 }
 
 func TestCompositeGate_Budget(t *testing.T) {
@@ -79,11 +90,11 @@ func TestCompositeGate_Acquire(t *testing.T) {
 		gate := NewCompositeGate(
 			&mockDispatchGate{budget: 0.5},
 		)
-		allowed, release, err := gate.Acquire(context.Background(), nil)
-		assert.True(t, allowed)
+		res, err := gate.Acquire(context.Background(), nil)
+		assert.True(t, res.Allowed)
 		assert.NoError(t, err)
-		assert.NotNil(t, release)
-		release()
+		assert.NotNil(t, res.Release)
+		res.Release()
 	})
 
 	t.Run("All allowed", func(t *testing.T) {
@@ -91,12 +102,12 @@ func TestCompositeGate_Acquire(t *testing.T) {
 		gate2 := &mockAttributeGate{allowed: true}
 		gate := NewCompositeGate(gate1, gate2)
 
-		allowed, release, err := gate.Acquire(context.Background(), nil)
-		assert.True(t, allowed)
+		res, err := gate.Acquire(context.Background(), nil)
+		assert.True(t, res.Allowed)
 		assert.NoError(t, err)
-		assert.NotNil(t, release)
+		assert.NotNil(t, res.Release)
 
-		release()
+		res.Release()
 		assert.True(t, gate1.release)
 		assert.True(t, gate2.release)
 	})
@@ -107,10 +118,10 @@ func TestCompositeGate_Acquire(t *testing.T) {
 		gate3 := &mockAttributeGate{allowed: true}
 		gate := NewCompositeGate(gate1, gate2, gate3)
 
-		allowed, release, err := gate.Acquire(context.Background(), nil)
-		assert.False(t, allowed)
+		res, err := gate.Acquire(context.Background(), nil)
+		assert.False(t, res.Allowed)
 		assert.NoError(t, err)
-		assert.Nil(t, release)
+		assert.Nil(t, res.Release)
 
 		assert.Equal(t, 1, gate1.calls)
 		assert.Equal(t, 1, gate2.calls)
@@ -123,13 +134,35 @@ func TestCompositeGate_Acquire(t *testing.T) {
 		gate2 := &mockAttributeGate{err: errors.New("test error")}
 		gate := NewCompositeGate(gate1, gate2)
 
-		allowed, release, err := gate.Acquire(context.Background(), nil)
-		assert.False(t, allowed)
+		res, err := gate.Acquire(context.Background(), nil)
+		assert.False(t, res.Allowed)
 		assert.Error(t, err)
-		assert.Nil(t, release)
+		assert.Nil(t, res.Release)
 
 		assert.Equal(t, 1, gate1.calls)
 		assert.Equal(t, 1, gate2.calls)
 		assert.True(t, gate1.release) // gate1 was released because gate2 errored
+	})
+}
+
+func TestCompositeGate_Classification(t *testing.T) {
+	t.Run("Reserved aggregation", func(t *testing.T) {
+		gate1 := &mockAttributeGate{allowed: true, classification: api.ClassificationReserved}
+		gate2 := &mockAttributeGate{allowed: true, classification: api.ClassificationNone}
+		gate := NewCompositeGate(gate1, gate2)
+
+		res, err := gate.Acquire(context.Background(), nil)
+		assert.NoError(t, err)
+		assert.Equal(t, api.ClassificationReserved, res.Classification)
+	})
+
+	t.Run("Overflow aggregation", func(t *testing.T) {
+		gate1 := &mockAttributeGate{allowed: true, classification: api.ClassificationReserved}
+		gate2 := &mockAttributeGate{allowed: true, classification: api.ClassificationOverflow}
+		gate := NewCompositeGate(gate1, gate2)
+
+		res, err := gate.Acquire(context.Background(), nil)
+		assert.NoError(t, err)
+		assert.Equal(t, api.ClassificationOverflow, res.Classification)
 	})
 }

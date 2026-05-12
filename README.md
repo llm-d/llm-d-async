@@ -101,6 +101,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 
 - `constant`: Always returns budget 1.0 (fully open) - no throttling.
 - `redis`: Queries Redis for dispatch budget (managed by external system).
+- `redis-quota`: Per-attribute quota management via Redis.
 - `composite`: Combines multiple gates. Returns the minimum budget across all inner dispatch gates and acquires quota across all inner attribute gates (all or nothing).
 - `prometheus-saturation`: Queries Prometheus for pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
 - `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
@@ -166,6 +167,15 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `redis`:
   - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.
   - `budget_key` (optional): Redis key to read dispatch budget from. Default is `dispatch-gate-budget`.
+
+- `redis-quota`:
+  - `address` (**required**): Redis server address.
+  - `attribute` (optional): The message attribute to use for quota (e.g., `userid`). Default is `userid`.
+  - `mode` (optional): `rate-limit` or `concurrency`. Default is `rate-limit`.
+  - `limit` (**required**): The quota limit.
+  - `window` (optional): The time window for rate limiting (e.g., `1m`, `10s`). Default is `1m`.
+  - `prefix` (optional): Redis key prefix. Default is `quota:`.
+  - `gating_mode` (optional): `blocking` or `classifying`. In `classifying` mode, the gate never blocks but tags the message with its quota status ("reserved" or "overflow") in the internal metadata. Default is `blocking`.
 
 - `prometheus-saturation`:
   - `pool` (**required**): The inference pool name to filter metrics by.
