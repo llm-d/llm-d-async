@@ -79,127 +79,79 @@ make deploy-ap-on-k8s
      ```
 
 ## Command line parameters
-- `concurrency`: The number of concurrenct workers, default is 8.
-- `request-merge-policy`: Currently only supporting <u>random-robin</u> policy.
-- `message-queue-impl`: Implementation of the queueing system. Options are <u>gcp-pubsub</u> for GCP PubSub, <u>gcp-pubsub-gated</u> for GCP PubSub with per-topic gating, <u>redis-sortedset</u> for Redis Sorted Set (persisted and sorted), and <u>redis-pubsub</u> for ephemeral Redis-based implementation.
+- `concurrency`: The number of concurrent workers per pool (default: 8). Overridden per pool via `workers` in the pool config.
+- `request-merge-policy`: Merge policy to use. Built-in: `random-robin`. Additional policies register via `pipeline.RegisterMergePolicy`.
+- `message-queue-impl`: Queueing implementation. Options: `gcp-pubsub`, `gcp-pubsub-gated`, `redis-sortedset`, `redis-pubsub`.
+- `prometheus-url`: Prometheus server URL (e.g. `http://localhost:9090`). Required for any gate using a Prometheus signal source.
 
- - `prometheus-url`: Prometheus server URL for metric-based gates (e.g., http://localhost:9090). For Google Managed Prometheus (GMP), point this to a local proxy or GMP frontend that handles authentication — direct GMP URLs are not supported as the Async Processor does not perform GMP authentication.
-   This flag is required when using metric-based per-queue gates (e.g., `prometheus-saturation`, `prometheus-budget`).
- - `prometheus-cache-ttl`: TTL for cached Prometheus metric sources (e.g. 1m, 0s to disable). Default is 5s. Increasing this reduces Prometheus load but also reduces the responsiveness of dispatch gates to metric changes.
+<i>Additional parameters may be specified for concrete message queue implementations.</i>
 
-<i>additional parameters may be specified for concrete message queue implementations</i>
+## Gate System
 
-## Dispatch Gates
+The Async Processor evaluates gates at two points in the dispatch pipeline:
 
-The Async Processor supports dispatch gates to control batch processing based on system capacity. Gates can be configured per-queue (via configuration files).
+**Subscription gates** run in the message-queue receive callback, before the merge policy. They are fast and label-mutating — intended for cheap classification (e.g. deadline-drop, reservation classifiers). They must not block; a blocking subscription gate would stall the prefetch stream.
 
-### Per-Queue Dispatch Gates
+**Pool gates** run in the per-pool worker pool, after the merge policy routes the message, before HTTP dispatch. They may block — a semaphore-style gate parks the worker rather than nacking, keeping the message hot and dispatching the instant capacity opens.
 
-For more fine-grained control, configure gates per queue in your configuration file. Each queue can have its own gate type and parameters.
+### Built-in Gate Types
 
-**Gate Types:**
+- `deadline-drop`: Silently drops messages whose deadline has already passed (ack without dispatch). Stateless; no params.
+- `local-max-concurrency`: Per-pod semaphore. Blocks until a slot is available. Params: `max_concurrency` (required, integer ≥ 1).
+- `local-rate-limit`: Per-pod token bucket. Blocks until a token is available. Params: `requests_per_minute` (required), `burst` (default 1).
+- `constant-decision`: Always returns the configured verdict. Useful as a kill-switch or test fixture. Params: `decision` (`continue` | `drop` | `refuse`).
 
-- `constant`: Always returns budget 1.0 (fully open) - no throttling.
-- `redis`: Queries Redis for dispatch budget (managed by external system).
-- `composite`: Combines multiple gates. Returns the minimum budget across all inner dispatch gates and acquires quota across all inner attribute gates (all or nothing).
-- `prometheus-saturation`: Queries Prometheus for pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
-- `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
+### Verdict Contract
 
-**Example Configuration with Per-Queue Gates:**
+Every gate's `Apply` method returns a `Verdict`:
+
+- `Continue`: forward the message to the next stage.
+- `Drop(result)`: ack the message without redelivery. If `result` is non-nil, publish it to the result topic first (e.g. for fail-fast 429 responses).
+- `Refuse()`: nack the message; the transport's redelivery policy decides when it comes back.
+
+### Example Config (GCP Pub/Sub `FlowConfig`)
 
 ```json
-[
+{
+  "pools": [
     {
-       "queue_name": "critical_queue",
-       "inference_objective": "critical-task",
-       "request_path_url": "/v1/inference",
-       "gate_type": "constant"
-    },
-    {
-       "queue_name": "batch_queue",
-       "inference_objective": "batch-task",
-       "request_path_url": "/v1/inference",
-       "gate_type": "prometheus-saturation",
-       "gate_params": {
-          "pool": "inference_pool_1",
-          "threshold": "0.8"
-       }
-    },
-    {
-       "queue_name": "batch_budget_queue",
-       "inference_objective": "batch-task",
-       "request_path_url": "/v1/inference",
-       "gate_type": "prometheus-budget",
-       "gate_params": {
-          "pool": "inference_pool_1",
-          "max_concurrency": "100",
-          "baseline": "0.05"
-       }
-    },
-    {
-       "queue_name": "redis_gated_queue",
-       "inference_objective": "gated-task",
-       "request_path_url": "/v1/inference",
-       "gate_type": "redis",
-       "gate_params": {
-          "address": "localhost:6379",
-          "budget_key": "my-budget-key"
-       }
-    },
-    {
-       "queue_name": "composite_gated_queue",
-       "inference_objective": "composite-task",
-       "request_path_url": "/v1/inference",
-       "gate_type": "composite",
-       "gate_params": {
-          "gates": "[{\"gate_type\":\"prometheus-saturation\",\"gate_params\":{\"pool\":\"inference_pool_1\"}},{\"gate_type\":\"redis-quota\",\"gate_params\":{\"address\":\"localhost:6379\",\"limit\":\"100\"}}]"
-       }
+      "id": "my-pool",
+      "gateway_url": "http://igw.svc:8000",
+      "request_path": "/v1/completions",
+      "workers": 32,
+      "gates": [
+        { "type": "local-max-concurrency", "params": { "max_concurrency": "64" } }
+      ]
     }
-]
+  ],
+  "subscriptions": [
+    {
+      "subscriber_id": "inference-requests-teamA-async",
+      "pool": "my-pool",
+      "labels": { "team": "teamA", "tier": "async" },
+      "gates": [
+        { "type": "deadline-drop" }
+      ]
+    },
+    {
+      "subscriber_id": "inference-requests-teamB-async",
+      "pool": "my-pool",
+      "labels": { "team": "teamB", "tier": "async" },
+      "gates": [
+        { "type": "deadline-drop" }
+      ]
+    }
+  ]
+}
 ```
 
-**Gate Parameters:**
+A raw JSON array of topic configs (the legacy format) is still accepted; each entry synthesizes a single pool from its `igw_base_url` / `request_path_url` / `gate_type` / `gate_params` fields.
 
-- `composite`:
-  - `gates` (**required**): A JSON array of gate configurations. Each configuration is an object with `gate_type` and `gate_params`.
+### Labels
 
-- `redis`:
-  - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.
-  - `budget_key` (optional): Redis key to read dispatch budget from. Default is `dispatch-gate-budget`.
+Subscriptions declare static labels in their config. The Flow merges them onto every pulled message with subscription labels winning over transport-supplied attributes (Pub/Sub `Attributes`, Redis `Metadata`), so operators can pin `tier`, `team`, and `model` labels that producers cannot override.
 
-- `prometheus-saturation`:
-  - `pool` (**required**): The inference pool name to filter metrics by.
-  - `threshold` (optional): Saturation threshold (0.0-1.0). When saturation >= threshold, budget is 0.0. Default is `0.8`.
-  - `fallback` (optional): Fallback saturation value (0.0-1.0) used when the metric source returns an error or empty data. Default is `0.0`.
-
-  **Metric prerequisites:** The primary metric source requires llm-d's flow control plugin to be
-  enabled: without it, the EPP flow control metrics will be missing and the gate will always use the fallback value.
-
-- `prometheus-budget`: Cascades two Prometheus metric sources to compute a dispatch budget D.
-  Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically from the `inference_pool_ready_pods` metric.
-  The primary source computes D from the EPP's flow control queue size: `D = 1 − (queue_size / max_SYS)`.
-  If the primary metric is unavailable (e.g. EPP is down), the gate falls back to a secondary source
-  that estimates saturation from vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`.
-  The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
-  See [docs/dispatch-budget.md](docs/dispatch-budget.md) for the full derivation.
-
-  - `pool` (**required**): The InferencePool name. This must match both the `name` field in
-    `inference_pool_ready_pods{name="<pool>"}` (EPP metric) and, for the vLLM fallback,
-    the `inference_pool` label on scraped vLLM metrics (added via relabeling from pod labels).
-  - `max_concurrency` (optional): Per-endpoint request capacity (`MaxConcurrency` in the [inference scheduler's saturation detector](https://github.com/llm-d/llm-d-inference-scheduler/blob/main/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go)). Default is `100` (matching the inference scheduler default).
-  - `baseline` (optional): Reserved baseline B. The gate closes when D ≤ B. Default is `0.05`.
-  - `fallback` (optional): Fallback budget value (0.0-1.0) returned when all metric sources are unavailable. Default is `0.0` (fail closed).
-
-  **Metric prerequisites:** The primary metric source requires llm-d's flow control plugin to be
-  enabled; without it, the gate falls back to vLLM metrics. The fallback filters by `inference_pool` label,
-  which vLLM does not emit natively: configure Prometheus relabeling to propagate it from model server pod labels
-  (the helm chart handles this):
-
-  ```yaml
-  relabelings:
-    - sourceLabels: [__meta_kubernetes_pod_label_inference_pool]
-      targetLabel: inference_pool
-  ```
+Labels flow through to the result message and are available to the merge policy for routing and prioritisation decisions.
 
 ## Request Messages and Consumption
 
@@ -241,9 +193,9 @@ Producers handle wrapping these into the internal wire format used for persisten
 
 ### Request Merge Policy
 
-The Async Processor supports multiple request message queues. A `Request Merge Policy` can be specified to define the merge strategy of messages from the different queues.
+The Async Processor supports multiple request message queues. A `Request Merge Policy` fans the per-subscription channels into one buffered channel per inference pool; each pool gets its own dedicated worker pool so backpressure on one pool's downstream endpoint stays local.
 
-Currently the only policy supported is `Random Robin Policy` which randomly picks messages from the queues.
+Built-in: `random-robin` (randomly picks messages from all subscriptions, routing each to its declared pool). Additional policies can be registered via `pipeline.RegisterMergePolicy` from a caller-owned `main` package without modifying this repo.
 
 ## Retries
 
@@ -281,8 +233,6 @@ A persisted implementation based on Redis SortedSets.
 - `redis.ss.queues-config-file`: The configuration file name when using multiple queues. <br> Mutually exclusive with `redis.ss.igw-base-url`, `redis.ss.request-queue-name`, `redis.ss.request-path-url` and `redis.ss.inference-objective` flags.
 - `redis.ss.poll-interval-ms`: Poll interval in milliseconds. Default is <u>1000</u>.
 - `redis.ss.batch-size`: Number of messages to process per poll. Default is <u>10</u>.
-- `redis.ss.gate-type`: Gate type for single-queue mode (e.g., `redis`, `prometheus-saturation`). Only used when `redis.ss.queues-config-file` is not set.
-- `redis.ss.gate-params`: JSON-encoded gate params map for single-queue mode (e.g., `{"address":"localhost:6379"}`). Only used when `redis.ss.queues-config-file` is not set.
 
 ### Redis Channels (Ephemeral)
 
@@ -366,38 +316,14 @@ The GCP PubSub implementation requires the user to configure the following:
 
 #### Multiple Topics Configuration File Syntax
 
-The configuration file when using the `pubsub.topics-config-file` flag should have the following format:
+The configuration file for `pubsub.topics-config-file` uses the `FlowConfig` format with named pools and subscriptions. See the [Gate System](#gate-system) section for a full example and available gate types.
 
-```json
-[
-    {
-       "igw_base_url": "http://localhost:30800",
-       "subscriber_id": "some_subscriber_id",
-       "inference_objective": "some_inference_objective",
-       "request_path_url": "e.g.: /v1/completions",
-       "gate_type": "constant",
-       "gate_params": {}
-    },
-    {
-       "subscriber_id": "another_subscriber",
-       "inference_objective": "batch_task",
-       "request_path_url": "/v1/inference",
-       "gate_type": "prometheus-saturation",
-       "gate_params": {
-           "pool": "pool_2",
-           "threshold": "0.75"
-       }
-    }
-]
-```
+**Legacy format** (raw JSON array) is still accepted; each entry synthesizes a singleton pool from its `igw_base_url`, `request_path_url`, `gate_type`, and `gate_params` fields.
 
-**Configuration Fields:**
+**`FlowConfig` fields:**
 
-- `subscriber_id`: The GCP PubSub subscriber ID for this topic.
-- `inference_objective`: The inference objective header value.
-- `request_path_url`: The request path URL.
-- `gate_type`: Required type of dispatch gate for this topic.
-- `gate_params` (optional): Parameters for the gate type (e.g., pool name, threshold for prometheus gates).
+- `pools`: Array of pool definitions. Each pool declares `id`, `gateway_url`, `request_path`, `workers`, `http_headers`, `model_name_override`, `labels`, and `gates` (pool gate chain).
+- `subscriptions`: Array of subscription definitions. Each subscription declares `subscriber_id`, `pool` (pool ID reference), `labels`, `inference_objective`, and `gates` (subscription gate chain).
 
 ## Development
 
