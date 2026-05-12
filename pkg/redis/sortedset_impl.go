@@ -278,13 +278,14 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			release = func() {}
 		}
 
-		select {
+		if release != nil {
+			r.activeReleases.Store(rview.ReqID(), release)
+		}
 
+		select {
 		case msgChannel <- ir:
-			if release != nil {
-				r.activeReleases.Store(rview.ReqID(), release)
-			}
 		case <-ctx.Done():
+			r.activeReleases.Delete(rview.ReqID())
 			if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
 				return r.rdb.ZAdd(ctx, queueName, redis.Z{
 					Score:  results[0].Score,
