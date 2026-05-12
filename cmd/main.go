@@ -13,7 +13,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	_ "github.com/llm-d-incubation/llm-d-async/pkg/async" // register built-in merge policies
+	_ "github.com/llm-d-incubation/llm-d-async/pkg/async"                                    // register built-in merge policies
+	_ "github.com/llm-d-incubation/llm-d-async/pkg/async/inference/mergepolicy/tierpriority" // register tier-priority merge policy
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
@@ -54,7 +55,7 @@ func main() {
 	flag.IntVar(&concurrency, "concurrency", 8, "number of concurrent workers")
 	flag.DurationVar(&requestTimeout, "request-timeout", 5*time.Minute, "timeout for individual inference requests")
 
-	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
+	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin, tier-priority")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
 
 	var mergePolicyConfigJSON = flag.String("merge-policy-config", "{}", "JSON-encoded free-form config map passed to the selected merge policy's factory (see policy package docs for recognized keys).")
@@ -84,8 +85,16 @@ func main() {
 	setupLog.Info("Async Processor starting", "version", version.Version, "commit", version.Commit, "buildDate", version.BuildDate)
 
 	printAllFlags(setupLog)
+
+	// Set up the process-lifetime context before the gate factory so
+	// background goroutines owned by gates (e.g. PromQL refresh loops
+	// for tier-priority-admission) are driven by the signal-handler ctx.
+	ctx := ctrl.SetupSignalHandler()
+
 	// Create Gate Factory for per-queue gate instantiation
-	gateFactory := flowcontrol.NewGateFactoryWithCacheTTL(*prometheusURL, *prometheusCacheTTL)
+	gateFactory := flowcontrol.NewGateFactoryWithCacheTTL(*prometheusURL, *prometheusCacheTTL,
+		flowcontrol.WithBackgroundContext(ctx),
+	)
 
 	var impl pipeline.Flow
 	switch messageQueueImpl {
@@ -126,8 +135,6 @@ func main() {
 	}
 
 	metrics.Register(metrics.GetAsyncProcessorCollectors(impl.Characteristics().SupportsMessageLatency)...)
-
-	ctx := ctrl.SetupSignalHandler()
 
 	// Register metrics handler.
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
