@@ -7,21 +7,12 @@ package pipeline
 //     model-name overrides
 //   - Worker concurrency: each pool gets its own worker pool with K
 //     workers consuming from its own per-pool channel out of the RMP
-//   - Post-RMP gate placement: capacity admission control specific to
-//     this pool's downstream backend lives on the pool, not on a
-//     subscription (a blocking semaphore for one pool shouldn't affect
-//     another pool's throughput)
+//   - Gate placement: capacity admission control specific to this pool's
+//     downstream backend lives on the pool, not on a subscription (a
+//     blocking semaphore for one pool shouldn't affect another pool's
+//     throughput)
 //
-// Subscriptions reference a pool by ID. When a Flow processes a pulled
-// message, the resolved Pool travels with the message via the
-// EmbelishedRequestMessage so the merge policy can route to the pool's
-// channel and the per-pool worker pool can pick up the right gateway
-// context.
-//
-// Pool-level Labels are merged onto every message routed through this
-// pool, layered between subscription labels (which win) and producer
-// attributes (which lose). Lets operators stamp a pool-wide label like
-// `model=kimi-k2-6` once rather than per subscription.
+// Subscriptions reference a pool by ID.
 type Pool struct {
 	ID                string            `json:"id"`
 	GatewayURL        string            `json:"gateway_url"`
@@ -44,10 +35,6 @@ type Pool struct {
 	// subscription gates provide upstream).
 	Gates []GateConfig `json:"gates,omitempty"`
 
-	// Labels are pool-level static labels merged onto every message
-	// routed through this pool. Subscription labels override on
-	// collision; producer attributes lose to both.
-	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // GateConfig declares a gate type + params to be instantiated via the

@@ -208,6 +208,5 @@ func (g *TierPriorityAdmissionGate) buildFailFastResult(msg *pipeline.Embelished
 		Payload:  g.failFastBody,
 		Routing:  routing,
 		Metadata: metadata,
-		Labels:   msg.Labels,
 	}
 }

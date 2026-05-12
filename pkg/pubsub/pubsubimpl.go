@@ -300,12 +300,8 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			"subscriptionGates", subscriptionGateTypesOf(cfg.Gates))
 
 		// Build the effective static label set for this subscription.
-		// Precedence (lowest to highest): auto-injected pool ID,
-		// pool's declared labels, subscription's declared labels.
+		// Auto-inject pool ID as the base; subscription labels layer on top.
 		channelLabels := pipeline.Labels{"pool": pool.ID}
-		for k, v := range pool.Labels {
-			channelLabels[k] = v
-		}
 		for k, v := range cfg.Labels {
 			channelLabels[k] = v
 		}

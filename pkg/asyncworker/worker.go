@@ -110,7 +110,6 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 							Payload:  string(responseBody),
 							Routing:  msg.InternalRouting,
 							Metadata: msg.PublicRequest.ReqMetadata(),
-							Labels:   msg.Labels,
 						}:
 						case <-ctx.Done():
 						}
@@ -298,7 +297,6 @@ func CreateErrorResultMessage(req asyncapi.Request, routing asyncapi.InternalRou
 		Payload:  string(payloadBytes),
 		Routing:  routing,
 		Metadata: metadata,
-		Labels:   routing.Labels,
 	}
 }
 
