@@ -58,6 +58,17 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 	}
 }
 
+// Close closes all Redis clients created by this factory.
+func (f *GateFactory) Close() error {
+	var firstErr error
+	for addr, client := range f.redisClients {
+		if err := client.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to close Redis client for %s: %w", addr, err)
+		}
+	}
+	return firstErr
+}
+
 // CreateGate creates a DispatchGate based on the gate type and parameters.
 // Supported gate types:
 //   - "constant": Always returns budget 1.0 (fully open)
