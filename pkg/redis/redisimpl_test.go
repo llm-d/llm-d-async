@@ -536,9 +536,13 @@ func TestRequestWorker_ReconnectsAfterChannelClose(t *testing.T) {
 	defer cancel()
 
 	queueName := "reconnect-test-queue"
-	msgChannel := make(chan *api.InternalRequest, 10)
+	msgChannel := make(chan *pipeline.EmbelishedRequestMessage, 10)
+	rc := pipeline.RequestChannel{
+		IGWBaseURL:     "http://igw.test:8000",
+		RequestPathURL: "/v1/completions",
+	}
 
-	go requestWorker(ctx, rdb, msgChannel, queueName)
+	go requestWorker(ctx, rdb, msgChannel, queueName, rc)
 
 	time.Sleep(200 * time.Millisecond)
 

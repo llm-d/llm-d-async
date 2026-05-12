@@ -74,6 +74,14 @@ type TopicConfig struct {
 	// existing body.Metadata / result.Metadata path — Labels is for
 	// operator-pinned classification, not transport attributes.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Gates is the chain of subscription gates evaluated in the Flow
+	// callback at pull time, before the message is forwarded to the
+	// merge policy. Gates here may mutate labels (e.g. a classifier
+	// stamping `class=reserved` or `class=overflow`) and the merge
+	// policy will see the mutations when it buckets the message. Must
+	// be fast — slow gates here block the receive callback and stall
+	// prefetch.
+	Gates []pipeline.GateConfig `json:"gates,omitempty"`
 	// Pool identifies which inference pool (declared in the FlowConfig's
 	// Pools list) this subscription routes to. If empty in the new config
 	// format, the Flow synthesizes a singleton pool from the legacy
@@ -103,17 +111,18 @@ type PubSubMQFlow struct {
 }
 
 type progressStats struct {
-	subscriberID string
-	pulled       int64
-	dispatched   int64
-	succeeded    int64
-	failed       int64
-	retrying     int64
-	rateLimited  int64
-	acked        int64
-	delayedNacks int64
-	gateDenied   int64
-	inFlight     int64
+	subscriberID    string
+	pulled          int64
+	dispatched      int64
+	succeeded       int64
+	failed          int64
+	retrying        int64
+	rateLimited     int64
+	acked           int64
+	delayedNacks    int64
+	gateDenied      int64
+	inFlight        int64
+	dispatchInFlight int64
 }
 
 type resultTracker struct {
@@ -121,11 +130,42 @@ type resultTracker struct {
 	stats    *progressStats
 }
 
+type countingGate struct {
+	// gates is the pool gate chain for the pool this subscription
+	// routes to. countingGate is a stats-instrumentation wrapper that
+	// runs the chain via pipeline.ApplyChain and tracks per-subscription
+	// dispatch in-flight and gate-denied counters.
+	gates []pipeline.Gate
+	stats *progressStats
+}
+
+// Apply implements pipeline.Gate by running the pool gate chain via
+// pipeline.ApplyChain and instrumenting per-subscription stats around
+// it. Continue increments dispatchInFlight (with peak tracking) and
+// attaches a release that decrements on cleanup. Refuse increments
+// gateDenied. Drop is propagated as-is.
+func (g *countingGate) Apply(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
+	v, err := pipeline.ApplyChain(ctx, msg, g.gates)
+	if err != nil {
+		return v, err
+	}
+	if !v.Terminate {
+		g.stats.dispatchInFlight++
+		msg.AttachRelease(func() { g.stats.dispatchInFlight-- })
+		return v, nil
+	}
+	if v.Redeliver {
+		g.stats.gateDenied++
+	}
+	return v, nil
+}
+
 type RequestChannelData struct {
-	requestChannel pipeline.RequestChannel
-	subscriberID   string
-	gate           pipeline.Gate
-	stats          *progressStats
+	requestChannel    pipeline.RequestChannel
+	subscriberID      string
+	gate              pipeline.Gate
+	subscriptionGates []pipeline.Gate
+	stats             *progressStats
 }
 
 // PubSubOption is a functional option for configuring PubSubMQFlow
@@ -180,21 +220,21 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		}
 	}
 
+	// Construct one pool gate chain per pool. Sharing the chain across all
+	// subscriptions in a pool is the whole point of pool-scoped
+	// admission control: a LocalMaxConcurrencyGate with cap=N caps
+	// in-flight to N for the pool as a whole, not N per subscription.
+	gatesByPoolID := map[string][]pipeline.Gate{}
+	for _, pool := range p.pools {
+		gates, err := buildPoolGateChain(p.gateFactory, pool)
+		if err != nil {
+			panic(fmt.Sprintf("failed to build pool gates for %q: %v", pool.ID, err))
+		}
+		gatesByPoolID[pool.ID] = gates
+	}
+
 	// Create per-topic channels with gates
 	for _, cfg := range configs {
-		// Determine gate for this topic
-		var gate pipeline.Gate
-		if p.gateFactory != nil && cfg.GateType != "" {
-			// Use factory to create per-topic gate
-			gate, err = p.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
-			if err != nil {
-				panic(fmt.Sprintf("failed to create gate for topic subscriber %q (gate_type=%q): %v", cfg.SubscriberID, cfg.GateType, err))
-			}
-		} else {
-			// Default to always-continue gate
-			gate = pipeline.AlwaysContinue
-		}
-
 		headers, err := util.ExpandEnvMapValues(cfg.HTTPHeaders)
 		if err != nil {
 			panic(fmt.Sprintf("failed to expand http_headers for topic subscriber %q: %v", cfg.SubscriberID, err))
@@ -213,6 +253,14 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		if !ok {
 			panic(fmt.Sprintf("subscription %q references unknown pool %q", cfg.SubscriberID, poolID))
 		}
+
+		// Use the per-pool gate chain (already built before this loop).
+		// All subscriptions in this pool share the same underlying chain
+		// (and hence the same LocalMaxConcurrencyGate semaphores, etc.),
+		// which is the whole point of pool-scoped admission control.
+		// The countingGate wrapper is still per-subscription so per-sub
+		// stats reflect each subscription's contribution.
+		var gate pipeline.Gate = &countingGate{gates: gatesByPoolID[pool.ID], stats: stats}
 
 		// HTTP dispatch fields come from the pool when set; fall back
 		// to the legacy subscription fields when the pool doesn't
@@ -247,7 +295,9 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			"poolID", pool.ID,
 			"igwBaseURL", normalizedBaseURL,
 			"requestPathURL", normalizedRequestPath,
-			"modelNameOverride", modelOverride)
+			"modelNameOverride", modelOverride,
+			"poolGates", poolGateTypesOf(pool),
+			"subscriptionGates", subscriptionGateTypesOf(cfg.Gates))
 
 		// Build the effective static label set for this subscription.
 		// Precedence (lowest to highest): auto-injected pool ID,
@@ -258,6 +308,11 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		}
 		for k, v := range cfg.Labels {
 			channelLabels[k] = v
+		}
+
+		subscriptionGates, err := buildSubscriptionGateChain(p.gateFactory, cfg.SubscriberID, cfg.Gates)
+		if err != nil {
+			panic(fmt.Sprintf("failed to build subscription gates for %q: %v", cfg.SubscriberID, err))
 		}
 
 		ch := make(chan *pipeline.EmbelishedRequestMessage)
@@ -273,9 +328,10 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 				Labels:             channelLabels,
 				PoolID:             pool.ID,
 			},
-			subscriberID: cfg.SubscriberID,
-			gate:         gate,
-			stats:        stats,
+			subscriberID:      cfg.SubscriberID,
+			gate:              gate,
+			subscriptionGates: subscriptionGates,
+			stats:             stats,
 		})
 	}
 
@@ -314,7 +370,7 @@ func (r *PubSubMQFlow) RequestChannels() []pipeline.RequestChannel {
 
 func (r *PubSubMQFlow) Start(ctx context.Context) {
 	for _, channelData := range r.requestChannels {
-		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel, channelData.stats, channelData.gate)
+		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel, channelData.stats, channelData.gate, channelData.subscriptionGates)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	for i := 0; i < 4; i++ {
@@ -426,7 +482,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, requestChannel pipeline.RequestChannel, stats *progressStats, gate pipeline.Gate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, requestChannel pipeline.RequestChannel, stats *progressStats, gate pipeline.Gate, subscriptionGates []pipeline.Gate) {
 	ch := requestChannel.Channel
 	channelLabels := requestChannel.Labels
 	logger := log.FromContext(ctx)
@@ -487,7 +543,38 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		// policy receive it with all HTTP dispatch fields set.
 		emb := buildEmbelishedFromChannel(ir, requestChannel)
 
-		// Gate evaluation: run Gate.Apply before dispatching.
+		// Subscription gates: run the chain on emb. Labels are aliased
+		// from irout.Labels so gate mutations are visible in the routing.
+		// Must be fast — slow gates block the receive callback and stall
+		// prefetch. On Continue, releases stay attached to emb and fire
+		// at worker terminal via defer msg.FireReleases().
+		if len(subscriptionGates) > 0 {
+			v, err := pipeline.ApplyChain(ctx, emb, subscriptionGates)
+			if err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "subscription gate chain error; treating as Refuse", "subscriberID", subscriberID)
+				emb.FireReleases()
+				resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
+				return
+			}
+			if v.Terminate {
+				stats.gateDenied++
+				emb.FireReleases()
+				if v.Result != nil {
+					select {
+					case r.resultChannel <- *v.Result:
+					case <-ctx.Done():
+					}
+				}
+				if v.Redeliver {
+					resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
+				} else {
+					resultsChannel <- ackAction{ack: true}
+				}
+				return
+			}
+		}
+
+		// Pool gate evaluation: run Gate.Apply before dispatching.
 		if gate != nil {
 			v, err := gate.Apply(ctx, emb)
 			if err != nil {
@@ -674,6 +761,76 @@ func bytesTrimLeftSpace(b []byte) []byte {
 		}
 	}
 	return nil
+}
+
+// poolGateTypesOf returns a comma-separated list of the pool's gate
+// types for logging, or "" if the pool has no gates configured.
+func poolGateTypesOf(p pipeline.Pool) string {
+	return gateTypesOf(p.Gates)
+}
+
+// subscriptionGateTypesOf returns a comma-separated list of subscription gate
+// types for logging, or "" if the subscription has no gates configured.
+func subscriptionGateTypesOf(gs []pipeline.GateConfig) string {
+	return gateTypesOf(gs)
+}
+
+func gateTypesOf(gs []pipeline.GateConfig) string {
+	if len(gs) == 0 {
+		return ""
+	}
+	out := ""
+	for i, g := range gs {
+		if i > 0 {
+			out += ","
+		}
+		out += g.Type
+	}
+	return out
+}
+
+// buildPoolGateChain constructs the chain of pool gates for a single
+// pool. Each entry in pool.Gates becomes one pipeline.Gate built via
+// the factory; the worker walks the slice via pipeline.ApplyChain.
+// Returns an empty slice (which ApplyChain treats as always-Continue)
+// when the pool has no gates configured.
+func buildPoolGateChain(factory pipeline.GateFactory, pool pipeline.Pool) ([]pipeline.Gate, error) {
+	if len(pool.Gates) == 0 {
+		return nil, nil
+	}
+	if factory == nil {
+		return nil, fmt.Errorf("pool %q declares %d gate(s) but no GateFactory was wired into the Flow", pool.ID, len(pool.Gates))
+	}
+	out := make([]pipeline.Gate, 0, len(pool.Gates))
+	for i, cfg := range pool.Gates {
+		g, err := factory.CreateGate(cfg.Type, cfg.Params)
+		if err != nil {
+			return nil, fmt.Errorf("pool %q gate[%d] (type=%q): %w", pool.ID, i, cfg.Type, err)
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+// buildSubscriptionGateChain constructs the chain of subscription gates
+// for a subscription. Mirrors buildPoolGateChain but reads from
+// TopicConfig.Gates.
+func buildSubscriptionGateChain(factory pipeline.GateFactory, subID string, gateCfgs []pipeline.GateConfig) ([]pipeline.Gate, error) {
+	if len(gateCfgs) == 0 {
+		return nil, nil
+	}
+	if factory == nil {
+		return nil, fmt.Errorf("subscription %q declares %d gate(s) but no GateFactory was wired into the Flow", subID, len(gateCfgs))
+	}
+	out := make([]pipeline.Gate, 0, len(gateCfgs))
+	for i, cfg := range gateCfgs {
+		g, err := factory.CreateGate(cfg.Type, cfg.Params)
+		if err != nil {
+			return nil, fmt.Errorf("subscription %q gate[%d] (type=%q): %w", subID, i, cfg.Type, err)
+		}
+		out = append(out, g)
+	}
+	return out, nil
 }
 
 // buildEmbelishedFromChannel creates a fully-populated EmbelishedRequestMessage
