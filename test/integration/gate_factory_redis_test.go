@@ -41,29 +41,29 @@ func TestGateFactory_RedisQuota_ConcurrencyParsing(t *testing.T) {
 	attrs := map[string]string{"model": "gpt-4"}
 
 	// Acquire twice (limit=2) — both should succeed.
-	ok1, rel1, err := attrGate.Acquire(ctx, attrs)
+	res1, err := attrGate.Acquire(ctx, attrs)
 	require.NoError(t, err)
-	assert.True(t, ok1)
+	assert.True(t, res1.Allowed)
 
-	ok2, rel2, err := attrGate.Acquire(ctx, attrs)
+	res2, err := attrGate.Acquire(ctx, attrs)
 	require.NoError(t, err)
-	assert.True(t, ok2)
+	assert.True(t, res2.Allowed)
 
 	// Third acquire — should fail.
-	ok3, _, err := attrGate.Acquire(ctx, attrs)
+	res3, err := attrGate.Acquire(ctx, attrs)
 	require.NoError(t, err)
-	assert.False(t, ok3, "Third acquire should be denied (limit=2)")
+	assert.False(t, res3.Allowed, "Third acquire should be denied (limit=2)")
 
 	// Release one and retry.
-	rel1()
-	ok4, rel4, err := attrGate.Acquire(ctx, attrs)
+	res1.Release()
+	res4, err := attrGate.Acquire(ctx, attrs)
 	require.NoError(t, err)
-	assert.True(t, ok4, "Should succeed after release")
+	assert.True(t, res4.Allowed, "Should succeed after release")
 
 	// Cleanup.
-	rel2()
-	if rel4 != nil {
-		rel4()
+	res2.Release()
+	if res4.Release != nil {
+		res4.Release()
 	}
 }
 
@@ -88,15 +88,15 @@ func TestGateFactory_RedisQuota_RateLimitParsing(t *testing.T) {
 	attrs := map[string]string{"userid": "alice"}
 
 	for i := 0; i < 3; i++ {
-		ok, _, err := attrGate.Acquire(ctx, attrs)
+		res, err := attrGate.Acquire(ctx, attrs)
 		require.NoError(t, err)
-		assert.True(t, ok, "Request %d should be allowed", i+1)
+		assert.True(t, res.Allowed, "Request %d should be allowed", i+1)
 	}
 
 	// Fourth should be rate limited.
-	ok4, _, err := attrGate.Acquire(ctx, attrs)
+	res4, err := attrGate.Acquire(ctx, attrs)
 	require.NoError(t, err)
-	assert.False(t, ok4, "Fourth request should be rate limited")
+	assert.False(t, res4.Allowed, "Fourth request should be rate limited")
 }
 
 // TestGateFactory_RedisQuota_MissingParams validates error handling for missing
@@ -133,11 +133,11 @@ func TestGateFactory_RedisQuota_DefaultParams(t *testing.T) {
 
 	// Default attribute is "userid", default mode is "rate-limit".
 	ctx := context.Background()
-	ok1, _, err := attrGate.Acquire(ctx, map[string]string{"userid": "bob"})
+	res1, err := attrGate.Acquire(ctx, map[string]string{"userid": "bob"})
 	require.NoError(t, err)
-	assert.True(t, ok1)
+	assert.True(t, res1.Allowed)
 
-	ok2, _, err := attrGate.Acquire(ctx, map[string]string{"userid": "bob"})
+	res2, err := attrGate.Acquire(ctx, map[string]string{"userid": "bob"})
 	require.NoError(t, err)
-	assert.False(t, ok2, "Second acquire should be rate limited with default params")
+	assert.False(t, res2.Allowed, "Second acquire should be rate limited with default params")
 }

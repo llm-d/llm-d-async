@@ -60,10 +60,10 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	var ir1 api.InternalRequest
 	require.NoError(t, json.Unmarshal([]byte(results[0].Member.(string)), &ir1))
 
-	allowed, release, err := gate.Acquire(ctx, ir1.PublicRequest.ReqMetadata())
+	res1, err := gate.Acquire(ctx, ir1.PublicRequest.ReqMetadata())
 	require.NoError(t, err)
-	assert.True(t, allowed, "First request should be allowed")
-	require.NotNil(t, release)
+	assert.True(t, res1.Allowed, "First request should be allowed")
+	require.NotNil(t, res1.Release)
 
 	// Pop second message — Acquire should be denied (concurrency limit reached).
 	results2, err := rdb.ZPopMin(ctx, queueName, 1).Result()
@@ -73,9 +73,9 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	var ir2 api.InternalRequest
 	require.NoError(t, json.Unmarshal([]byte(results2[0].Member.(string)), &ir2))
 
-	allowed2, _, err := gate.Acquire(ctx, ir2.PublicRequest.ReqMetadata())
+	res2, err := gate.Acquire(ctx, ir2.PublicRequest.ReqMetadata())
 	require.NoError(t, err)
-	assert.False(t, allowed2, "Second request should be denied while first is in-flight")
+	assert.False(t, res2.Allowed, "Second request should be denied while first is in-flight")
 
 	// Re-enqueue denied message (as sortedset_impl does).
 	err = rdb.ZAdd(ctx, queueName, goredis.Z{
@@ -84,7 +84,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	require.NoError(t, err)
 
 	// Release the first request (simulates resultWorker calling release).
-	release()
+	res1.Release()
 
 	// Now the second message should be acquirable.
 	results3, err := rdb.ZPopMin(ctx, queueName, 1).Result()
@@ -95,11 +95,11 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(results3[0].Member.(string)), &ir3))
 	assert.Equal(t, "msg-2", ir3.PublicRequest.ReqID())
 
-	allowed3, release3, err := gate.Acquire(ctx, ir3.PublicRequest.ReqMetadata())
+	res3, err := gate.Acquire(ctx, ir3.PublicRequest.ReqMetadata())
 	require.NoError(t, err)
-	assert.True(t, allowed3, "Second request should be allowed after first was released")
-	if release3 != nil {
-		release3()
+	assert.True(t, res3.Allowed, "Second request should be allowed after first was released")
+	if res3.Release != nil {
+		res3.Release()
 	}
 }
 
@@ -127,20 +127,20 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 	)
 
 	// First acquire — allowed.
-	allowed, _, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
+	res, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
 	require.NoError(t, err)
-	assert.True(t, allowed)
+	assert.True(t, res.Allowed)
 
 	// Second acquire — denied (rate limit hit).
-	allowed2, _, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
+	res2, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
 	require.NoError(t, err)
-	assert.False(t, allowed2, "Should be rate limited")
+	assert.False(t, res2.Allowed, "Should be rate limited")
 
 	// Wait for window to reset.
 	time.Sleep(2100 * time.Millisecond)
 
 	// Third acquire — allowed again.
-	allowed3, _, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
+	res3, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
 	require.NoError(t, err)
-	assert.True(t, allowed3, "Should be allowed after rate limit window resets")
+	assert.True(t, res3.Allowed, "Should be allowed after rate limit window resets")
 }
