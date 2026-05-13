@@ -679,6 +679,75 @@ func TestClientError_NoRetry(t *testing.T) {
 	}
 }
 
+func TestWorker_ClosedRequestChannelExits(t *testing.T) {
+	inferenceClient := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString("{}")),
+			Header:     make(http.Header),
+		}, nil
+	}))
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage)
+	retryChannel := make(chan pipeline.RetryMessage)
+	resultChannel := make(chan asyncapi.ResultMessage)
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() {
+		Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+		close(done)
+	}()
+	close(requestChannel)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker goroutine did not exit after request channel closed")
+	}
+}
+
+func TestWorker_TransportDeadlineNacksBlockedGate(t *testing.T) {
+	inferenceClient := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		t.Fatal("request should not be sent after transport deadline expires in gate")
+		return nil, nil
+	}))
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	msg := newEmb(asyncapi.RequestMessage{
+		ID:       "transport-deadline-gate",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(time.Minute).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+	msg.Gate = pipeline.GateFunc(func(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
+		<-ctx.Done()
+		return pipeline.Refuse(), ctx.Err()
+	})
+	msg.TransportDeadline = time.Now().Add(25 * time.Millisecond)
+
+	requestChannel <- msg
+
+	select {
+	case retry := <-retryChannel:
+		if retry.RetryReason != "transport_lease_expiring" {
+			t.Fatalf("RetryReason = %q, want transport_lease_expiring", retry.RetryReason)
+		}
+		if retry.BackoffDurationSeconds != 0 {
+			t.Fatalf("BackoffDurationSeconds = %v, want 0", retry.BackoffDurationSeconds)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not nack when transport deadline expired")
+	}
+}
+
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstr(s, sub))
 }

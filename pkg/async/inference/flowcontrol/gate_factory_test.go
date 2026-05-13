@@ -12,6 +12,7 @@ package flowcontrol
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,11 +49,14 @@ func TestGateFactory_CreateConstantGate(t *testing.T) {
 func TestGateFactory_UnknownGateType(t *testing.T) {
 	factory := NewGateFactory("")
 	gate, err := factory.CreateGate("unknown-type", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for unknown gate type")
 	}
-	if gate == nil {
-		t.Fatal("expected non-nil gate")
+	if gate != nil {
+		t.Fatalf("expected nil gate, got %v", gate)
+	}
+	if !strings.Contains(err.Error(), "unknown gate type") {
+		t.Fatalf("error %q does not mention %q", err.Error(), "unknown gate type")
 	}
 }
 

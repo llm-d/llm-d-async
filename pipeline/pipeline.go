@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
 )
@@ -100,6 +101,13 @@ type EmbelishedRequestMessage struct {
 	// per-pool channel; the per-pool worker pool inherits the pool's
 	// gate chain.
 	PoolID string
+	// TransportDeadline is the latest time by which transport-owned
+	// processing should reach a terminal ack/nack decision. It is zero for
+	// transports without a local lease budget. Pub/Sub sets it from
+	// MaxExtension so blocking gates and HTTP dispatch can bound their
+	// wait below the lease window and nack before redelivery happens
+	// behind their back.
+	TransportDeadline time.Time
 	// releases accumulates Release callbacks attached by gates and the merge
 	// policy as the message moves through the pipeline. They are fired in
 	// LIFO order by FireReleases when the message terminates (worker

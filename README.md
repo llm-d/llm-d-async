@@ -312,6 +312,7 @@ The GCP PubSub implementation requires the user to configure the following:
 - `pubsub.request-subscriber-id`: The subscriber ID for the requests topic.<br> Mutually exclusive with `pubsub.topics-config-file` flag.
 - `pubsub.result-topic-id`: The results topic ID.
 - `pubsub.batch-size`: Number of inflight messages. Default is <u>10</u>.
+- `pubsub.max-extension`: Maximum Pub/Sub lease extension for a pulled request message. Default is <u>10m</u>. Pool gates and HTTP dispatch are bounded below this value to avoid redelivery races.
 - `pubsub.topics-config-file`: The configuration file name when using multiple topics. <br> Mutually exclusive with `pubsub.request-subscriber-id`, `pubsub.request-path-url` and `pubsub.inference-objective` flags.
 
 #### Multiple Topics Configuration File Syntax

@@ -54,6 +54,7 @@ var (
 	resultTopicID       = flag.String("pubsub.result-topic-id", "", "GCP PubSub topic ID for results")
 	topicsConfigFile    = flag.String("pubsub.topics-config-file", "", "Topics Configuration file. Mutually exclusive with pubsub.igw-base-url, pubsub.request-subscriber-id, pubsub.request-path-url and pubsub.inference-objective flags. See documentation about syntax")
 	batchSize           = flag.Int("pubsub.batch-size", 10, "Number of inflight messages")
+	maxExtension        = flag.Duration("pubsub.max-extension", 10*time.Minute, "Maximum Pub/Sub lease extension for a pulled request message")
 
 	resultChannels sync.Map
 )
@@ -467,13 +468,22 @@ func (r *PubSubMQFlow) Start(ctx context.Context) {
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	for i := 0; i < 4; i++ {
-		go resultWorker(ctx, publisher, r.resultChannel)
+		go resultWorker(ctx, func(ctx context.Context, msg []byte, attrs map[string]string) error {
+			return publishPubSub(ctx, publisher, msg, attrs)
+		}, r.resultChannel)
 	}
 
 	go addMsgToRetryQueue(ctx, r.retryChannel)
 }
 
-func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChannel chan api.ResultMessage) {
+// publishFunc abstracts the Pub/Sub publish step so resultWorker can be
+// driven by a stub in tests. Returns the publish error so the worker can
+// nack the originating request on publish failure rather than acking it
+// (which would consume the request without the caller ever seeing a
+// result).
+type publishFunc func(context.Context, []byte, map[string]string) error
+
+func resultWorker(ctx context.Context, publish publishFunc, resultChannel chan api.ResultMessage) {
 	logger := log.FromContext(ctx)
 
 	for {
@@ -497,11 +507,22 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 			// result attrs — consumer filtering relies on the metadata
 			// round-trip path.
 			attrs := resultAttributes(msg.Metadata)
-			publishPubSub(ctx, publisher, msgBytes, attrs)
 			pubsubID := msg.Routing.TransportCorrelationID
 			tracker, ok := loadResultTracker(pubsubID)
 			if !ok {
 				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for message", "pubsubID", pubsubID)
+				continue
+			}
+			// Publish the result before acking the request. If publish
+			// fails the request is nacked so it redelivers and the
+			// caller eventually sees a response, rather than the
+			// request being silently consumed.
+			if err := publish(ctx, msgBytes, attrs); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to publish result message; nacking request", "pubsubID", pubsubID)
+				select {
+				case tracker.resultCh <- ackAction{ack: false}:
+				case <-ctx.Done():
+				}
 				continue
 			}
 			if resultHasError(msg.Payload) {
@@ -513,7 +534,10 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 					tracker.stats.succeeded.Add(1)
 				}
 			}
-			tracker.resultCh <- ackAction{ack: true}
+			select {
+			case tracker.resultCh <- ackAction{ack: true}:
+			case <-ctx.Done():
+			}
 
 		}
 	}
@@ -546,13 +570,13 @@ func processorAttributes() map[string]string {
 	return attrs
 }
 
-func publishPubSub(ctx context.Context, publisher *pubsub.Publisher, msg []byte, attrs map[string]string) {
-	// TODO: check how to validate that message are actually being published
-	publisher.Publish(ctx, &pubsub.Message{
+func publishPubSub(ctx context.Context, publisher *pubsub.Publisher, msg []byte, attrs map[string]string) error {
+	result := publisher.Publish(ctx, &pubsub.Message{
 		Data:       msg,
 		Attributes: attrs,
 	})
-
+	_, err := result.Get(ctx)
+	return err
 }
 
 func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMessage) {
@@ -609,12 +633,12 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 	sub.ReceiveSettings.MaxOutstandingMessages = prefetchDepth
 	sub.ReceiveSettings.MaxOutstandingBytes = -1
 	sub.ReceiveSettings.NumGoroutines = 1
-	sub.ReceiveSettings.MaxExtension = 10 * time.Minute
+	sub.ReceiveSettings.MaxExtension = *maxExtension
 	logger.V(logutil.DEFAULT).Info("PubSub prefetch configured",
 		"subscriberID", subscriberID,
 		"MaxOutstandingMessages", prefetchDepth,
 		"NumGoroutines", 1,
-		"MaxExtension", "10m")
+		"MaxExtension", maxExtension.String())
 
 	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 
@@ -704,6 +728,11 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		// the channel type carrying *EmbelishedRequestMessage, we build
 		// once here and send directly.
 		emb := buildEmbelishedFromChannel(ir, requestChannel)
+		// Stamp the transport lease deadline so downstream stages
+		// (subscription gates here, pool gates + HTTP dispatch in the
+		// worker) bound their blocking below the Pub/Sub lease window
+		// and nack before the broker can redeliver behind us.
+		emb.TransportDeadline = pubSubTransportDeadline(time.Now(), *maxExtension)
 
 		// Subscription gates: run the chain on emb. Labels are aliased
 		// from irout.Labels so gate mutations are visible in the routing.
@@ -715,8 +744,15 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		// worker pool downstream of the merge policy, via emb.Gate.
 		// Running them here would stall prefetch on saturated pools,
 		// which is precisely what this design avoids.
+		gateCtx := ctx
+		cancelGateCtx := func() {}
+		if !emb.TransportDeadline.IsZero() {
+			gateCtx, cancelGateCtx = context.WithDeadline(ctx, emb.TransportDeadline)
+		}
+		defer cancelGateCtx()
+
 		if len(subscriptionGates) > 0 {
-			v, err := pipeline.ApplyChain(ctx, emb, subscriptionGates)
+			v, err := pipeline.ApplyChain(gateCtx, emb, subscriptionGates)
 			if err != nil {
 				// Gate err is informational: the Verdict is
 				// authoritative. Fail-open gates (reservation
@@ -733,9 +769,14 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 					case <-ctx.Done():
 					}
 				}
-				if v.Redeliver {
+				switch {
+				case v.Redeliver && gateCtx.Err() != nil:
+					// Transport lease hit: nack with no delay so the
+					// broker's redelivery path resumes the message.
+					resultsChannel <- ackAction{ack: false}
+				case v.Redeliver:
 					resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
-				} else {
+				default:
 					resultsChannel <- ackAction{ack: true}
 				}
 				return
@@ -745,20 +786,69 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		// Forward to the merge policy. Under sustained saturation the
 		// buffered channel can still fill; select-with-ctx ensures
 		// shutdown unblocks rather than deadlocking the callback (and
-		// hence Receive(), which would never exit). On ctx cancel we
-		// fire any subscription-gate releases attached to emb and
-		// nack so Pub/Sub redelivers.
-		select {
-		case ch <- emb:
+		// hence Receive(), which would never exit). On ctx cancel or
+		// transport-lease expiry we fire any subscription-gate
+		// releases attached to emb and nack so Pub/Sub redelivers.
+		if dispatchBeforeDeadline(ctx, ch, emb) {
 			stats.dispatched.Add(1)
-		case <-ctx.Done():
-			emb.FireReleases()
-			resultsChannel <- ackAction{ack: false}
+			return
 		}
+		emb.FireReleases()
+		resultsChannel <- ackAction{ack: false}
 	})
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Fail to receive messages from request subscription")
 	}
+}
+
+// dispatchBeforeDeadline forwards emb to the merge-policy channel, but
+// bounds the send by both ctx cancellation and the message's transport
+// lease deadline. Returns false on cancel-or-timeout so the caller can
+// nack-and-redeliver rather than holding the message past the lease.
+func dispatchBeforeDeadline(ctx context.Context, ch chan<- *pipeline.EmbelishedRequestMessage, emb *pipeline.EmbelishedRequestMessage) bool {
+	if emb.TransportDeadline.IsZero() {
+		select {
+		case ch <- emb:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	timer := time.NewTimer(time.Until(emb.TransportDeadline))
+	defer timer.Stop()
+	select {
+	case ch <- emb:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+// pubSubTransportDeadline computes the latest time by which the worker
+// must reach a terminal ack/nack decision for a freshly-pulled Pub/Sub
+// message. It is `now + extension - safety_margin`, where the margin is
+// 10% of the extension clamped to [1s, 30s]. The margin leaves enough
+// headroom for the ack-handling goroutine and the publish path to run
+// before the broker considers the message orphaned and redelivers it
+// to another consumer.
+func pubSubTransportDeadline(now time.Time, extension time.Duration) time.Time {
+	if extension <= 0 {
+		return time.Time{}
+	}
+	margin := extension / 10
+	if margin < time.Second {
+		margin = time.Second
+	}
+	if margin > 30*time.Second {
+		margin = 30 * time.Second
+	}
+	budget := extension - margin
+	if budget <= 0 {
+		budget = extension / 2
+	}
+	return now.Add(budget)
 }
 
 func loadResultTracker(pubsubID string) (resultTracker, bool) {

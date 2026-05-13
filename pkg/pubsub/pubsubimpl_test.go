@@ -1,8 +1,12 @@
 package pubsub
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
@@ -51,5 +55,81 @@ func TestBytesTrimLeftSpace(t *testing.T) {
 				t.Errorf("input %q: expected first byte %q, got %q", tt.input, tt.want, got)
 			}
 		}
+	}
+}
+
+func TestResultWorkerAcksOnlyAfterPublishSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const pubsubID = "pubsub-result-success"
+	resultCh := make(chan api.ResultMessage, 1)
+	ackCh := make(chan ackAction, 1)
+	resultChannels.Store(pubsubID, resultTracker{resultCh: ackCh})
+	defer resultChannels.Delete(pubsubID)
+
+	published := make(chan struct{}, 1)
+	go resultWorker(ctx, func(context.Context, []byte, map[string]string) error {
+		published <- struct{}{}
+		return nil
+	}, resultCh)
+
+	resultCh <- api.ResultMessage{
+		ID:      "request-1",
+		Payload: "{}",
+		Routing: api.InternalRouting{TransportCorrelationID: pubsubID},
+	}
+
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("result was not published")
+	}
+	select {
+	case action := <-ackCh:
+		if !action.ack {
+			t.Fatal("successful publish should ack")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request was not acked")
+	}
+}
+
+func TestResultWorkerNacksWhenPublishFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const pubsubID = "pubsub-result-failure"
+	resultCh := make(chan api.ResultMessage, 1)
+	ackCh := make(chan ackAction, 1)
+	resultChannels.Store(pubsubID, resultTracker{resultCh: ackCh})
+	defer resultChannels.Delete(pubsubID)
+
+	go resultWorker(ctx, func(context.Context, []byte, map[string]string) error {
+		return errors.New("publish failed")
+	}, resultCh)
+
+	resultCh <- api.ResultMessage{
+		ID:      "request-1",
+		Payload: "{}",
+		Routing: api.InternalRouting{TransportCorrelationID: pubsubID},
+	}
+
+	select {
+	case action := <-ackCh:
+		if action.ack {
+			t.Fatal("failed publish should nack")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request was not nacked")
+	}
+}
+
+func TestPubSubTransportDeadlineKeepsSafetyMargin(t *testing.T) {
+	now := time.Unix(100, 0)
+	deadline := pubSubTransportDeadline(now, 10*time.Minute)
+	want := now.Add(9*time.Minute + 30*time.Second)
+	if !deadline.Equal(want) {
+		t.Fatalf("deadline = %s, want %s", deadline, want)
 	}
 }

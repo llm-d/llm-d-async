@@ -96,8 +96,10 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration, op
 //     ttl_seconds (default 86400),
 //     fallback_cap (default 0).
 //
-// For unknown gate types, returns the always-Continue gate as a safe default.
+// Unknown non-empty gate types fail so config typos do not silently remove
+// admission control. Empty gate type stays open ("constant").
 func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pipeline.Gate, error) {
+	gateType = strings.TrimSpace(gateType)
 	switch gateType {
 	case "constant", "":
 		return pipeline.AlwaysContinue, nil
@@ -171,8 +173,7 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 		})
 
 	default:
-		// Unknown gate types default to always-Continue gate
-		return pipeline.AlwaysContinue, nil
+		return nil, fmt.Errorf("unknown gate type %q", gateType)
 	}
 }
 

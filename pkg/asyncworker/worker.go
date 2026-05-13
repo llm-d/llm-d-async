@@ -33,7 +33,11 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 		case <-ctx.Done():
 			logger.V(logutil.DEFAULT).Info("Worker finishing.")
 			return
-		case msg := <-requestChannel:
+		case msg, ok := <-requestChannel:
+			if !ok {
+				logger.V(logutil.DEFAULT).Info("Request channel closed; worker finishing.")
+				return
+			}
 			func() {
 				// Fire any Releases accumulated on the message (by gates
 				// upstream or by the merge policy) on any terminal path
@@ -44,6 +48,16 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				if msg.InternalRequest == nil || msg.PublicRequest == nil {
 					return
 				}
+				// Bound the gate's blocking and the HTTP dispatch by any
+				// transport-supplied lease deadline. Pub/Sub stamps this
+				// from MaxExtension so blocking gates yield and the
+				// worker nacks before the broker can redeliver behind us.
+				gateCtx := ctx
+				cancelGateCtx := func() {}
+				if !msg.TransportDeadline.IsZero() {
+					gateCtx, cancelGateCtx = context.WithDeadline(ctx, msg.TransportDeadline)
+				}
+				defer cancelGateCtx()
 				if msg.RetryCount == 0 {
 					// Only count first attempt as a new request.
 					metrics.AsyncReqs.Inc()
@@ -62,7 +76,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				// the message and fired by the deferred msg.FireReleases()
 				// above on every terminal path.
 				if msg.Gate != nil {
-					v, err := msg.Gate.Apply(ctx, &msg)
+					v, err := msg.Gate.Apply(gateCtx, &msg)
 					if err != nil {
 						// Gate error is informational: the Verdict is
 						// authoritative. Fail-open gates (reservation
@@ -73,6 +87,12 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 					}
 					if v.Terminate {
 						switch {
+						case v.Redeliver && gateCtx.Err() != nil && !msg.TransportDeadline.IsZero():
+							// Lease budget hit: nack immediately with no
+							// retry-delay so the transport's redelivery
+							// path resumes the message rather than this
+							// worker holding it past the deadline.
+							nackImmediately(ctx, msg, retryChannel, "transport_lease_expiring")
 						case v.Redeliver:
 							retryMessageWithReason(ctx, msg, retryChannel, resultChannel, 30*time.Second, "gate_refused")
 						case v.Result != nil:
@@ -99,6 +119,9 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 							reqDeadline = msgDeadline
 						}
 					}
+					if !msg.TransportDeadline.IsZero() && msg.TransportDeadline.Before(reqDeadline) {
+						reqDeadline = msg.TransportDeadline
+					}
 					reqCtx, cancel := context.WithDeadline(ctx, reqDeadline)
 					defer cancel()
 
@@ -117,6 +140,13 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 						}:
 						case <-ctx.Done():
 						}
+						return
+					}
+					// Transport lease expired before dispatch completed:
+					// nack immediately so the broker's redelivery path
+					// owns the next attempt.
+					if !msg.TransportDeadline.IsZero() && gateCtx.Err() != nil {
+						nackImmediately(ctx, msg, retryChannel, "transport_lease_expiring")
 						return
 					}
 
@@ -166,6 +196,21 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				sendInferenceRequest()
 			}()
 		}
+	}
+}
+
+// nackImmediately sends a RetryMessage with no backoff so the transport's
+// redelivery path resumes the message without this worker holding it past
+// the lease deadline. Bypasses retryMessageWithReason's deadline-driven
+// backoff computation because the relevant deadline here is the transport
+// lease (gateCtx), not the message's user-facing ReqDeadline.
+func nackImmediately(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, retryReason string) {
+	select {
+	case retryChannel <- pipeline.RetryMessage{
+		EmbelishedRequestMessage: msg,
+		RetryReason:              retryReason,
+	}:
+	case <-ctx.Done():
 	}
 }
 
