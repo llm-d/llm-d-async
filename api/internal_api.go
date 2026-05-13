@@ -5,6 +5,14 @@ import (
 	"fmt"
 )
 
+type QuotaClassification string
+
+const (
+	ClassificationNone     QuotaClassification = ""
+	ClassificationReserved QuotaClassification = "reserved"
+	ClassificationOverflow QuotaClassification = "overflow"
+)
+
 // InternalRouting holds the resolved, authoritative routing fields used by
 // infrastructure (producers, workers, retry logic). These are not part of the
 // caller-facing contract and should not be set by callers directly.
