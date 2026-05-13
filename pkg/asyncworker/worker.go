@@ -64,8 +64,12 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				if msg.Gate != nil {
 					v, err := msg.Gate.Apply(ctx, &msg)
 					if err != nil {
-						retryMessageWithReason(ctx, msg, retryChannel, resultChannel, time.Second, "gate_error")
-						return
+						// Gate error is informational: the Verdict is
+						// authoritative. Fail-open gates (reservation
+						// classifier on redis outage, admission on stale
+						// PromQL) return Continue + err to signal
+						// degradation without diverting traffic.
+						logger.V(logutil.DEFAULT).Error(err, "gate reported error", "id", msg.PublicRequest.ReqID())
 					}
 					if v.Terminate {
 						switch {

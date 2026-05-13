@@ -119,7 +119,12 @@ func TestApplyChainContinueKeepsReleases(t *testing.T) {
 	}
 }
 
-func TestApplyChainErrorFiresChainReleases(t *testing.T) {
+// TestApplyChainContinueWithErrIsNotTerminate verifies that a gate
+// returning Continue alongside an error is treated as Continue: the
+// chain advances, releases stay on the message, and the error is
+// returned alongside Continue for caller-side logging. Gates that want
+// to terminate on error must return Refuse explicitly.
+func TestApplyChainContinueWithErrIsNotTerminate(t *testing.T) {
 	var fired bool
 	msg := &EmbelishedRequestMessage{Labels: Labels{}}
 	gates := []Gate{
@@ -128,7 +133,37 @@ func TestApplyChainErrorFiresChainReleases(t *testing.T) {
 			return Continue, nil
 		}),
 		GateFunc(func(ctx context.Context, msg *EmbelishedRequestMessage) (Verdict, error) {
-			return Verdict{}, errors.New("boom")
+			return Continue, errors.New("informational")
+		}),
+	}
+	v, err := ApplyChain(context.Background(), msg, gates)
+	if err == nil {
+		t.Fatalf("expected error to be returned alongside Continue")
+	}
+	if v.Terminate {
+		t.Errorf("verdict = %+v, want Continue (err must not force Terminate)", v)
+	}
+	if fired {
+		t.Errorf("chain release fired prematurely; should fire at message terminal")
+	}
+	if len(msg.releases) != 1 {
+		t.Errorf("releases after chain Continue = %d, want 1", len(msg.releases))
+	}
+}
+
+// TestApplyChainExplicitRefuseFiresChainReleases verifies that a gate
+// returning Refuse (with or without an error) terminates the chain and
+// fires chain-attached releases in LIFO order.
+func TestApplyChainExplicitRefuseFiresChainReleases(t *testing.T) {
+	var fired bool
+	msg := &EmbelishedRequestMessage{Labels: Labels{}}
+	gates := []Gate{
+		GateFunc(func(ctx context.Context, msg *EmbelishedRequestMessage) (Verdict, error) {
+			msg.AttachRelease(func() { fired = true })
+			return Continue, nil
+		}),
+		GateFunc(func(ctx context.Context, msg *EmbelishedRequestMessage) (Verdict, error) {
+			return Refuse(), errors.New("boom")
 		}),
 	}
 	v, err := ApplyChain(context.Background(), msg, gates)
@@ -136,12 +171,12 @@ func TestApplyChainErrorFiresChainReleases(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 	if !v.Terminate || !v.Redeliver {
-		t.Errorf("verdict on err = %+v, want Refuse", v)
+		t.Errorf("verdict = %+v, want Refuse", v)
 	}
 	if !fired {
-		t.Errorf("chain release did not fire on err")
+		t.Errorf("chain release did not fire on explicit Refuse")
 	}
 	if len(msg.releases) != 0 {
-		t.Errorf("releases after err = %d, want 0", len(msg.releases))
+		t.Errorf("releases after Refuse = %d, want 0", len(msg.releases))
 	}
 }

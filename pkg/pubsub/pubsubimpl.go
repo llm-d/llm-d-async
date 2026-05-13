@@ -157,24 +157,23 @@ type resultTracker struct {
 
 // Apply implements pipeline.Gate by running the pool gate chain via
 // pipeline.ApplyChain and instrumenting per-subscription stats around
-// it. Continue increments dispatchInFlight (with peak tracking) and
-// attaches a release that decrements on cleanup. Refuse increments
-// gateDenied. Drop is propagated as-is.
+// it. The chain's Verdict is authoritative; errors are passed through
+// to the caller (worker) for logging. Continue increments
+// dispatchInFlight (with peak tracking) and attaches a release that
+// decrements on cleanup. Refuse increments gateDenied. Drop is
+// propagated as-is.
 func (g *countingGate) Apply(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
 	v, err := pipeline.ApplyChain(ctx, msg, g.gates)
-	if err != nil {
-		return v, err
-	}
 	if !v.Terminate {
 		current := g.stats.dispatchInFlight.Add(1)
 		updatePeak(&g.stats.dispatchInFlightPeak, current)
 		msg.AttachRelease(func() { g.stats.dispatchInFlight.Add(-1) })
-		return v, nil
+		return v, err
 	}
 	if v.Redeliver {
 		g.stats.gateDenied.Add(1)
 	}
-	return v, nil
+	return v, err
 }
 
 // updatePeak is a CAS-loop helper for tracking the maximum value seen
@@ -634,6 +633,47 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		})
 		stats.inFlight.Add(1)
 
+		// Spawn the ack-handling goroutine before any downstream
+		// processing. Every terminal path — subscription-gate Terminate,
+		// dispatch + worker terminal, or ctx cancel — drives ack/nack
+		// uniformly via resultsChannel. Spawning here (rather than after
+		// dispatch) ensures gate-Terminate paths still ack/nack the
+		// Pub/Sub message and clean up resultChannels/inFlight, instead
+		// of leaking until ack-deadline expiry.
+		go func() {
+			defer func() {
+				resultChannels.Delete(msg.ID)
+				stats.inFlight.Add(-1)
+			}()
+			var result ackAction
+			select {
+			case result = <-resultsChannel:
+			case <-ctx.Done():
+				// Worker pool exited before this message reached a
+				// terminal state. Nack so Pub/Sub redelivers it
+				// rather than waiting for the ack deadline to expire.
+				msg.Nack()
+				return
+			}
+			if result.ack {
+				metrics.MessageLatencyTime.Observe(float64(time.Since(msg.PublishTime).Milliseconds()))
+				msg.Ack()
+				stats.acked.Add(1)
+				return
+			}
+			if result.nackDelay > 0 {
+				timer := time.NewTimer(result.nackDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			msg.Nack()
+			stats.delayedNacks.Add(1)
+		}()
+
 		for k, v := range msg.Attributes {
 			if k == PUBSUB_ID {
 				continue
@@ -672,10 +712,11 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		if len(subscriptionGates) > 0 {
 			v, err := pipeline.ApplyChain(ctx, emb, subscriptionGates)
 			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "subscription gate chain error; treating as Refuse", "subscriberID", subscriberID)
-				emb.FireReleases()
-				resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
-				return
+				// Gate err is informational: the Verdict is
+				// authoritative. Fail-open gates (reservation
+				// classifier on redis outage) return Continue + err
+				// to signal degradation without diverting traffic.
+				logger.V(logutil.DEFAULT).Error(err, "subscription gate chain reported error", "subscriberID", subscriberID)
 			}
 			if v.Terminate {
 				stats.gateDenied.Add(1)
@@ -697,47 +738,6 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 		ch <- emb
 		stats.dispatched.Add(1)
-
-		// Return from the callback immediately so sub.Receive can
-		// pull more messages. The library keeps extending the ack
-		// deadline automatically until we call Ack/Nack. Handle
-		// the ack lifecycle in a background goroutine.
-		go func() {
-			defer func() {
-				resultChannels.Delete(msg.ID)
-				stats.inFlight.Add(-1)
-			}()
-			var result ackAction
-			select {
-			case result = <-resultsChannel:
-			case <-ctx.Done():
-				// Worker pool exited before this message reached a
-				// terminal state. Nack so Pub/Sub redelivers it
-				// rather than waiting for the ack deadline to expire.
-				msg.Nack()
-				return
-			}
-			if result.ack {
-				metrics.MessageLatencyTime.Observe(float64(time.Since(msg.PublishTime).Milliseconds()))
-				msg.Ack()
-				stats.acked.Add(1)
-				return
-			}
-
-			if result.nackDelay > 0 {
-				timer := time.NewTimer(result.nackDelay)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-			}
-			if !result.ack {
-				msg.Nack()
-				stats.delayedNacks.Add(1)
-			}
-		}()
 	})
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Fail to receive messages from request subscription")

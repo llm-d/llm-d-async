@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
 )
@@ -90,15 +91,23 @@ var AlwaysContinue Gate = GateFunc(func(ctx context.Context, msg *EmbelishedRequ
 	return Continue, nil
 })
 
-// ApplyChain runs gates in order, short-circuiting on the first Terminate
-// verdict. Releases that gates attached during this chain run fire in LIFO
-// order before the failing verdict returns; on Continue across all gates,
+// ApplyChain runs gates in order. Each gate's Verdict is authoritative
+// for control flow: the chain short-circuits only on a Terminate verdict
+// (Drop or Refuse); a Continue verdict — even alongside a non-nil error —
+// advances to the next gate.
+//
+// Errors from gates are informational, not control signals. A gate that
+// fails open (e.g. reservation-classifier on redis outage, tier-priority
+// admission on stale Prometheus) returns Continue with an error so the
+// caller can log/meter the degradation without diverting traffic. A gate
+// that wants to nack on error returns Refuse explicitly. Errors from all
+// gates that ran are joined via errors.Join and returned alongside the
+// final Verdict; the caller is responsible for logging.
+//
+// Releases that gates attached during this chain run fire in LIFO order
+// before a Terminate verdict returns; on Continue across all gates,
 // chain-attached releases stay on the message and fire at terminal via
 // FireReleases.
-//
-// On err from a gate, the chain treats the message as Refuse (transport will
-// nack); chain-attached releases fire first. Caller is responsible for
-// logging the error.
 //
 // On nil or empty gates, returns (Continue, nil) — equivalent to the
 // always-open gate.
@@ -118,16 +127,16 @@ func ApplyChain(ctx context.Context, msg *EmbelishedRequestMessage, gates []Gate
 		}
 		msg.releases = msg.releases[:snapshot]
 	}
+	var errs []error
 	for _, g := range gates {
 		v, err := g.Apply(ctx, msg)
 		if err != nil {
-			fireChainReleases()
-			return Refuse(), err
+			errs = append(errs, err)
 		}
 		if v.Terminate {
 			fireChainReleases()
-			return v, nil
+			return v, errors.Join(errs...)
 		}
 	}
-	return Continue, nil
+	return Continue, errors.Join(errs...)
 }
