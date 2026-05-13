@@ -19,11 +19,6 @@ ap:
     resultQueueName: "result-list"
     pollIntervalMs: 1000
     batchSize: 10
-    gateType: "prometheus-budget"
-    gateParams:
-      pool: "optimized-baseline"
-      max_concurrency: "100"
-      baseline: "0.05"
   modelServerMonitor:
     enabled: true
     selector:

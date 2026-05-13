@@ -58,18 +58,6 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Render gate params as JSON with all values as strings.
-The gate params parser expects map[string]string, so numeric values must be quoted.
-*/}}
-{{- define "async-processor.gateParamsJson" -}}
-{{- $out := dict -}}
-{{- range $k, $v := .Values.ap.redis.gateParams -}}
-{{- $_ := set $out $k ($v | toString) -}}
-{{- end -}}
-{{- $out | toJson -}}
-{{- end }}
-
-{{/*
 Resolve the Redis secret name.
 If redis.url is set, the chart creates a Secret named <fullname>-redis.
 Otherwise, use the user-provided redis.secretName.

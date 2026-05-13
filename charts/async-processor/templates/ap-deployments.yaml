@@ -37,10 +37,6 @@ spec:
           - "{{ .Values.ap.redis.pollIntervalMs | default 1000 }}"
           - --redis.ss.batch-size
           - "{{ .Values.ap.redis.batchSize | default 10 }}"
-          {{- if .Values.ap.redis.gateType }}
-          - --redis.ss.gate-type={{ .Values.ap.redis.gateType }}
-          - --redis.ss.gate-params={{ include "async-processor.gateParamsJson" . }}
-          {{- end }}
           {{- else }}
           - --message-queue-impl=redis-pubsub
           - --redis.igw-base-url={{ .Values.ap.igwBaseURL }}

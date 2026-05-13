@@ -280,7 +280,7 @@ The configuration file when using the `redis.queues-config-file` flag should hav
 ]
 ```
 
-<u>Note:</u> The ephemeral Redis Channels implementation does not support per-queue dispatch gates. Use the [Redis Sorted Set](#redis-sorted-set-persisted) implementation for per-queue gating.
+<u>Note:</u> Per-queue / per-pool dispatch gates are currently only wired on the `gcp-pubsub-gated` flow. The Redis Channels and Redis Sorted Set flows do not yet apply gate chains.
 
 **Configuration Fields:**
 

@@ -56,22 +56,13 @@ type RedisSortedSetFlow struct {
 	resultChannel   chan api.ResultMessage
 	pollInterval    time.Duration
 	batchSize       int
-	gateFactory     pipeline.GateFactory
 }
 
-// SortedSetOption is a functional option for configuring RedisSortedSetFlow.
-type SortedSetOption func(*RedisSortedSetFlow)
-
-// WithGateFactory sets a GateFactory for subscription/pool gate
-// instantiation. Currently retained for forward compatibility; the
-// sortedset flow does not yet wire subscription or pool gate chains.
-func WithGateFactory(factory pipeline.GateFactory) SortedSetOption {
-	return func(r *RedisSortedSetFlow) {
-		r.gateFactory = factory
-	}
-}
-
-func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error) {
+// Note: the sortedset flow does not currently wire subscription or
+// pool gate chains. Per-queue / per-pool gating is supported only on
+// the GCP Pub/Sub flow today (gcp-pubsub-gated). When SS gates are
+// re-introduced, a GateFactory will thread through here.
+func NewRedisSortedSetFlow() (*RedisSortedSetFlow, error) {
 	configs, err := loadQueueConfigs()
 	if err != nil {
 		return nil, err
@@ -87,10 +78,6 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),
 		pollInterval:    time.Duration(*ssPollIntervalMs) * time.Millisecond,
 		batchSize:       *ssBatchSize,
-	}
-
-	for _, opt := range opts {
-		opt(r)
 	}
 
 	for _, cfg := range configs {

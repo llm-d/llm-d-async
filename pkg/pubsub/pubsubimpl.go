@@ -398,7 +398,16 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			panic(fmt.Sprintf("failed to build subscription gates for %q: %v", cfg.SubscriberID, err))
 		}
 
-		ch := make(chan *pipeline.EmbelishedRequestMessage)
+		// Buffer the per-subscription channel to the prefetch depth so
+		// the receive callback's `ch <- emb` is non-blocking up to the
+		// prefetch capacity. Without this, a transient stall in the
+		// merge goroutine (e.g. pool output buffer full while workers
+		// drain a saturated backend) propagates straight back to the
+		// callback and halts Pub/Sub prefetch. Buffering decouples the
+		// two for burst absorption; sustained saturation past the
+		// buffer still applies backpressure to Pub/Sub, which is the
+		// correct signal at that point.
+		ch := make(chan *pipeline.EmbelishedRequestMessage, prefetchBufferDepth())
 		p.requestChannels = append(p.requestChannels, RequestChannelData{
 			requestChannel: pipeline.RequestChannel{
 				Channel:            ch,
@@ -596,10 +605,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 	//
 	// MaxOutstandingBytes = -1 removes the bytes-based limit (default
 	// 1GB) so only message count gates prefetch.
-	prefetchDepth := *batchSize * 5
-	if prefetchDepth < 1000 {
-		prefetchDepth = 1000
-	}
+	prefetchDepth := prefetchBufferDepth()
 	sub.ReceiveSettings.MaxOutstandingMessages = prefetchDepth
 	sub.ReceiveSettings.MaxOutstandingBytes = -1
 	sub.ReceiveSettings.NumGoroutines = 1
@@ -736,8 +742,19 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			}
 		}
 
-		ch <- emb
-		stats.dispatched.Add(1)
+		// Forward to the merge policy. Under sustained saturation the
+		// buffered channel can still fill; select-with-ctx ensures
+		// shutdown unblocks rather than deadlocking the callback (and
+		// hence Receive(), which would never exit). On ctx cancel we
+		// fire any subscription-gate releases attached to emb and
+		// nack so Pub/Sub redelivers.
+		select {
+		case ch <- emb:
+			stats.dispatched.Add(1)
+		case <-ctx.Done():
+			emb.FireReleases()
+			resultsChannel <- ackAction{ack: false}
+		}
 	})
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Fail to receive messages from request subscription")
@@ -862,6 +879,19 @@ func synthesizePool(s TopicConfig) pipeline.Pool {
 		}}
 	}
 	return pool
+}
+
+// prefetchBufferDepth is the shared sizing for both Pub/Sub's
+// MaxOutstandingMessages (transport-side prefetch) and the
+// per-subscription channel buffer (Go-side handoff to the merge
+// goroutine). Keeping them equal means the channel can hold the full
+// prefetch window without backpressuring into the callback.
+func prefetchBufferDepth() int {
+	depth := *batchSize * 5
+	if depth < 1000 {
+		depth = 1000
+	}
+	return depth
 }
 
 // bytesTrimLeftSpace returns b with leading ASCII whitespace removed.

@@ -16,6 +16,11 @@
 // pipeline knows nothing about them. Operators configure the label key
 // and value-ordering, so different vocabularies (or more than two
 // classes) drop in without code changes.
+//
+// Messages whose tier or class label values aren't in the configured
+// order (operator typos, schema drift) aren't lost: they drain at
+// lowest priority via a catch-all pass after the configured priority
+// passes complete. The policy is total over its input domain.
 package tierpriority
 
 import (
@@ -104,6 +109,32 @@ func New(cfg Config) *Policy {
 // policy is pure routing/ordering — it never consults a gate.
 type Policy struct {
 	cfg Config
+}
+
+// isConfiguredKey reports whether (tier, class) is one of the buckets
+// popNext drains in its configured passes. Used by popUnconfigured to
+// identify catch-all candidates. Empty-string values count as
+// configured (the configured passes consult them explicitly).
+func (p *Policy) isConfiguredKey(k bucketKey) bool {
+	tierOK := k.tier == ""
+	if !tierOK {
+		for _, t := range p.cfg.TierOrder {
+			if t == k.tier {
+				tierOK = true
+				break
+			}
+		}
+	}
+	classOK := k.class == ""
+	if !classOK {
+		for _, c := range p.cfg.ClassOrder {
+			if c == k.class {
+				classOK = true
+				break
+			}
+		}
+	}
+	return tierOK && classOK
 }
 
 var _ pipeline.RequestMergePolicy = (*Policy)(nil)
@@ -248,11 +279,38 @@ func (ps *poolState) popNext() *pipeline.EmbelishedRequestMessage {
 		if m := ps.popBucket(bucketKey{"", ""}); m != nil {
 			return m
 		}
+		// Catch-all: any bucket whose (tier, class) isn't covered by
+		// the configured ClassOrder / TierOrder still contains real
+		// work. Drain it at lowest priority — keeps the policy total
+		// over its input domain so typos or schema drift (e.g.
+		// `tier=urgent` against a config that only declares
+		// interactive/async/batch) don't strand messages.
+		if m := ps.popUnconfigured(); m != nil {
+			return m
+		}
 		if ps.closed {
 			return nil
 		}
 		ps.cond.Wait()
 	}
+}
+
+// popUnconfigured pops one message from any bucket whose (tier, class)
+// key is not in the configured ClassOrder / TierOrder. The configured
+// passes above already drained their buckets; whatever remains is, by
+// definition, unconfigured. Iteration order is map-iteration (random)
+// — these are operator-misconfigured messages, so we don't promise any
+// particular interleaving among them.
+func (ps *poolState) popUnconfigured() *pipeline.EmbelishedRequestMessage {
+	for key := range ps.buckets {
+		if ps.policy.isConfiguredKey(key) {
+			continue
+		}
+		if m := ps.popBucket(key); m != nil {
+			return m
+		}
+	}
+	return nil
 }
 
 func (ps *poolState) popBucket(key bucketKey) *pipeline.EmbelishedRequestMessage {

@@ -38,13 +38,12 @@ ap:
     resultQueueName: "result-list"
     pollIntervalMs: 1000
     batchSize: 10
-    gateType: ""
-    gateParams: {}
+    # Note: per-pool / per-subscription gate chains are configured via
+    # the topics-config-file (see README), not chart values. Chart-level
+    # support for the new gate types is not yet wired.
   # PodMonitor for model server metrics relabeling.
   # Creates a PodMonitor that scrapes vLLM metrics and relabels
   # the inference_pool pod label into scraped metrics.
-  # Required when using prometheus-budget or prometheus-saturation gates
-  # without llm-d's flow control plugin enabled.
   modelServerMonitor:
     enabled: false
     selector:
