@@ -122,13 +122,13 @@ func main() {
 		}
 		impl = flow
 	case "redis-sortedset":
-		flow, err := redis.NewRedisSortedSetFlow()
+		flow, err := redis.NewRedisSortedSetFlow(redis.WithGateFactory(gateFactory))
 		if err != nil {
 			setupLog.Error(err, "Failed to create Redis sorted-set flow")
 			os.Exit(1)
 		}
 		impl = flow
-		setupLog.Info("Using Redis sorted-set flow")
+		setupLog.Info("Using Redis sorted-set flow with per-queue gating")
 	case "gcp-pubsub":
 		impl = pubsub.NewGCPPubSubMQFlow()
 	case "gcp-pubsub-gated":

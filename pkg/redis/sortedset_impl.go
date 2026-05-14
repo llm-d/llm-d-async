@@ -27,6 +27,8 @@ var (
 	ssQueuesConfigFile   = flag.String("redis.ss.queues-config-file", "", "Multiple queues config file")
 	ssPollIntervalMs     = flag.Int("redis.ss.poll-interval-ms", 1000, "Poll interval in milliseconds")
 	ssBatchSize          = flag.Int("redis.ss.batch-size", 10, "Number of messages to process per poll")
+	ssGateType           = flag.String("redis.ss.gate-type", "", "Pool gate type for single-queue mode")
+	ssGateParams         = flag.String("redis.ss.gate-params", "{}", "JSON-encoded pool gate params for single-queue mode")
 )
 
 type queueConfig struct {
@@ -36,15 +38,24 @@ type queueConfig struct {
 	IGWBaseURL         string            `json:"igw_base_url"`
 	HTTPHeaders        map[string]string `json:"http_headers,omitempty"`
 	ModelNameOverride  string            `json:"model_name_override,omitempty"`
-	// Labels is the queue's static label set. The redis sortedset Flow
-	// doesn't model pools natively, so each queue is its own singleton
-	// pool — the queue name is auto-injected as labels["pool"].
+	// Labels is the queue's gate/RMP-internal static label set. The redis
+	// sortedset Flow doesn't model pools natively, so each queue is its own
+	// singleton pool — the queue name is auto-injected as labels["pool"].
 	Labels map[string]string `json:"labels,omitempty"`
+	// GateType / GateParams declare a single pool gate (evaluated in the
+	// worker after RMP dispatch). Equivalent to a one-entry Pool.Gates.
+	GateType   string            `json:"gate_type,omitempty"`
+	GateParams map[string]string `json:"gate_params,omitempty"`
+	// Gates is the queue-gate chain evaluated after popping from Redis and
+	// before forwarding to the merge policy. Use for label classifiers or
+	// fast terminal decisions.
+	Gates []pipeline.GateConfig `json:"gates,omitempty"`
 }
 
 type requestChannelData struct {
-	channel   pipeline.RequestChannel
-	queueName string
+	channel           pipeline.RequestChannel
+	queueName         string
+	subscriptionGates []pipeline.Gate
 }
 
 var _ pipeline.Flow = (*RedisSortedSetFlow)(nil)
@@ -56,13 +67,20 @@ type RedisSortedSetFlow struct {
 	resultChannel   chan api.ResultMessage
 	pollInterval    time.Duration
 	batchSize       int
+	gateFactory     pipeline.GateFactory
 }
 
-// Note: the sortedset flow does not currently wire subscription or
-// pool gate chains. Per-queue / per-pool gating is supported only on
-// the GCP Pub/Sub flow today (gcp-pubsub-gated). When SS gates are
-// re-introduced, a GateFactory will thread through here.
-func NewRedisSortedSetFlow() (*RedisSortedSetFlow, error) {
+// SortedSetOption is a functional option for configuring RedisSortedSetFlow.
+type SortedSetOption func(*RedisSortedSetFlow)
+
+// WithGateFactory sets a GateFactory for queue/pool gate instantiation.
+func WithGateFactory(factory pipeline.GateFactory) SortedSetOption {
+	return func(r *RedisSortedSetFlow) {
+		r.gateFactory = factory
+	}
+}
+
+func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error) {
 	configs, err := loadQueueConfigs()
 	if err != nil {
 		return nil, err
@@ -78,6 +96,9 @@ func NewRedisSortedSetFlow() (*RedisSortedSetFlow, error) {
 		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),
 		pollInterval:    time.Duration(*ssPollIntervalMs) * time.Millisecond,
 		batchSize:       *ssBatchSize,
+	}
+	for _, opt := range opts {
+		opt(r)
 	}
 
 	for _, cfg := range configs {
@@ -95,6 +116,16 @@ func NewRedisSortedSetFlow() (*RedisSortedSetFlow, error) {
 			channelLabels[k] = v
 		}
 
+		pool := synthesizeSortedSetPool(cfg)
+		poolGates, err := buildRedisGateChain(r.gateFactory, fmt.Sprintf("queue %q pool", cfg.QueueName), pool.Gates)
+		if err != nil {
+			return nil, err
+		}
+		subscriptionGates, err := buildRedisGateChain(r.gateFactory, fmt.Sprintf("queue %q", cfg.QueueName), cfg.Gates)
+		if err != nil {
+			return nil, err
+		}
+
 		ch := pipeline.RequestChannel{
 			Channel:            make(chan *pipeline.EmbelishedRequestMessage),
 			InferenceObjective: cfg.InferenceObjective,
@@ -102,13 +133,15 @@ func NewRedisSortedSetFlow() (*RedisSortedSetFlow, error) {
 			IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
 			HTTPHeaders:        headers,
 			ModelNameOverride:  cfg.ModelNameOverride,
+			Gate:               gateFromChain(poolGates),
 			Labels:             channelLabels,
 			PoolID:             cfg.QueueName,
 		}
 
 		r.requestChannels = append(r.requestChannels, requestChannelData{
-			channel:   ch,
-			queueName: cfg.QueueName,
+			channel:           ch,
+			queueName:         cfg.QueueName,
+			subscriptionGates: subscriptionGates,
 		})
 	}
 
@@ -127,12 +160,86 @@ func loadQueueConfigs() ([]queueConfig, error) {
 		}
 		return configs, nil
 	}
+	gateParams, err := parseGateParams(*ssGateParams)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse redis.ss.gate-params: %w", err)
+	}
 	return []queueConfig{{
 		QueueName:          *ssRequestQueueName,
 		InferenceObjective: *ssInferenceObjective,
 		RequestPathURL:     *ssRequestPathURL,
 		IGWBaseURL:         *ssIGWBaseURL,
+		GateType:           *ssGateType,
+		GateParams:         gateParams,
 	}}, nil
+}
+
+func parseGateParams(raw string) (map[string]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	params := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		return nil, err
+	}
+	if len(params) == 0 {
+		return nil, nil
+	}
+	return params, nil
+}
+
+// synthesizeSortedSetPool builds the per-queue Pool synthesized for
+// gate-chain construction. The sortedset flow doesn't model pools
+// natively, so each queue's pool inherits the queue's HTTP-dispatch
+// fields plus a single pool-gate from GateType/GateParams if set.
+func synthesizeSortedSetPool(cfg queueConfig) pipeline.Pool {
+	pool := pipeline.Pool{
+		ID:                cfg.QueueName,
+		GatewayURL:        cfg.IGWBaseURL,
+		RequestPath:       cfg.RequestPathURL,
+		HTTPHeaders:       cfg.HTTPHeaders,
+		ModelNameOverride: cfg.ModelNameOverride,
+	}
+	if cfg.GateType != "" {
+		pool.Gates = []pipeline.GateConfig{{
+			Type:   cfg.GateType,
+			Params: cfg.GateParams,
+		}}
+	}
+	return pool
+}
+
+// buildRedisGateChain constructs a gate chain from a slice of GateConfig
+// using the wired GateFactory. Returns an error if the chain is non-empty
+// but no factory is wired.
+func buildRedisGateChain(factory pipeline.GateFactory, owner string, gateCfgs []pipeline.GateConfig) ([]pipeline.Gate, error) {
+	if len(gateCfgs) == 0 {
+		return nil, nil
+	}
+	if factory == nil {
+		return nil, fmt.Errorf("%s declares %d gate(s) but no GateFactory was wired into the Flow", owner, len(gateCfgs))
+	}
+	out := make([]pipeline.Gate, 0, len(gateCfgs))
+	for i, cfg := range gateCfgs {
+		g, err := factory.CreateGate(cfg.Type, cfg.Params)
+		if err != nil {
+			return nil, fmt.Errorf("%s gate[%d] (type=%q): %w", owner, i, cfg.Type, err)
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+// gateFromChain wraps a pre-built chain in a Gate that runs ApplyChain.
+// Returns nil when the chain is empty (no pool gate to install on the
+// RequestChannel).
+func gateFromChain(gates []pipeline.Gate) pipeline.Gate {
+	if len(gates) == 0 {
+		return nil
+	}
+	return pipeline.GateFunc(func(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
+		return pipeline.ApplyChain(ctx, msg, gates)
+	})
 }
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {
@@ -159,8 +266,12 @@ func (r *RedisSortedSetFlow) Pools() []pipeline.Pool {
 	out := make([]pipeline.Pool, 0, len(r.requestChannels))
 	for _, cd := range r.requestChannels {
 		out = append(out, pipeline.Pool{
-			ID:         cd.queueName,
-			GatewayURL: cd.channel.IGWBaseURL,
+			ID:                cd.queueName,
+			GatewayURL:        cd.channel.IGWBaseURL,
+			RequestPath:       cd.channel.RequestPathURL,
+			HTTPHeaders:       cd.channel.HTTPHeaders,
+			ModelNameOverride: cd.channel.ModelNameOverride,
+			Labels:            map[string]string(cd.channel.Labels.Clone()),
 		})
 	}
 	return out
@@ -185,9 +296,11 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 	defer ticker.Stop()
 
 	var requestChannel pipeline.RequestChannel
+	var subscriptionGates []pipeline.Gate
 	for _, ch := range r.requestChannels {
 		if ch.queueName == queueName {
 			requestChannel = ch.channel
+			subscriptionGates = ch.subscriptionGates
 			break
 		}
 	}
@@ -197,12 +310,12 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.processMessages(ctx, msgChannel, queueName, requestChannel, logger)
+			r.processMessages(ctx, msgChannel, queueName, requestChannel, subscriptionGates, logger)
 		}
 	}
 }
 
-func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *pipeline.EmbelishedRequestMessage, queueName string, requestChannel pipeline.RequestChannel, logger logr.Logger) {
+func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *pipeline.EmbelishedRequestMessage, queueName string, requestChannel pipeline.RequestChannel, subscriptionGates []pipeline.Gate, logger logr.Logger) {
 	currentTime := float64(time.Now().Unix())
 
 	for i := 0; i < r.batchSize; i++ {
@@ -263,9 +376,24 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			PoolID:            requestChannel.PoolID,
 		}
 
+		if len(subscriptionGates) > 0 {
+			v, err := pipeline.ApplyChain(ctx, emb, subscriptionGates)
+			if err != nil {
+				// Gate err is informational: the Verdict is
+				// authoritative. Fail-open gates return Continue + err
+				// to signal degradation without diverting traffic.
+				logger.V(logutil.DEFAULT).Error(err, "queue gate chain reported error", "queueName", queueName)
+			}
+			if v.Terminate {
+				r.handleQueueGateTerminate(ctx, v, emb, results[0], queueName, logger)
+				continue
+			}
+		}
+
 		select {
 		case msgChannel <- emb:
 		case <-ctx.Done():
+			emb.FireReleases()
 			if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
 				return r.rdb.ZAdd(ctx, queueName, redis.Z{
 					Score:  results[0].Score,
@@ -276,6 +404,56 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			}
 			return
 		}
+	}
+}
+
+// handleQueueGateTerminate routes a queue-gate Terminate verdict to the
+// right ack/nack outcome for the sortedset transport. Refuse hands the
+// message to the retry channel (or re-adds to the source set if no
+// retry channel is wired). Drop with Result forwards to the result
+// channel. Silent drops consume the message from the source set
+// (already removed by ZPopMin) and discard.
+func (r *RedisSortedSetFlow) handleQueueGateTerminate(ctx context.Context, v pipeline.Verdict, emb *pipeline.EmbelishedRequestMessage, original redis.Z, queueName string, logger logr.Logger) {
+	emb.FireReleases()
+
+	if v.Redeliver {
+		if r.retryChannel == nil {
+			r.requeueOriginal(ctx, queueName, original, logger, emb.PublicRequest.ReqID())
+			return
+		}
+		select {
+		case r.retryChannel <- pipeline.RetryMessage{
+			EmbelishedRequestMessage: *emb,
+			BackoffDurationSeconds:   30,
+			RetryReason:              "gate_refused",
+		}:
+		case <-ctx.Done():
+			r.requeueOriginal(context.Background(), queueName, original, logger, emb.PublicRequest.ReqID())
+		}
+		return
+	}
+
+	if v.Result != nil {
+		if r.resultChannel == nil {
+			r.requeueOriginal(ctx, queueName, original, logger, emb.PublicRequest.ReqID())
+			return
+		}
+		select {
+		case r.resultChannel <- *v.Result:
+		case <-ctx.Done():
+			r.requeueOriginal(context.Background(), queueName, original, logger, emb.PublicRequest.ReqID())
+		}
+	}
+}
+
+// requeueOriginal puts the popped message back into its source sorted
+// set with its original score. Used when a Terminate verdict can't be
+// honored (no retry/result channel wired, or ctx canceled mid-send).
+func (r *RedisSortedSetFlow) requeueOriginal(ctx context.Context, queueName string, original redis.Z, logger logr.Logger, id string) {
+	if err := retryRedisOp(ctx, func(ctx context.Context) error {
+		return r.rdb.ZAdd(ctx, queueName, original).Err()
+	}); err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "Failed to re-queue message", "id", id)
 	}
 }
 
@@ -310,13 +488,19 @@ func (r *RedisSortedSetFlow) retryWorker(ctx context.Context) {
 		case <-ctx.Done():
 			for {
 				select {
-				case msg := <-r.retryChannel:
+				case msg, ok := <-r.retryChannel:
+					if !ok {
+						return
+					}
 					processMsg(context.Background(), msg)
 				default:
 					return
 				}
 			}
-		case msg := <-r.retryChannel:
+		case msg, ok := <-r.retryChannel:
+			if !ok {
+				return
+			}
 			processMsg(ctx, msg)
 		}
 	}
@@ -382,13 +566,19 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 		case <-ctx.Done():
 			for {
 				select {
-				case msg := <-r.resultChannel:
+				case msg, ok := <-r.resultChannel:
+					if !ok {
+						return
+					}
 					processMsg(context.Background(), msg)
 				default:
 					return
 				}
 			}
-		case msg := <-r.resultChannel:
+		case msg, ok := <-r.resultChannel:
+			if !ok {
+				return
+			}
 			processMsg(ctx, msg)
 		}
 	}

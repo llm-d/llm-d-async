@@ -21,6 +21,20 @@ func newTestMQFlow(rdb *redis.Client) *RedisMQFlow {
 	}
 }
 
+func TestDrainBatchStopsOnClosedChannel(t *testing.T) {
+	ch := make(chan string, 2)
+	ch <- "second"
+	close(ch)
+
+	batch := drainBatch("first", ch, maxBatchSize)
+	if len(batch) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %#v", len(batch), batch)
+	}
+	if batch[0] != "first" || batch[1] != "second" {
+		t.Fatalf("unexpected batch: %#v", batch)
+	}
+}
+
 func TestPubsubResultWorker_BatchPublish(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()

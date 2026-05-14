@@ -95,7 +95,10 @@ func drainBatch[T any](first T, channel <-chan T, maxBatchSize int) []T {
 	batch[0] = first
 	for len(batch) < maxBatchSize {
 		select {
-		case item := <-channel:
+		case item, ok := <-channel:
+			if !ok {
+				return batch
+			}
 			batch = append(batch, item)
 		default:
 			return batch
@@ -210,13 +213,19 @@ func (r *RedisMQFlow) resultWorker(ctx context.Context, resultsQueueName string)
 		case <-ctx.Done():
 			for {
 				select {
-				case msg := <-r.resultChannel:
+				case msg, ok := <-r.resultChannel:
+					if !ok {
+						return
+					}
 					processMsg(context.Background(), msg)
 				default:
 					return
 				}
 			}
-		case msg := <-r.resultChannel:
+		case msg, ok := <-r.resultChannel:
+			if !ok {
+				return
+			}
 			processMsg(ctx, msg)
 		}
 	}
@@ -283,6 +292,9 @@ func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan
 			if !ok {
 				return true
 			}
+			if rmsg == nil {
+				continue
+			}
 			var ir api.InternalRequest
 			err := json.Unmarshal([]byte(rmsg.Payload), &ir)
 			if err != nil {
@@ -311,7 +323,11 @@ func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan
 				Labels:          pipeline.Labels(ir.Labels),
 				PoolID:          requestChannel.PoolID,
 			}
-			msgChannel <- emb
+			select {
+			case msgChannel <- emb:
+			case <-ctx.Done():
+				return false
+			}
 		}
 	}
 }
@@ -343,7 +359,10 @@ func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel ch
 		case <-ctx.Done():
 			return
 
-		case msg := <-retryChannel:
+		case msg, ok := <-retryChannel:
+			if !ok {
+				return
+			}
 			if msg.InternalRequest == nil {
 				continue
 			}

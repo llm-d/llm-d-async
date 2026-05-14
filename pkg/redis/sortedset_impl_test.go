@@ -3,16 +3,40 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/redis/go-redis/v9"
 )
+
+type testGateFactory struct {
+	gates map[string]pipeline.Gate
+	calls []testGateCall
+}
+
+type testGateCall struct {
+	gateType string
+	params   map[string]string
+}
+
+func (f *testGateFactory) CreateGate(gateType string, params map[string]string) (pipeline.Gate, error) {
+	copied := make(map[string]string, len(params))
+	for k, v := range params {
+		copied[k] = v
+	}
+	f.calls = append(f.calls, testGateCall{gateType: gateType, params: copied})
+	if g := f.gates[gateType]; g != nil {
+		return g, nil
+	}
+	return pipeline.AlwaysContinue, nil
+}
 
 // Test helper to create test flow and Redis
 func setupTest(t *testing.T) (*miniredis.Miniredis, *redis.Client, context.Context, context.CancelFunc) {
@@ -27,6 +51,240 @@ func envelopeJSON(rm api.RequestMessage) string {
 	ir := api.NewInternalRequest(api.InternalRouting{}, &rm)
 	b, _ := json.Marshal(ir)
 	return string(b)
+}
+
+func TestSortedSetFlow_ConfiguresQueueAndPoolGates(t *testing.T) {
+	s, setupRDB, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer setupRDB.Close() // nolint:errcheck
+	defer cancel()
+
+	configFile := t.TempDir() + "/queues.json"
+	config := `[
+		{
+			"queue_name": "gated-queue",
+			"igw_base_url": "http://igw.example",
+			"request_path_url": "/v1/chat/completions",
+			"model_name_override": "external-model",
+			"labels": {"team": "alpha"},
+			"gate_type": "pool-label",
+			"gate_params": {"scope": "pool"},
+			"gates": [
+				{"type": "subscription-label", "params": {"scope": "queue"}}
+			]
+		}
+	]`
+	if err := os.WriteFile(configFile, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origConfigFile := *ssQueuesConfigFile
+	origRedisURL := *RedisURL
+	*ssQueuesConfigFile = configFile
+	*RedisURL = "redis://" + s.Addr()
+	defer func() {
+		*ssQueuesConfigFile = origConfigFile
+		*RedisURL = origRedisURL
+	}()
+
+	factory := &testGateFactory{gates: map[string]pipeline.Gate{
+		"subscription-label": pipeline.GateFunc(func(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
+			msg.Labels.Set("class", "reserved")
+			return pipeline.Continue, nil
+		}),
+		"pool-label": pipeline.GateFunc(func(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
+			msg.Labels.Set("pool_gate", "ran")
+			return pipeline.Continue, nil
+		}),
+	}}
+
+	flow, err := NewRedisSortedSetFlow(WithGateFactory(factory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer flow.rdb.Close() // nolint:errcheck
+	flow.pollInterval = 10 * time.Millisecond
+
+	if len(factory.calls) != 2 {
+		t.Fatalf("expected 2 gate factory calls, got %d: %#v", len(factory.calls), factory.calls)
+	}
+	if factory.calls[0].gateType != "pool-label" || factory.calls[0].params["scope"] != "pool" {
+		t.Fatalf("unexpected pool gate call: %#v", factory.calls[0])
+	}
+	if factory.calls[1].gateType != "subscription-label" || factory.calls[1].params["scope"] != "queue" {
+		t.Fatalf("unexpected subscription gate call: %#v", factory.calls[1])
+	}
+
+	rdb := flow.rdb
+	msg := api.RequestMessage{ID: "gated-msg", Created: time.Now().Unix(), Deadline: 9999999999}
+	if err := rdb.ZAdd(ctx, "gated-queue", redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)}).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
+	go flow.requestWorker(workerCtx, flow.requestChannels[0].channel.Channel, "gated-queue")
+
+	select {
+	case received := <-flow.requestChannels[0].channel.Channel:
+		if got := received.Labels.Get("pool"); got != "gated-queue" {
+			t.Fatalf("pool label = %q, want gated-queue", got)
+		}
+		if got := received.Labels.Get("team"); got != "alpha" {
+			t.Fatalf("team label = %q, want alpha", got)
+		}
+		if got := received.Labels.Get("class"); got != "reserved" {
+			t.Fatalf("subscription gate class label = %q, want reserved", got)
+		}
+		if received.Gate == nil {
+			t.Fatal("expected pool gate to be attached to dispatched message")
+		}
+		v, err := received.Gate.Apply(ctx, received)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.Terminate {
+			t.Fatal("pool gate unexpectedly terminated message")
+		}
+		if got := received.Labels.Get("pool_gate"); got != "ran" {
+			t.Fatalf("pool gate label = %q, want ran", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for gated message")
+	}
+}
+
+func TestSortedSetFlow_SingleQueueGateFlags(t *testing.T) {
+	origConfigFile := *ssQueuesConfigFile
+	origQueue := *ssRequestQueueName
+	origGateType := *ssGateType
+	origGateParams := *ssGateParams
+	*ssQueuesConfigFile = ""
+	*ssRequestQueueName = "flag-queue"
+	*ssGateType = "constant-decision"
+	*ssGateParams = `{"decision":"continue"}`
+	defer func() {
+		*ssQueuesConfigFile = origConfigFile
+		*ssRequestQueueName = origQueue
+		*ssGateType = origGateType
+		*ssGateParams = origGateParams
+	}()
+
+	configs, err := loadQueueConfigs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(configs))
+	}
+	if configs[0].QueueName != "flag-queue" || configs[0].GateType != "constant-decision" {
+		t.Fatalf("unexpected config: %#v", configs[0])
+	}
+	if got := configs[0].GateParams["decision"]; got != "continue" {
+		t.Fatalf("gate param decision = %q, want continue", got)
+	}
+}
+
+func TestSortedSetFlow_QueueGateDropResultDoesNotDispatch(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "drop-gate-queue"
+	msgChannel := make(chan *pipeline.EmbelishedRequestMessage, 1)
+	flow := &RedisSortedSetFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, 1),
+		retryChannel:  make(chan pipeline.RetryMessage, 1),
+		batchSize:     10,
+	}
+	requestChannel := pipeline.RequestChannel{
+		Channel: msgChannel,
+		Labels:  pipeline.Labels{"pool": queue},
+		PoolID:  queue,
+	}
+	gate := pipeline.GateFunc(func(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
+		return pipeline.Drop(&api.ResultMessage{ID: msg.PublicRequest.ReqID(), Payload: "dropped"}), nil
+	})
+
+	msg := api.RequestMessage{ID: "drop-me", Created: time.Now().Unix(), Deadline: 9999999999}
+	if err := rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)}).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	flow.processMessages(ctx, msgChannel, queue, requestChannel, []pipeline.Gate{gate}, logr.Discard())
+
+	select {
+	case got := <-flow.resultChannel:
+		if got.ID != "drop-me" || got.Payload != "dropped" {
+			t.Fatalf("unexpected result: %#v", got)
+		}
+	default:
+		t.Fatal("expected drop result")
+	}
+	select {
+	case got := <-msgChannel:
+		t.Fatalf("message dispatched despite drop verdict: %#v", got)
+	default:
+	}
+	if count, _ := rdb.ZCard(ctx, queue).Result(); count != 0 {
+		t.Fatalf("expected source queue to be consumed, got %d", count)
+	}
+}
+
+func TestSortedSetFlow_QueueGateRefuseUsesRetryChannel(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "refuse-gate-queue"
+	msgChannel := make(chan *pipeline.EmbelishedRequestMessage, 1)
+	flow := &RedisSortedSetFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, 1),
+		retryChannel:  make(chan pipeline.RetryMessage, 1),
+		batchSize:     10,
+	}
+	requestChannel := pipeline.RequestChannel{
+		Channel: msgChannel,
+		Labels:  pipeline.Labels{"pool": queue},
+		PoolID:  queue,
+	}
+	gate := pipeline.GateFunc(func(ctx context.Context, msg *pipeline.EmbelishedRequestMessage) (pipeline.Verdict, error) {
+		return pipeline.Refuse(), nil
+	})
+
+	msg := api.RequestMessage{ID: "retry-me", Created: time.Now().Unix(), Deadline: 9999999999}
+	if err := rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)}).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	flow.processMessages(ctx, msgChannel, queue, requestChannel, []pipeline.Gate{gate}, logr.Discard())
+
+	select {
+	case retry := <-flow.retryChannel:
+		if retry.PublicRequest == nil || retry.PublicRequest.ReqID() != "retry-me" {
+			t.Fatalf("unexpected retry message: %#v", retry.PublicRequest)
+		}
+		if retry.BackoffDurationSeconds != 30 {
+			t.Fatalf("retry backoff = %v, want 30", retry.BackoffDurationSeconds)
+		}
+		if retry.RetryReason != "gate_refused" {
+			t.Fatalf("retry reason = %q, want gate_refused", retry.RetryReason)
+		}
+	default:
+		t.Fatal("expected retry message")
+	}
+	select {
+	case got := <-msgChannel:
+		t.Fatalf("message dispatched despite refuse verdict: %#v", got)
+	default:
+	}
+	if count, _ := rdb.ZCard(ctx, queue).Result(); count != 0 {
+		t.Fatalf("expected source queue to be consumed, got %d", count)
+	}
 }
 
 func TestSortedSetFlow_MessageProcessing(t *testing.T) {

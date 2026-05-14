@@ -233,6 +233,20 @@ A persisted implementation based on Redis SortedSets.
 - `redis.ss.queues-config-file`: The configuration file name when using multiple queues. <br> Mutually exclusive with `redis.ss.igw-base-url`, `redis.ss.request-queue-name`, `redis.ss.request-path-url` and `redis.ss.inference-objective` flags.
 - `redis.ss.poll-interval-ms`: Poll interval in milliseconds. Default is <u>1000</u>.
 - `redis.ss.batch-size`: Number of messages to process per poll. Default is <u>10</u>.
+- `redis.ss.gate-type`: Pool gate type for single-queue mode (e.g., `local-max-concurrency`, `tier-priority-admission`). Only used when `redis.ss.queues-config-file` is not set.
+- `redis.ss.gate-params`: JSON-encoded pool gate params for single-queue mode (e.g., `{"max_concurrency":"32"}`). Only used when `redis.ss.queues-config-file` is not set.
+
+When using `redis.ss.queues-config-file`, the file contains a JSON array of queue objects. Each queue is treated as a singleton pool for dispatch and gate placement:
+
+- `queue_name`: The Redis sorted set used for requests. Also becomes the auto `pool` label.
+- `igw_base_url`: Base URL of the IGW.
+- `inference_objective`: The inference objective header value.
+- `request_path_url`: The request path URL.
+- `http_headers` (optional): Additional HTTP headers sent to the inference endpoint. Header values support `$VAR` and `${VAR}` environment variable expansion at startup; missing variables fail startup.
+- `model_name_override` (optional): Rewrites the top-level `payload.model` field before sending the HTTP request.
+- `labels` (optional): Static operator labels consumed only by gates and merge policies.
+- `gate_type` / `gate_params` (optional): Pool gate run in the worker after RMP dispatch. Use for blocking admission gates such as local concurrency/rate limit or backend saturation.
+- `gates` (optional): Queue gates run immediately after popping from Redis and before the RMP. Use for label classifiers or fast terminal decisions; gate label mutations are visible to merge policies.
 
 ### Redis Channels (Ephemeral)
 
