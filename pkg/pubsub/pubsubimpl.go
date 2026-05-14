@@ -761,24 +761,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 				logger.V(logutil.DEFAULT).Error(err, "subscription gate chain reported error", "subscriberID", subscriberID)
 			}
 			if v.Terminate {
-				stats.gateDenied.Add(1)
-				emb.FireReleases()
-				if v.Result != nil {
-					select {
-					case r.resultChannel <- *v.Result:
-					case <-ctx.Done():
-					}
-				}
-				switch {
-				case v.Redeliver && gateCtx.Err() != nil:
-					// Transport lease hit: nack with no delay so the
-					// broker's redelivery path resumes the message.
-					resultsChannel <- ackAction{ack: false}
-				case v.Redeliver:
-					resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
-				default:
-					resultsChannel <- ackAction{ack: true}
-				}
+				r.handleSubscriptionGateTerminate(ctx, gateCtx, v, emb, resultsChannel, stats)
 				return
 			}
 		}
@@ -799,6 +782,49 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Fail to receive messages from request subscription")
 	}
+}
+
+// handleSubscriptionGateTerminate routes a subscription-gate Terminate
+// verdict to the right ack/nack outcome.
+//
+// The publish-before-ack contract: when v.Result is non-nil, the result
+// is forwarded to r.resultChannel and resultWorker is the sole ack
+// source — it publishes the result and then sends ack/nack to
+// resultsChannel based on publish success. Direct-acking here would
+// consume the Pub/Sub message before the caller-visible result is
+// confirmed published, leaking the request to the caller.
+//
+// Silent drops (v.Result == nil, !v.Redeliver) ack directly because no
+// publish is involved. Refuses nack with the appropriate delay, or
+// immediately when the transport lease has already expired.
+func (r *PubSubMQFlow) handleSubscriptionGateTerminate(ctx context.Context, gateCtx context.Context, v pipeline.Verdict, emb *pipeline.EmbelishedRequestMessage, resultsChannel chan<- ackAction, stats *progressStats) {
+	stats.gateDenied.Add(1)
+	emb.FireReleases()
+
+	if v.Redeliver {
+		if gateCtx.Err() != nil {
+			// Transport lease hit: nack with no delay so the broker's
+			// redelivery path resumes the message.
+			resultsChannel <- ackAction{ack: false}
+			return
+		}
+		resultsChannel <- ackAction{ack: false, nackDelay: 30 * time.Second}
+		return
+	}
+
+	if v.Result != nil {
+		select {
+		case r.resultChannel <- *v.Result:
+			// resultWorker publishes the result and only then sends
+			// the ack/nack action via the tracked resultsChannel.
+			// Intentionally do not ack here.
+		case <-ctx.Done():
+			resultsChannel <- ackAction{ack: false}
+		}
+		return
+	}
+
+	resultsChannel <- ackAction{ack: true}
 }
 
 // dispatchBeforeDeadline forwards emb to the merge-policy channel, but

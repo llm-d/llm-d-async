@@ -133,3 +133,63 @@ func TestPubSubTransportDeadlineKeepsSafetyMargin(t *testing.T) {
 		t.Fatalf("deadline = %s, want %s", deadline, want)
 	}
 }
+
+func TestSubscriptionGateDropWithResultDoesNotAckDirectly(t *testing.T) {
+	ctx := context.Background()
+	resultCh := make(chan api.ResultMessage, 1)
+	ackCh := make(chan ackAction, 1)
+	stats := &progressStats{}
+	flow := &PubSubMQFlow{resultChannel: resultCh}
+	result := api.ResultMessage{ID: "request-1", Payload: `{"error":"pool saturated"}`}
+
+	flow.handleSubscriptionGateTerminate(
+		ctx,
+		ctx,
+		pipeline.Drop(&result),
+		&pipeline.EmbelishedRequestMessage{},
+		ackCh,
+		stats,
+	)
+
+	select {
+	case got := <-resultCh:
+		if got.ID != result.ID {
+			t.Fatalf("result ID = %q, want %q", got.ID, result.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("result was not forwarded to result worker")
+	}
+
+	select {
+	case action := <-ackCh:
+		t.Fatalf("subscription gate result path acked directly: %+v", action)
+	default:
+	}
+	if got := stats.gateDenied.Load(); got != 1 {
+		t.Fatalf("gateDenied = %d, want 1", got)
+	}
+}
+
+func TestSubscriptionGateSilentDropAcksDirectly(t *testing.T) {
+	ctx := context.Background()
+	ackCh := make(chan ackAction, 1)
+	flow := &PubSubMQFlow{resultChannel: make(chan api.ResultMessage, 1)}
+
+	flow.handleSubscriptionGateTerminate(
+		ctx,
+		ctx,
+		pipeline.Drop(nil),
+		&pipeline.EmbelishedRequestMessage{},
+		ackCh,
+		&progressStats{},
+	)
+
+	select {
+	case action := <-ackCh:
+		if !action.ack {
+			t.Fatalf("silent drop action = %+v, want ack", action)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("silent drop did not ack")
+	}
+}
