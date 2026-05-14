@@ -150,6 +150,11 @@ func TestStringMapUnmarshal(t *testing.T) {
 			input:    `{"pool":"p1","threshold":0.8,"limit":100,"active":true}`,
 			expected: map[string]string{"pool": "p1", "threshold": "0.8", "limit": "100", "active": "true"},
 		},
+		{
+			name:     "null becomes empty string",
+			input:    `{"key":null}`,
+			expected: map[string]string{"key": ""},
+		},
 	}
 
 	for _, tt := range tests {
@@ -162,6 +167,24 @@ func TestStringMapUnmarshal(t *testing.T) {
 				if got := m[k]; got != want {
 					t.Errorf("key %q: expected %q, got %q", k, want, got)
 				}
+			}
+		})
+	}
+}
+
+func TestStringMapRejectsNonScalar(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"nested object", `{"key":{"nested":"value"}}`},
+		{"array", `{"key":[1,2,3]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var m StringMap
+			if err := json.Unmarshal([]byte(tt.input), &m); err == nil {
+				t.Error("expected error for non-scalar value, got nil")
 			}
 		})
 	}

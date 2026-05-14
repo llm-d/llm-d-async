@@ -35,7 +35,7 @@ var (
 	retryQueueName  = flag.String("redis.retry-queue-name", "retry-sortedset", "name of the Redis sorted set for retry messages")
 	resultQueueName = flag.String("redis.result-queue-name", "result-queue", "name of the Redis channel for result messages")
 
-	queuesConfig     = flag.String("redis.queues-config", "", "Inline JSON queues configuration. Mutually exclusive with redis.queues-config-file and redis.igw-base-url flags.")
+	queuesConfig     = flag.String("redis.queues-config", "", "Inline JSON queues configuration. Takes precedence over redis.queues-config-file and single-queue flags.")
 	queuesConfigFile = flag.String("redis.queues-config-file", "", "Queues Configuration file. Mutually exclusive with redis.igw-base-url, redis.request-queue-name, redis.request-path-url and redis.inference-objective flags. See documentation about syntax")
 )
 

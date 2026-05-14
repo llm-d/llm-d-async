@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -57,7 +58,18 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 	}
 	result := make(map[string]string, len(raw))
 	for k, v := range raw {
-		result[k] = fmt.Sprintf("%v", v)
+		switch val := v.(type) {
+		case string:
+			result[k] = val
+		case float64:
+			result[k] = strconv.FormatFloat(val, 'f', -1, 64)
+		case bool:
+			result[k] = strconv.FormatBool(val)
+		case nil:
+			result[k] = ""
+		default:
+			return fmt.Errorf("gate_params key %q: unsupported value type %T (only strings, numbers, and booleans are allowed)", k, v)
+		}
 	}
 	*m = result
 	return nil

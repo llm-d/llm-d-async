@@ -26,8 +26,12 @@ spec:
           {{- if .Values.ap.redis.enabled }}
           {{- if eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset" }}
           - --message-queue-impl=redis-sortedset
+          {{- if and .Values.ap.redis.queuesConfig .Values.ap.redis.gateType }}
+          {{- fail "Cannot set both queuesConfig and gateType. Use queuesConfig with per-queue gate_type instead." }}
+          {{- end }}
           {{- if .Values.ap.redis.queuesConfig }}
-          - --redis.ss.queues-config={{ .Values.ap.redis.queuesConfig | toJson }}
+          - --redis.ss.queues-config
+          - {{ .Values.ap.redis.queuesConfig | toJson | quote }}
           {{- else }}
           - --redis.ss.igw-base-url={{ .Values.ap.igwBaseURL }}
           - --redis.ss.request-path-url
@@ -48,7 +52,8 @@ spec:
           {{- else }}
           - --message-queue-impl=redis-pubsub
           {{- if .Values.ap.redis.queuesConfig }}
-          - --redis.queues-config={{ .Values.ap.redis.queuesConfig | toJson }}
+          - --redis.queues-config
+          - {{ .Values.ap.redis.queuesConfig | toJson | quote }}
           {{- else }}
           - --redis.igw-base-url={{ .Values.ap.igwBaseURL }}
           - --redis.request-path-url

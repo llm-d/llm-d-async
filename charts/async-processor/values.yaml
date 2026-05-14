@@ -51,7 +51,7 @@ ap:
     #     gate_type: "prometheus-saturation"
     #     gate_params:
     #       pool: "pool-1"
-    #       threshold: "0.7"
+    #       threshold: 0.7
     #   - queue_name: "queue-2"
     #     request_path_url: "/v1/completions"
     #     igw_base_url: "http://igw:80"
