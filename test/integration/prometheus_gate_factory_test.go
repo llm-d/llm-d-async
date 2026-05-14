@@ -125,6 +125,53 @@ func TestGateFactory_PrometheusSaturation_MissingParams(t *testing.T) {
 	assert.Error(t, err, "Should fail when pool is missing")
 }
 
+// TestGateFactory_PrometheusQuery_EndToEnd validates the prometheus-query gate
+// wiring: GateFactory.CreateGate("prometheus-query", params) ->
+//
+//	NewPromQLMetricSource (user-supplied PromQL) ->
+//	CachedMetricSource -> MetricDispatchGate(threshold=0) -> Budget()
+func TestGateFactory_PrometheusQuery_EndToEnd(t *testing.T) {
+	var queryCount int64
+	body := &atomic.Value{}
+	body.Store(promVectorResponse("0.7"))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&queryCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body.Load().(string))
+	}))
+	defer server.Close()
+
+	factory := flowcontrol.NewGateFactoryWithCacheTTL(server.URL, 200*time.Millisecond)
+
+	gate, err := factory.CreateGate("prometheus-query", map[string]string{
+		"query":    "my_custom_metric",
+		"fallback": "0.0",
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// threshold=0 so Budget = value - 0 = 0.7.
+	budget := gate.Budget(ctx)
+	assert.InDelta(t, 0.7, budget, 0.01)
+	assert.Equal(t, int64(1), atomic.LoadInt64(&queryCount))
+
+	// Second call within cache TTL should NOT trigger another HTTP request.
+	budget2 := gate.Budget(ctx)
+	assert.InDelta(t, 0.7, budget2, 0.01)
+	assert.Equal(t, int64(1), atomic.LoadInt64(&queryCount), "Should use cached result")
+
+	// Wait for cache TTL to expire and update response.
+	time.Sleep(250 * time.Millisecond)
+	body.Store(promVectorResponse("0.0"))
+
+	// Query returns 0.0 => Budget = 0.0.
+	budget3 := gate.Budget(ctx)
+	assert.Equal(t, 0.0, budget3)
+	assert.Equal(t, int64(2), atomic.LoadInt64(&queryCount), "Should have queried Prometheus again after cache expiry")
+}
+
 func promVectorResponse(value string) string {
 	return fmt.Sprintf(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"test","inference_pool":"my-pool"},"value":[1234567890,"%s"]}]}}`, value)
 }

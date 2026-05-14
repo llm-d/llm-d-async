@@ -105,6 +105,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `composite`: Combines multiple gates. Returns the minimum budget across all inner dispatch gates and acquires quota across all inner attribute gates (all or nothing).
 - `prometheus-saturation`: Queries Prometheus for pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
 - `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
+- `prometheus-query`: Evaluates an arbitrary user-supplied PromQL expression as the dispatch budget. The expression must resolve to a scalar value in [0, 1]. Unlike `prometheus-saturation` and `prometheus-budget`, this gate does not construct queries internally — the user provides the complete PromQL expression. Values outside [0, 1] are clamped.
 
 **Example Configuration with Per-Queue Gates:**
 
@@ -145,6 +146,16 @@ For more fine-grained control, configure gates per queue in your configuration f
        "gate_params": {
           "address": "localhost:6379",
           "budget_key": "my-budget-key"
+       }
+    },
+    {
+       "queue_name": "custom_metric_queue",
+       "inference_objective": "custom-task",
+       "request_path_url": "/v1/inference",
+       "gate_type": "prometheus-query",
+       "gate_params": {
+          "query": "1 - (sum(rate(http_requests_total{job=\"inference\"}[5m])) / 100)",
+          "fallback": "0.0"
        }
     },
     {
@@ -210,6 +221,15 @@ For more fine-grained control, configure gates per queue in your configuration f
     - sourceLabels: [__meta_kubernetes_pod_label_inference_pool]
       targetLabel: inference_pool
   ```
+
+- `prometheus-query`: Evaluates a user-supplied PromQL expression directly as the dispatch budget.
+  The expression must resolve to a Prometheus instant vector with a single sample whose value is in [0, 1].
+  Values outside this range are clamped.
+
+  - `query` (**required**): The PromQL expression to evaluate. This is sent to Prometheus exactly as provided.
+    The result is used directly as the dispatch budget (no transformation is applied).
+  - `fallback` (optional): Fallback budget value (0.0-1.0) returned when the query fails or returns no data.
+    Default is `0.0` (fail closed).
 
 ## Request Messages and Consumption
 

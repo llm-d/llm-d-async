@@ -87,6 +87,10 @@ func (f *GateFactory) Close() error {
 //     Gate closes when D ≤ B (baseline); returns D − B when open, so callers compute
 //     N = max_SYS × (D − B). Params: pool (required),
 //     max_concurrency (default 100), baseline (default 0.05), fallback (default 0.0)
+//   - "prometheus-query": Evaluates an arbitrary user-supplied PromQL expression as the dispatch
+//     budget. The expression must resolve to a scalar value in [0, 1]. Unlike prometheus-saturation
+//     and prometheus-budget, this gate does not construct queries internally — the user provides
+//     the complete PromQL expression. Params: query (required), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pipeline.DispatchGate, error) {
@@ -254,6 +258,28 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 			cachedSource(secondary, f.cacheTTL),
 		)
 		return NewBudgetDispatchGate(ms, baseline, fallback), nil
+
+	case "prometheus-query":
+		if f.prometheusURL == "" {
+			return nil, fmt.Errorf("prometheus-query gate type requires --prometheus-url flag to be set")
+		}
+
+		query := params["query"]
+		if query == "" {
+			return nil, fmt.Errorf("prometheus-query gate requires a 'query' parameter with a PromQL expression")
+		}
+
+		fallback, err := parseFloat("fallback", params["fallback"], 0.0)
+		if err != nil {
+			return nil, err
+		}
+
+		promConfig := promapi.Config{Address: f.prometheusURL}
+		source, err := NewPromQLMetricSource(promConfig, query)
+		if err != nil {
+			return nil, err
+		}
+		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback), nil
 
 	default:
 		// Unknown gate types default to open gate

@@ -249,3 +249,51 @@ func TestGateFactory_BudgetGateWithAllParams(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, gate)
 }
+
+func TestGateFactory_PrometheusQueryGateWithoutURL(t *testing.T) {
+	factory := NewGateFactory("")
+	gate, err := factory.CreateGate("prometheus-query", map[string]string{
+		"query": "up",
+	})
+	assert.Error(t, err, "should return error when Prometheus URL is not set")
+	assert.Nil(t, gate)
+	assert.Contains(t, err.Error(), "prometheus-query gate type requires --prometheus-url flag to be set")
+}
+
+func TestGateFactory_PrometheusQueryGateMissingQuery(t *testing.T) {
+	factory := NewGateFactory("http://localhost:9090")
+	gate, err := factory.CreateGate("prometheus-query", map[string]string{})
+	assert.Error(t, err, "should return error when query parameter is missing")
+	assert.Nil(t, gate)
+	assert.Contains(t, err.Error(), "requires a 'query' parameter")
+}
+
+func TestGateFactory_PrometheusQueryGateWithInvalidFallback(t *testing.T) {
+	factory := NewGateFactory("http://localhost:9090")
+	gate, err := factory.CreateGate("prometheus-query", map[string]string{
+		"query":    "up",
+		"fallback": "not-a-number",
+	})
+	assert.Error(t, err, "should return error when fallback is not a valid float")
+	assert.Nil(t, gate)
+	assert.Contains(t, err.Error(), "invalid fallback value")
+}
+
+func TestGateFactory_PrometheusQueryGateWithDefaults(t *testing.T) {
+	factory := NewGateFactory("http://localhost:9090")
+	gate, err := factory.CreateGate("prometheus-query", map[string]string{
+		"query": "up",
+	})
+	assert.NoError(t, err, "should create gate with default fallback")
+	assert.NotNil(t, gate)
+}
+
+func TestGateFactory_PrometheusQueryGateWithAllParams(t *testing.T) {
+	factory := NewGateFactory("http://localhost:9090")
+	gate, err := factory.CreateGate("prometheus-query", map[string]string{
+		"query":    `1 - (sum(rate(http_requests_total[5m])) / 100)`,
+		"fallback": "0.5",
+	})
+	assert.NoError(t, err, "should create gate with all params specified")
+	assert.NotNil(t, gate)
+}
