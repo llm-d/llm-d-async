@@ -76,7 +76,9 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 }
 
 type queueConfig struct {
-	QueueName          string    `json:"queue_name"`
+	ID                 string    `json:"id,omitempty"`
+	QueueName          string    `json:"queue_name,omitempty"`
+	ResultQueueName    string    `json:"result_queue_name,omitempty"`
 	InferenceObjective string    `json:"inference_objective"`
 	RequestPathURL     string    `json:"request_path_url"`
 	IGWBaseURL         string    `json:"igw_base_url"`
@@ -87,6 +89,7 @@ type queueConfig struct {
 type requestChannelData struct {
 	channel   pipeline.RequestChannel
 	queueName string
+	queueID   string
 	gate      pipeline.DispatchGate
 }
 
@@ -102,6 +105,7 @@ type RedisSortedSetFlow struct {
 	activeReleases  sync.Map
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
+	configMap       map[string]queueConfig
 }
 
 // SortedSetOption is a functional option for configuring RedisSortedSetFlow
@@ -137,6 +141,7 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 		opt(r)
 	}
 
+	r.configMap = make(map[string]queueConfig, len(configs))
 	for _, cfg := range configs {
 		var gate pipeline.DispatchGate
 		if r.gateFactory != nil && cfg.GateType != "" {
@@ -158,9 +163,11 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 			Gate:               gate,
 		}
 
+		r.configMap[cfg.ID] = cfg
 		r.requestChannels = append(r.requestChannels, requestChannelData{
 			channel:   ch,
 			queueName: cfg.QueueName,
+			queueID:   cfg.ID,
 			gate:      gate,
 		})
 	}
@@ -181,29 +188,54 @@ func parseQueueConfigs(data []byte) ([]queueConfig, error) {
 }
 
 func loadQueueConfigs() ([]queueConfig, error) {
+	var configs []queueConfig
 	if *ssQueuesConfig != "" {
-		return parseQueueConfigs([]byte(*ssQueuesConfig))
-	}
-	if *ssQueuesConfigFile != "" {
+		var err error
+		configs, err = parseQueueConfigs([]byte(*ssQueuesConfig))
+		if err != nil {
+			return nil, err
+		}
+	} else if *ssQueuesConfigFile != "" {
 		data, err := os.ReadFile(*ssQueuesConfigFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
-		return parseQueueConfigs(data)
+		configs, err = parseQueueConfigs(data)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		configs = []queueConfig{{
+			QueueName:          *ssRequestQueueName,
+			InferenceObjective: *ssInferenceObjective,
+			RequestPathURL:     *ssRequestPathURL,
+			IGWBaseURL:         *ssIGWBaseURL,
+			GateType:           *ssGateType,
+			GateParams:         parseGateParams(*ssGateParamsJSON),
+		}}
 	}
-	return []queueConfig{{
-		QueueName:          *ssRequestQueueName,
-		InferenceObjective: *ssInferenceObjective,
-		RequestPathURL:     *ssRequestPathURL,
-		IGWBaseURL:         *ssIGWBaseURL,
-		GateType:           *ssGateType,
-		GateParams:         parseGateParams(*ssGateParamsJSON),
-	}}, nil
+	for i := range configs {
+		applyQueueConfigDefaults(&configs[i])
+	}
+	return configs, nil
+}
+
+func applyQueueConfigDefaults(cfg *queueConfig) {
+	if cfg.ID != "" {
+		if cfg.QueueName == "" {
+			cfg.QueueName = "request:" + cfg.ID
+		}
+		if cfg.ResultQueueName == "" {
+			cfg.ResultQueueName = "result:" + cfg.ID
+		}
+	} else {
+		cfg.ID = cfg.QueueName
+	}
 }
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {
 	for _, ch := range r.requestChannels {
-		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName)
+		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName, ch.queueID)
 	}
 	go r.retryWorker(ctx)  // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
 	go r.resultWorker(ctx) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
@@ -230,7 +262,7 @@ func (r *RedisSortedSetFlow) Characteristics() pipeline.Characteristics {
 }
 
 // Polls sorted set and processes messages by deadline priority (earliest first)
-func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string) {
+func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string) {
 	logger := log.FromContext(ctx)
 	ticker := time.NewTicker(r.pollInterval)
 	defer ticker.Stop()
@@ -252,12 +284,12 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.processMessages(ctx, msgChannel, queueName, gate, logger)
+			r.processMessages(ctx, msgChannel, queueName, queueID, gate, logger)
 		}
 	}
 }
 
-func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, gate pipeline.DispatchGate, logger logr.Logger) {
+func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string, gate pipeline.DispatchGate, logger logr.Logger) {
 	currentTime := float64(time.Now().Unix())
 
 	budget := gate.Budget(ctx)
@@ -291,6 +323,9 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 
 		if ir.RequestQueueName == "" {
 			ir.RequestQueueName = queueName
+		}
+		if ir.QueueID == "" {
+			ir.QueueID = queueID
 		}
 
 		// Per-attribute gating
@@ -467,8 +502,8 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 	queued := make(map[string][]string)
 	for _, result := range batch {
 		resultQueue := defaultQueue
-		if result.Routing.ResultQueueName != "" {
-			resultQueue = result.Routing.ResultQueueName
+		if cfg, ok := r.configMap[result.Routing.QueueID]; ok && cfg.ResultQueueName != "" {
+			resultQueue = cfg.ResultQueueName
 		}
 		queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
 	}

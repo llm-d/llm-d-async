@@ -235,13 +235,15 @@ func floodProbes(envoyURL string, concurrency int) context.CancelFunc {
 // setEnvoyFaultAbort configures Envoy's fault injection filter via the admin
 // runtime API. percent is 0–100 (percentage of requests that return 503).
 func setEnvoyFaultAbort(envoyAdminURL string, percent int) {
-	body := fmt.Sprintf("fault.http.abort.abort_percent=%d", percent)
-	req, err := http.NewRequest(http.MethodPost, envoyAdminURL+"/runtime_modify?"+body, nil)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	resp, err := httpClient.Do(req)
-	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close() //nolint:errcheck
-	gomega.ExpectWithOffset(1, resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		body := fmt.Sprintf("fault.http.abort.abort_percent=%d", percent)
+		req, err := http.NewRequest(http.MethodPost, envoyAdminURL+"/runtime_modify?"+body, nil)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		resp, err := httpClient.Do(req)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
 
 func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string) {

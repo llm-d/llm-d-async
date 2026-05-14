@@ -22,6 +22,7 @@ const (
 // struct rather than reaching back into the typed request.
 type InternalRouting struct {
 	RetryCount             int                 `json:"retry_count,omitempty"`
+	QueueID                string              `json:"queue_id,omitempty"`
 	RequestQueueName       string              `json:"request_queue_name,omitempty"`
 	ResultQueueName        string              `json:"result_queue_name,omitempty"`
 	TransportCorrelationID string              `json:"transport_correlation_id,omitempty"`

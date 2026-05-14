@@ -217,7 +217,7 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
 
 	select {
 	case received := <-flow.requestChannels[0].channel.Channel:
@@ -267,7 +267,7 @@ func TestSortedSetFlow_DeadlineOrdering(t *testing.T) {
 	}
 
 	msgChannel := make(chan *api.InternalRequest, 10)
-	go flow.requestWorker(ctx, msgChannel, queue)
+	go flow.requestWorker(ctx, msgChannel, queue, "")
 
 	var processed []string
 	for i := 0; i < 3; i++ {
@@ -309,7 +309,7 @@ func TestSortedSetFlow_ExpiredMessages(t *testing.T) {
 	msg := api.RequestMessage{ID: "expired", Created: time.Now().Unix(), Deadline: pastDeadline}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(pastDeadline), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
 
 	select {
 	case msg := <-flow.requestChannels[0].channel.Channel:
@@ -359,7 +359,7 @@ func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 	validMsg := api.RequestMessage{ID: "valid", Created: time.Now().Unix(), Deadline: 9999999999}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(validMsg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
 
 	// Should skip malformed and receive valid message
 	select {
@@ -515,7 +515,6 @@ func TestSortedSetFlow_ResultBatchMultiQueue(t *testing.T) {
 	defer cancel()
 
 	defaultQueue := "default-result-queue"
-	customQueue := "custom-result-queue"
 	origQueue := *ssResultQueueName
 	*ssResultQueueName = defaultQueue
 	defer func() { *ssResultQueueName = origQueue }()
@@ -526,35 +525,33 @@ func TestSortedSetFlow_ResultBatchMultiQueue(t *testing.T) {
 		pollInterval:  50 * time.Millisecond,
 		batchSize:     10,
 		gate:          noopGate(),
+		configMap: map[string]queueConfig{
+			"queue-a": {ID: "queue-a", QueueName: "request:queue-a", ResultQueueName: "result:queue-a"},
+			"queue-b": {ID: "queue-b", QueueName: "request:queue-b", ResultQueueName: "result:queue-b"},
+		},
 	}
 
-	// Send messages targeting different queues in a single batch.
-	flow.resultChannel <- api.ResultMessage{ID: "default-1", Payload: "d1"}
-	flow.resultChannel <- api.ResultMessage{
-		ID:      "custom-1",
-		Payload: "c1",
-		Routing: api.InternalRouting{ResultQueueName: customQueue},
-	}
-	flow.resultChannel <- api.ResultMessage{ID: "default-2", Payload: "d2"}
-	flow.resultChannel <- api.ResultMessage{
-		ID:      "custom-2",
-		Payload: "c2",
-		Routing: api.InternalRouting{ResultQueueName: customQueue},
-	}
+	flow.resultChannel <- api.ResultMessage{ID: "a-1", Payload: "d1", Routing: api.InternalRouting{QueueID: "queue-a"}}
+	flow.resultChannel <- api.ResultMessage{ID: "b-1", Payload: "c1", Routing: api.InternalRouting{QueueID: "queue-b"}}
+	flow.resultChannel <- api.ResultMessage{ID: "a-2", Payload: "d2", Routing: api.InternalRouting{QueueID: "queue-a"}}
+	flow.resultChannel <- api.ResultMessage{ID: "no-id", Payload: "fallback"}
 
 	go flow.resultWorker(ctx)
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify default queue
-	defaultLen, _ := rdb.LLen(ctx, defaultQueue).Result()
-	if defaultLen != 2 {
-		t.Errorf("Expected 2 messages in default queue, got %d", defaultLen)
+	aLen, _ := rdb.LLen(ctx, "result:queue-a").Result()
+	if aLen != 2 {
+		t.Errorf("Expected 2 messages in result:queue-a, got %d", aLen)
 	}
 
-	// Verify custom queue
-	customLen, _ := rdb.LLen(ctx, customQueue).Result()
-	if customLen != 2 {
-		t.Errorf("Expected 2 messages in custom queue, got %d", customLen)
+	bLen, _ := rdb.LLen(ctx, "result:queue-b").Result()
+	if bLen != 1 {
+		t.Errorf("Expected 1 message in result:queue-b, got %d", bLen)
+	}
+
+	defaultLen, _ := rdb.LLen(ctx, defaultQueue).Result()
+	if defaultLen != 1 {
+		t.Errorf("Expected 1 message in default queue (no queue ID), got %d", defaultLen)
 	}
 }
 
@@ -584,7 +581,7 @@ func TestSortedSetFlow_NoRaceCondition(t *testing.T) {
 			defer wg.Done()
 			workerCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 			defer cancel()
-			go flow.requestWorker(workerCtx, msgChan, queue)
+			go flow.requestWorker(workerCtx, msgChan, queue, "")
 			for {
 				select {
 				case msg := <-msgChan:
@@ -635,7 +632,7 @@ func TestSortedSetFlow_ContextCancellation(t *testing.T) {
 
 	done := make(chan bool)
 	go func() {
-		flow.requestWorker(workerCtx, msgChan, queue)
+		flow.requestWorker(workerCtx, msgChan, queue, "")
 		done <- true
 	}()
 
@@ -725,7 +722,7 @@ func TestSortedSetFlow_ZeroBudget(t *testing.T) {
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
 
 	// Wait for several poll cycles - message should NOT be pulled (budget=0)
 	select {
@@ -950,7 +947,7 @@ func TestSortedSetFlow_PartialBudget(t *testing.T) {
 		rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix() + int64(i)), Member: envelopeJSON(msg)})
 	}
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue)
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
 
 	// Wait for one poll cycle (200ms interval + buffer)
 	time.Sleep(250 * time.Millisecond)
@@ -1000,7 +997,7 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		flow.requestWorker(workerCtx, msgChan, queue)
+		flow.requestWorker(workerCtx, msgChan, queue, "")
 		close(done)
 	}()
 
@@ -1042,5 +1039,128 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	json.Unmarshal([]byte(results[0].Member.(string)), &restored) // nolint:errcheck
 	if restored.PublicRequest.ReqID() != "requeue-1" {
 		t.Errorf("Expected re-queued message id requeue-1, got %s", restored.PublicRequest.ReqID())
+	}
+}
+
+func TestApplyQueueConfigDefaults_IDDerivesNames(t *testing.T) {
+	cfg := queueConfig{ID: "my-queue"}
+	applyQueueConfigDefaults(&cfg)
+
+	if cfg.QueueName != "request:my-queue" {
+		t.Errorf("Expected QueueName 'request:my-queue', got %q", cfg.QueueName)
+	}
+	if cfg.ResultQueueName != "result:my-queue" {
+		t.Errorf("Expected ResultQueueName 'result:my-queue', got %q", cfg.ResultQueueName)
+	}
+	if cfg.ID != "my-queue" {
+		t.Errorf("Expected ID 'my-queue', got %q", cfg.ID)
+	}
+}
+
+func TestApplyQueueConfigDefaults_IDWithExplicitNames(t *testing.T) {
+	cfg := queueConfig{ID: "my-queue", QueueName: "custom-req", ResultQueueName: "custom-res"}
+	applyQueueConfigDefaults(&cfg)
+
+	if cfg.QueueName != "custom-req" {
+		t.Errorf("Expected QueueName 'custom-req', got %q", cfg.QueueName)
+	}
+	if cfg.ResultQueueName != "custom-res" {
+		t.Errorf("Expected ResultQueueName 'custom-res', got %q", cfg.ResultQueueName)
+	}
+}
+
+func TestApplyQueueConfigDefaults_InferredFromQueueName(t *testing.T) {
+	cfg := queueConfig{QueueName: "my-request-sortedset"}
+	applyQueueConfigDefaults(&cfg)
+
+	if cfg.ID != "my-request-sortedset" {
+		t.Errorf("Expected ID inferred as 'my-request-sortedset', got %q", cfg.ID)
+	}
+	if cfg.QueueName != "my-request-sortedset" {
+		t.Errorf("Expected QueueName unchanged, got %q", cfg.QueueName)
+	}
+	if cfg.ResultQueueName != "" {
+		t.Errorf("Expected empty ResultQueueName for backward compat, got %q", cfg.ResultQueueName)
+	}
+}
+
+func TestSortedSetFlow_QueueIDSetOnDequeue(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "test-qid-queue"
+	queueID := "test-qid"
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{{
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			queueName: queue,
+			queueID:   queueID,
+		}},
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+	}
+
+	msg := api.RequestMessage{ID: "msg-qid", Created: time.Now().Unix(), Deadline: 9999999999}
+	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
+
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, queueID)
+
+	select {
+	case received := <-flow.requestChannels[0].channel.Channel:
+		if received.QueueID != queueID {
+			t.Errorf("Expected QueueID %q, got %q", queueID, received.QueueID)
+		}
+		if received.RequestQueueName != queue {
+			t.Errorf("Expected RequestQueueName %q, got %q", queue, received.RequestQueueName)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+}
+
+func TestSortedSetFlow_ResultQueueIgnoresMessagePayload(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	configResult := "config-result-queue"
+	messageResult := "message-result-queue"
+	origQueue := *ssResultQueueName
+	*ssResultQueueName = "global-default"
+	defer func() { *ssResultQueueName = origQueue }()
+
+	flow := &RedisSortedSetFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
+		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
+		gate:          noopGate(),
+		configMap: map[string]queueConfig{
+			"my-queue": {ID: "my-queue", ResultQueueName: configResult},
+		},
+	}
+
+	flow.resultChannel <- api.ResultMessage{
+		ID:      "test-1",
+		Payload: "data",
+		Routing: api.InternalRouting{QueueID: "my-queue", ResultQueueName: messageResult},
+	}
+
+	go flow.resultWorker(ctx)
+	time.Sleep(200 * time.Millisecond)
+
+	configLen, _ := rdb.LLen(ctx, configResult).Result()
+	if configLen != 1 {
+		t.Errorf("Expected 1 message in config result queue, got %d", configLen)
+	}
+
+	messageLen, _ := rdb.LLen(ctx, messageResult).Result()
+	if messageLen != 0 {
+		t.Errorf("Expected 0 messages in message-level result queue (should be ignored), got %d", messageLen)
 	}
 }
