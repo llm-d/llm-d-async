@@ -88,9 +88,10 @@ func (f *GateFactory) Close() error {
 //     N = max_SYS × (D − B). Params: pool (required),
 //     max_concurrency (default 100), baseline (default 0.05), fallback (default 0.0)
 //   - "prometheus-query": Evaluates an arbitrary user-supplied PromQL expression as the dispatch
-//     budget. The expression must resolve to a scalar value in [0, 1]. Unlike prometheus-saturation
-//     and prometheus-budget, this gate does not construct queries internally — the user provides
-//     the complete PromQL expression. Params: query (required), fallback (default 0.0)
+//     budget. The expression must resolve to an instant vector with a single sample whose value
+//     is in [0, 1]. Unlike prometheus-saturation and prometheus-budget, this gate does not
+//     construct queries internally — the user provides the complete PromQL expression.
+//     Params: query (required), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pipeline.DispatchGate, error) {

@@ -135,8 +135,10 @@ func TestGateFactory_PrometheusQuery_EndToEnd(t *testing.T) {
 	body := &atomic.Value{}
 	body.Store(promVectorResponse("0.7"))
 
+	const promQL = "my_custom_metric"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&queryCount, 1)
+		assert.Equal(t, promQL, r.FormValue("query"), "gate should forward the user-supplied PromQL expression")
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, body.Load().(string))
 	}))
@@ -145,7 +147,7 @@ func TestGateFactory_PrometheusQuery_EndToEnd(t *testing.T) {
 	factory := flowcontrol.NewGateFactoryWithCacheTTL(server.URL, 200*time.Millisecond)
 
 	gate, err := factory.CreateGate("prometheus-query", map[string]string{
-		"query":    "my_custom_metric",
+		"query":    promQL,
 		"fallback": "0.0",
 	})
 	require.NoError(t, err)
