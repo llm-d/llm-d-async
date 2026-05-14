@@ -26,6 +26,7 @@ var (
 	ssInferenceObjective = flag.String("redis.ss.inference-objective", "", "Inference objective header")
 	ssRequestQueueName   = flag.String("redis.ss.request-queue-name", "request-sortedset", "Request sorted set name")
 	ssResultQueueName    = flag.String("redis.ss.result-queue-name", "result-list", "Result list name")
+	ssQueuesConfig       = flag.String("redis.ss.queues-config", "", "Inline JSON queues configuration")
 	ssQueuesConfigFile   = flag.String("redis.ss.queues-config-file", "", "Multiple queues config file")
 	ssPollIntervalMs     = flag.Int("redis.ss.poll-interval-ms", 1000, "Poll interval in milliseconds")
 	ssBatchSize          = flag.Int("redis.ss.batch-size", 10, "Number of messages to process per poll")
@@ -45,13 +46,30 @@ func parseGateParams(s string) map[string]string {
 	return m
 }
 
+// StringMap is a map[string]string that tolerates non-string JSON values
+// by converting them to their string representation during unmarshaling.
+type StringMap map[string]string
+
+func (m *StringMap) UnmarshalJSON(data []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	result := make(map[string]string, len(raw))
+	for k, v := range raw {
+		result[k] = fmt.Sprintf("%v", v)
+	}
+	*m = result
+	return nil
+}
+
 type queueConfig struct {
-	QueueName          string            `json:"queue_name"`
-	InferenceObjective string            `json:"inference_objective"`
-	RequestPathURL     string            `json:"request_path_url"`
-	IGWBaseURL         string            `json:"igw_base_url"`
-	GateType           string            `json:"gate_type"`
-	GateParams         map[string]string `json:"gate_params,omitempty"`
+	QueueName          string    `json:"queue_name"`
+	InferenceObjective string    `json:"inference_objective"`
+	RequestPathURL     string    `json:"request_path_url"`
+	IGWBaseURL         string    `json:"igw_base_url"`
+	GateType           string    `json:"gate_type"`
+	GateParams         StringMap `json:"gate_params,omitempty"`
 }
 
 type requestChannelData struct {
@@ -142,17 +160,24 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 	return r, nil
 }
 
+func parseQueueConfigs(data []byte) ([]queueConfig, error) {
+	var configs []queueConfig
+	if err := json.Unmarshal(data, &configs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal queues config: %w", err)
+	}
+	return configs, nil
+}
+
 func loadQueueConfigs() ([]queueConfig, error) {
+	if *ssQueuesConfig != "" {
+		return parseQueueConfigs([]byte(*ssQueuesConfig))
+	}
 	if *ssQueuesConfigFile != "" {
 		data, err := os.ReadFile(*ssQueuesConfigFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
-		var configs []queueConfig
-		if err := json.Unmarshal(data, &configs); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal config file: %w", err)
-		}
-		return configs, nil
+		return parseQueueConfigs(data)
 	}
 	return []queueConfig{{
 		QueueName:          *ssRequestQueueName,

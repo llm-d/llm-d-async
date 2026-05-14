@@ -26,26 +26,34 @@ spec:
           {{- if .Values.ap.redis.enabled }}
           {{- if eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset" }}
           - --message-queue-impl=redis-sortedset
+          {{- if .Values.ap.redis.queuesConfig }}
+          - --redis.ss.queues-config={{ .Values.ap.redis.queuesConfig | toJson }}
+          {{- else }}
           - --redis.ss.igw-base-url={{ .Values.ap.igwBaseURL }}
           - --redis.ss.request-path-url
           - "{{ .Values.ap.redis.requestPathURL }}"
           - --redis.ss.request-queue-name
           - "{{ .Values.ap.redis.requestQueueName | default "request-sortedset" }}"
+          {{- if .Values.ap.redis.gateType }}
+          - --redis.ss.gate-type={{ .Values.ap.redis.gateType }}
+          - --redis.ss.gate-params={{ include "async-processor.gateParamsJson" . }}
+          {{- end }}
+          {{- end }}
           - --redis.ss.result-queue-name
           - "{{ .Values.ap.redis.resultQueueName | default "result-list" }}"
           - --redis.ss.poll-interval-ms
           - "{{ .Values.ap.redis.pollIntervalMs | default 1000 }}"
           - --redis.ss.batch-size
           - "{{ .Values.ap.redis.batchSize | default 10 }}"
-          {{- if .Values.ap.redis.gateType }}
-          - --redis.ss.gate-type={{ .Values.ap.redis.gateType }}
-          - --redis.ss.gate-params={{ include "async-processor.gateParamsJson" . }}
-          {{- end }}
           {{- else }}
           - --message-queue-impl=redis-pubsub
+          {{- if .Values.ap.redis.queuesConfig }}
+          - --redis.queues-config={{ .Values.ap.redis.queuesConfig | toJson }}
+          {{- else }}
           - --redis.igw-base-url={{ .Values.ap.igwBaseURL }}
           - --redis.request-path-url
           - "{{ .Values.ap.redis.requestPathURL }}"
+          {{- end }}
           {{- end }}
           {{- else if .Values.ap.gcpPubSub.enabled }}
           - --message-queue-impl=gcp-pubsub

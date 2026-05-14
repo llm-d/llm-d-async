@@ -36,6 +36,137 @@ func envelopeJSON(rm api.RequestMessage) string {
 	return string(b)
 }
 
+func TestParseQueueConfigs(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantLen  int
+		wantErr  bool
+		validate func(t *testing.T, configs []queueConfig)
+	}{
+		{
+			name:    "single queue with string gate params",
+			input:   `[{"queue_name":"q1","gate_type":"redis","gate_params":{"address":"localhost:6379"}}]`,
+			wantLen: 1,
+			validate: func(t *testing.T, configs []queueConfig) {
+				if configs[0].QueueName != "q1" {
+					t.Errorf("expected q1, got %s", configs[0].QueueName)
+				}
+				if configs[0].GateParams["address"] != "localhost:6379" {
+					t.Errorf("expected localhost:6379, got %s", configs[0].GateParams["address"])
+				}
+			},
+		},
+		{
+			name:    "numeric gate params coerced to strings",
+			input:   `[{"queue_name":"q1","gate_type":"prometheus-saturation","gate_params":{"threshold":0.7,"pool":"p1"}}]`,
+			wantLen: 1,
+			validate: func(t *testing.T, configs []queueConfig) {
+				if configs[0].GateParams["threshold"] != "0.7" {
+					t.Errorf("expected '0.7', got '%s'", configs[0].GateParams["threshold"])
+				}
+				if configs[0].GateParams["pool"] != "p1" {
+					t.Errorf("expected 'p1', got '%s'", configs[0].GateParams["pool"])
+				}
+			},
+		},
+		{
+			name:    "multiple queues",
+			input:   `[{"queue_name":"q1","igw_base_url":"http://igw:80"},{"queue_name":"q2","gate_type":"redis","gate_params":{"address":"redis:6379"}}]`,
+			wantLen: 2,
+			validate: func(t *testing.T, configs []queueConfig) {
+				if configs[0].QueueName != "q1" {
+					t.Errorf("expected q1, got %s", configs[0].QueueName)
+				}
+				if configs[1].QueueName != "q2" {
+					t.Errorf("expected q2, got %s", configs[1].QueueName)
+				}
+			},
+		},
+		{
+			name:    "no gate params",
+			input:   `[{"queue_name":"q1","request_path_url":"/v1/completions"}]`,
+			wantLen: 1,
+			validate: func(t *testing.T, configs []queueConfig) {
+				if len(configs[0].GateParams) != 0 {
+					t.Errorf("expected empty gate params, got %v", configs[0].GateParams)
+				}
+			},
+		},
+		{
+			name:    "invalid json",
+			input:   `not json`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configs, err := parseQueueConfigs([]byte(tt.input))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseQueueConfigs() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if len(configs) != tt.wantLen {
+				t.Fatalf("expected %d configs, got %d", tt.wantLen, len(configs))
+			}
+			if tt.validate != nil {
+				tt.validate(t, configs)
+			}
+		})
+	}
+}
+
+func TestStringMapUnmarshal(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected map[string]string
+	}{
+		{
+			name:     "string values",
+			input:    `{"key":"value"}`,
+			expected: map[string]string{"key": "value"},
+		},
+		{
+			name:     "numeric float",
+			input:    `{"threshold":0.7}`,
+			expected: map[string]string{"threshold": "0.7"},
+		},
+		{
+			name:     "integer",
+			input:    `{"limit":5}`,
+			expected: map[string]string{"limit": "5"},
+		},
+		{
+			name:     "boolean",
+			input:    `{"enabled":true}`,
+			expected: map[string]string{"enabled": "true"},
+		},
+		{
+			name:     "mixed types",
+			input:    `{"pool":"p1","threshold":0.8,"limit":100,"active":true}`,
+			expected: map[string]string{"pool": "p1", "threshold": "0.8", "limit": "100", "active": "true"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var m StringMap
+			if err := json.Unmarshal([]byte(tt.input), &m); err != nil {
+				t.Fatalf("unmarshal error: %v", err)
+			}
+			for k, want := range tt.expected {
+				if got := m[k]; got != want {
+					t.Errorf("key %q: expected %q, got %q", k, want, got)
+				}
+			}
+		})
+	}
+}
+
 func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

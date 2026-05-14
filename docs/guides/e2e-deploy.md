@@ -132,8 +132,8 @@ helm install async-processor ${ASYNC_REPO}/charts/async-processor/ \
 
 The values file (`docs/guides/e2e-deploy/async-processor-values.yaml`) configures:
 - Image: `ghcr.io/llm-d-incubation/llm-d-async:4a1b0a4`
-- Queue: Redis sorted-set with `redis.url` set directly (chart creates the Secret)
-- Gate: `prometheus-budget` with pool=`optimized-baseline`, max_concurrency=100, baseline=0.05
+- Queue: Redis sorted-set with `redis.url` set directly (chart creates the Secret), configured via `queuesConfig`
+- Gate: `prometheus-budget` with pool=`optimized-baseline`, max_concurrency=100, baseline=0.05 (per-queue)
 - Prometheus URL pointing to the cluster's `llmd-kube-prometheus-stack-prometheus` service
 - `modelServerMonitor.enabled: true` — creates a PodMonitor that relabels the `inference_pool`
   pod label into vLLM metrics (required for the dispatch budget gate fallback)

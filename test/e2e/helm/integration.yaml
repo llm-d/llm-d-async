@@ -11,10 +11,12 @@ ap:
   redis:
     enabled: true
     url: "redis://redis.e2e-integration.svc.cluster.local:6379"
-    requestPathURL: "/v1/completions"
-    requestQueueName: "integration-request-sortedset"
     resultQueueName: "integration-result-list"
     pollIntervalMs: 500
     batchSize: 10
+    queuesConfig:
+      - queue_name: "integration-request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
   modelServerMonitor:
     enabled: false

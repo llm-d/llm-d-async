@@ -14,16 +14,18 @@ ap:
   redis:
     enabled: true
     url: "redis://redis-master.redis.svc.cluster.local:6379"
-    requestPathURL: "/v1/completions"
-    requestQueueName: "request-sortedset"
     resultQueueName: "result-list"
     pollIntervalMs: 1000
     batchSize: 10
-    gateType: "prometheus-budget"
-    gateParams:
-      pool: "optimized-baseline"
-      max_concurrency: "100"
-      baseline: "0.05"
+    queuesConfig:
+      - queue_name: "request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://llm-d-inference-gateway-istio:80"
+        gate_type: "prometheus-budget"
+        gate_params:
+          pool: "optimized-baseline"
+          max_concurrency: "100"
+          baseline: "0.05"
   modelServerMonitor:
     enabled: true
     selector:

@@ -40,6 +40,26 @@ ap:
     batchSize: 10
     gateType: ""
     gateParams: {}
+    # Full multi-queue configuration (overrides single-queue fields above).
+    # For redis-sortedset, each entry supports its own gate_type and gate_params.
+    # For redis-pubsub, only queue_name, inference_objective, request_path_url, igw_base_url are used.
+    # queuesConfig:
+    #   - queue_name: "queue-1"
+    #     inference_objective: ""
+    #     request_path_url: "/v1/completions"
+    #     igw_base_url: "http://igw:80"
+    #     gate_type: "prometheus-saturation"
+    #     gate_params:
+    #       pool: "pool-1"
+    #       threshold: "0.7"
+    #   - queue_name: "queue-2"
+    #     request_path_url: "/v1/completions"
+    #     igw_base_url: "http://igw:80"
+    #     gate_type: "redis-quota"
+    #     gate_params:
+    #       address: "redis:6379"
+    #       limit: "5"
+    queuesConfig: []
   # PodMonitor for model server metrics relabeling.
   # Creates a PodMonitor that scrapes vLLM metrics and relabels
   # the inference_pool pod label into scraped metrics.
