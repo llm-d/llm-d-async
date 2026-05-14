@@ -36,6 +36,10 @@ const (
 	DefaultTierLabel      = "tier"
 	DefaultClassLabel     = "class"
 	DefaultPriorityHeader = "x-priority"
+	// DefaultPerSubscriptionBuffer bounds hidden in-RMP backlog per
+	// subscription. Pub/Sub is the durable backlog; the RMP only needs a
+	// small lookahead per independently-filtered source.
+	DefaultPerSubscriptionBuffer = 2
 )
 
 // Config captures everything the policy reads from labels and how it
@@ -51,6 +55,10 @@ type Config struct {
 	ClassOrder     []string
 	PriorityHeader string
 	PriorityFor    func(tier, class string) int
+	// PerSubscriptionBuffer is the max number of messages from one input
+	// subscription that may sit inside the RMP buckets before that input's
+	// reader stops receiving and applies backpressure upstream.
+	PerSubscriptionBuffer int
 }
 
 func (c *Config) withDefaults() Config {
@@ -66,6 +74,9 @@ func (c *Config) withDefaults() Config {
 	}
 	if out.PriorityFor == nil {
 		out.PriorityFor = defaultPriorityFor(out.TierOrder, out.ClassOrder)
+	}
+	if out.PerSubscriptionBuffer <= 0 {
+		out.PerSubscriptionBuffer = DefaultPerSubscriptionBuffer
 	}
 	return out
 }
@@ -170,14 +181,16 @@ func (p *Policy) MergeRequestChannels(channels []pipeline.RequestChannel) pipeli
 
 // poolState owns the per-pool buckets and goroutines.
 type poolState struct {
-	policy  *Policy
-	poolID  string
-	inputs  []pipeline.RequestChannel
-	out     chan<- pipeline.EmbelishedRequestMessage
+	policy *Policy
+	poolID string
+	inputs []pipeline.RequestChannel
+	out    chan<- pipeline.EmbelishedRequestMessage
 
 	mu        sync.Mutex
 	cond      *sync.Cond
 	buckets   map[bucketKey]*bucket
+	queued    []int
+	maxQueued int
 	remaining int
 	closed    bool
 }
@@ -192,6 +205,14 @@ type bucket struct {
 	rrIdx  int
 }
 
+// queuedMessage pairs an embellished message with the index of the
+// subscription input it was read from, so the dispatcher can release the
+// per-subscription queue slot once it forwards the message downstream.
+type queuedMessage struct {
+	inputIdx int
+	emb      *pipeline.EmbelishedRequestMessage
+}
+
 func newPoolState(policy *Policy, poolID string, inputs []pipeline.RequestChannel, out chan<- pipeline.EmbelishedRequestMessage) *poolState {
 	ps := &poolState{
 		policy:    policy,
@@ -199,6 +220,8 @@ func newPoolState(policy *Policy, poolID string, inputs []pipeline.RequestChanne
 		inputs:    inputs,
 		out:       out,
 		buckets:   map[bucketKey]*bucket{},
+		queued:    make([]int, len(inputs)),
+		maxQueued: policy.cfg.PerSubscriptionBuffer,
 		remaining: len(inputs),
 	}
 	ps.cond = sync.NewCond(&ps.mu)
@@ -208,9 +231,23 @@ func newPoolState(policy *Policy, poolID string, inputs []pipeline.RequestChanne
 // reader drains a single input channel and places each message into the
 // right (tier, class) bucket for this pool. Messages arrive fully
 // embellished from the Flow's pull callback; no re-wrapping needed.
+//
+// Reads are gated by acquireInputSlot so each subscription can have at
+// most PerSubscriptionBuffer messages buffered inside the RMP at once.
+// When that bound is hit the reader blocks before receiving, which
+// propagates backpressure to the Flow callback and (transitively) to
+// Pub/Sub prefetch flow control. The dispatcher releases a slot when it
+// forwards the message downstream.
 func (ps *poolState) reader(idx int, ch pipeline.RequestChannel) {
-	for emb := range ch.Channel {
+	for {
+		ps.acquireInputSlot(idx)
+		emb, ok := <-ch.Channel
+		if !ok {
+			ps.releaseInputSlot(idx)
+			break
+		}
 		if emb == nil {
+			ps.releaseInputSlot(idx)
 			continue
 		}
 		key := bucketKey{
@@ -239,21 +276,43 @@ func (ps *poolState) reader(idx int, ch pipeline.RequestChannel) {
 	ps.mu.Unlock()
 }
 
+// acquireInputSlot blocks until subscription idx has fewer than
+// maxQueued messages held in the RMP. Paired with releaseInputSlot,
+// which the dispatcher calls when it forwards a message downstream.
+func (ps *poolState) acquireInputSlot(idx int) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for ps.queued[idx] >= ps.maxQueued {
+		ps.cond.Wait()
+	}
+	ps.queued[idx]++
+}
+
+func (ps *poolState) releaseInputSlot(idx int) {
+	ps.mu.Lock()
+	if idx >= 0 && idx < len(ps.queued) && ps.queued[idx] > 0 {
+		ps.queued[idx]--
+	}
+	ps.cond.Broadcast()
+	ps.mu.Unlock()
+}
+
 // dispatcher pops messages in (class × tier) priority order and forwards
 // to the pool's output channel. Exits when all inputs have closed and
 // all buckets are drained.
 func (ps *poolState) dispatcher() {
 	defer close(ps.out)
 	for {
-		emb := ps.popNext()
-		if emb == nil {
+		msg := ps.popNext()
+		if msg == nil {
 			return
 		}
-		ps.policy.dispatch(emb, ps.out)
+		ps.policy.dispatch(msg.emb, ps.out)
+		ps.releaseInputSlot(msg.inputIdx)
 	}
 }
 
-func (ps *poolState) popNext() *pipeline.EmbelishedRequestMessage {
+func (ps *poolState) popNext() *queuedMessage {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	for {
@@ -301,7 +360,7 @@ func (ps *poolState) popNext() *pipeline.EmbelishedRequestMessage {
 // definition, unconfigured. Iteration order is map-iteration (random)
 // — these are operator-misconfigured messages, so we don't promise any
 // particular interleaving among them.
-func (ps *poolState) popUnconfigured() *pipeline.EmbelishedRequestMessage {
+func (ps *poolState) popUnconfigured() *queuedMessage {
 	for key := range ps.buckets {
 		if ps.policy.isConfiguredKey(key) {
 			continue
@@ -313,7 +372,7 @@ func (ps *poolState) popUnconfigured() *pipeline.EmbelishedRequestMessage {
 	return nil
 }
 
-func (ps *poolState) popBucket(key bucketKey) *pipeline.EmbelishedRequestMessage {
+func (ps *poolState) popBucket(key bucketKey) *queuedMessage {
 	b := ps.buckets[key]
 	if b == nil {
 		return nil
@@ -338,7 +397,7 @@ func (ps *poolState) popBucket(key bucketKey) *pipeline.EmbelishedRequestMessage
 	if len(b.queues[pick]) == 0 {
 		delete(b.queues, pick)
 	}
-	return msg
+	return &queuedMessage{inputIdx: pick, emb: msg}
 }
 
 // dispatch stamps the priority header and forwards the message to the

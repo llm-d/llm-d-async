@@ -1,6 +1,8 @@
 package tierpriority
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
@@ -16,6 +18,7 @@ const (
 	ConfigKeyTierOrder      = "tier_order"
 	ConfigKeyClassOrder     = "class_order"
 	ConfigKeyPriorityHeader = "priority_header"
+	ConfigKeyPerSubBuffer   = "per_subscription_buffer"
 )
 
 func init() {
@@ -47,6 +50,16 @@ func parseConfigFromDeps(in map[string]string) (Config, error) {
 	}
 	if len(cfg.ClassOrder) == 0 {
 		cfg.ClassOrder = []string{"reserved", "overflow"}
+	}
+	if raw := strings.TrimSpace(in[ConfigKeyPerSubBuffer]); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s must be an integer: %w", ConfigKeyPerSubBuffer, err)
+		}
+		if n < 1 {
+			return Config{}, fmt.Errorf("%s must be >= 1, got %d", ConfigKeyPerSubBuffer, n)
+		}
+		cfg.PerSubscriptionBuffer = n
 	}
 	return cfg, nil
 }
