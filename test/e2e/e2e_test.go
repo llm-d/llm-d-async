@@ -3,10 +3,12 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/onsi/gomega/gexec"
 )
 
 var _ = ginkgo.Describe("General Integration", func() {
@@ -144,6 +146,54 @@ var _ = ginkgo.Describe("General Integration", func() {
 			collected[r.ID] = true
 		}
 
+		for _, id := range ids {
+			gomega.Expect(collected).To(gomega.HaveKey(id))
+		}
+	})
+
+	ginkgo.It("does not lose messages on pod termination", func() {
+		// Enable 100% fault injection so messages fail and enter the retry loop.
+		setEnvoyFaultAbort(envoyAdminURL, 100)
+
+		ids := []string{"shutdown-1", "shutdown-2", "shutdown-3"}
+		for _, id := range ids {
+			enqueueMessage(ctx, rdb, integrationRequestQueue, makeRequestMessage(id, 5*time.Minute))
+		}
+
+		// Wait for the processor to dequeue and attempt (and fail) the messages.
+		time.Sleep(5 * time.Second)
+
+		// Delete the processor pod with a short grace period to trigger shutdown.
+		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "delete", "pod",
+			"-l", "app.kubernetes.io/instance=integration",
+			"--grace-period=10")
+		session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+
+		// Disable fault injection so the replacement pod can process messages.
+		setEnvoyFaultAbort(envoyAdminURL, 0)
+
+		// Wait for the replacement pod to be ready.
+		cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "rollout", "status",
+			"deployment/integration-async-processor", "--timeout=120s")
+		session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
+
+		// All messages should eventually appear in the result queue.
+		gomega.Eventually(func() int64 {
+			return getResultCount(ctx, rdb, integrationResultQueue)
+		}, 120*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", int64(len(ids))))
+
+		collected := make(map[string]bool)
+		for range ids {
+			r := popResult(ctx, rdb, integrationResultQueue)
+			gomega.Expect(r).NotTo(gomega.BeNil())
+			collected[r.ID] = true
+		}
 		for _, id := range ids {
 			gomega.Expect(collected).To(gomega.HaveKey(id))
 		}
