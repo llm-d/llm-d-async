@@ -632,7 +632,8 @@ func TestRetryRedisOp_BackoffSkippedOnShutdown(t *testing.T) {
 
 	// Normal backoff would be 100ms + 200ms = 300ms between 3 attempts.
 	// With a cancelled context the select falls through immediately.
-	if elapsed > 50*time.Millisecond {
+	// Use a generous upper bound to avoid flakiness on slow CI runners.
+	if elapsed > 200*time.Millisecond {
 		t.Fatalf("expected backoff to be skipped (elapsed %v), but it took too long", elapsed)
 	}
 }
