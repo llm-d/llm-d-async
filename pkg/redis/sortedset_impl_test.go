@@ -1119,6 +1119,32 @@ func TestLoadQueueConfigs_InferredDuplicateIDError(t *testing.T) {
 	}
 }
 
+func TestLoadQueueConfigs_DuplicateQueueNameError(t *testing.T) {
+	configs := []queueConfig{
+		{ID: "id-1", QueueName: "same-queue"},
+		{ID: "id-2", QueueName: "same-queue"},
+	}
+	seenID := make(map[string]bool, len(configs))
+	seenQueue := make(map[string]bool, len(configs))
+	var dupErr error
+	for i := range configs {
+		applyQueueConfigDefaults(&configs[i])
+		if seenID[configs[i].ID] {
+			dupErr = fmt.Errorf("duplicate queue id %q", configs[i].ID)
+			break
+		}
+		seenID[configs[i].ID] = true
+		if seenQueue[configs[i].QueueName] {
+			dupErr = fmt.Errorf("duplicate queue_name %q", configs[i].QueueName)
+			break
+		}
+		seenQueue[configs[i].QueueName] = true
+	}
+	if dupErr == nil {
+		t.Fatal("Expected duplicate queue_name error, got nil")
+	}
+}
+
 func TestSortedSetFlow_QueueIDSetOnDequeue(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

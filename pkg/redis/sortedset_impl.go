@@ -214,13 +214,18 @@ func loadQueueConfigs() ([]queueConfig, error) {
 			GateParams:         parseGateParams(*ssGateParamsJSON),
 		}}
 	}
-	seen := make(map[string]bool, len(configs))
+	seenID := make(map[string]bool, len(configs))
+	seenQueue := make(map[string]bool, len(configs))
 	for i := range configs {
 		applyQueueConfigDefaults(&configs[i])
-		if seen[configs[i].ID] {
+		if seenID[configs[i].ID] {
 			return nil, fmt.Errorf("duplicate queue id %q", configs[i].ID)
 		}
-		seen[configs[i].ID] = true
+		seenID[configs[i].ID] = true
+		if seenQueue[configs[i].QueueName] {
+			return nil, fmt.Errorf("duplicate queue_name %q", configs[i].QueueName)
+		}
+		seenQueue[configs[i].QueueName] = true
 	}
 	return configs, nil
 }
