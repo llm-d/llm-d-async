@@ -160,11 +160,12 @@ var _ = ginkgo.Describe("General Integration", func() {
 			enqueueMessage(ctx, rdb, integrationRequestQueue, makeRequestMessage(id, 5*time.Minute))
 		}
 
-		// Wait until the processor has dequeued all messages from the request
-		// queue (they will be in-flight or in the retry loop due to faults).
-		gomega.Eventually(func() int64 {
-			return rdb.ZCard(ctx, integrationRequestQueue).Val()
-		}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(0)))
+		// Confirm no results appear while faults are active (messages are
+		// cycling through the retry loop). This also gives the processor
+		// enough time to attempt each message at least once.
+		gomega.Consistently(func() int64 {
+			return getResultCount(ctx, rdb, integrationResultQueue)
+		}, 5*time.Second, 1*time.Second).Should(gomega.Equal(int64(0)))
 
 		// Delete the processor pod with a short grace period to trigger shutdown.
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
