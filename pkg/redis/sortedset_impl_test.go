@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
 	"sync"
@@ -1042,34 +1043,22 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	}
 }
 
-func TestApplyQueueConfigDefaults_IDDerivesNames(t *testing.T) {
-	cfg := queueConfig{ID: "my-queue"}
+func TestApplyQueueConfigDefaults_IDPreserved(t *testing.T) {
+	cfg := queueConfig{ID: "my-id", QueueName: "my-queue", ResultQueueName: "my-result"}
 	applyQueueConfigDefaults(&cfg)
 
-	if cfg.QueueName != "request:my-queue" {
-		t.Errorf("Expected QueueName 'request:my-queue', got %q", cfg.QueueName)
+	if cfg.ID != "my-id" {
+		t.Errorf("Expected ID 'my-id', got %q", cfg.ID)
 	}
-	if cfg.ResultQueueName != "result:my-queue" {
-		t.Errorf("Expected ResultQueueName 'result:my-queue', got %q", cfg.ResultQueueName)
+	if cfg.QueueName != "my-queue" {
+		t.Errorf("Expected QueueName 'my-queue', got %q", cfg.QueueName)
 	}
-	if cfg.ID != "my-queue" {
-		t.Errorf("Expected ID 'my-queue', got %q", cfg.ID)
+	if cfg.ResultQueueName != "my-result" {
+		t.Errorf("Expected ResultQueueName 'my-result', got %q", cfg.ResultQueueName)
 	}
 }
 
-func TestApplyQueueConfigDefaults_IDWithExplicitNames(t *testing.T) {
-	cfg := queueConfig{ID: "my-queue", QueueName: "custom-req", ResultQueueName: "custom-res"}
-	applyQueueConfigDefaults(&cfg)
-
-	if cfg.QueueName != "custom-req" {
-		t.Errorf("Expected QueueName 'custom-req', got %q", cfg.QueueName)
-	}
-	if cfg.ResultQueueName != "custom-res" {
-		t.Errorf("Expected ResultQueueName 'custom-res', got %q", cfg.ResultQueueName)
-	}
-}
-
-func TestApplyQueueConfigDefaults_InferredFromQueueName(t *testing.T) {
+func TestApplyQueueConfigDefaults_IDInferredFromQueueName(t *testing.T) {
 	cfg := queueConfig{QueueName: "my-request-sortedset"}
 	applyQueueConfigDefaults(&cfg)
 
@@ -1080,7 +1069,53 @@ func TestApplyQueueConfigDefaults_InferredFromQueueName(t *testing.T) {
 		t.Errorf("Expected QueueName unchanged, got %q", cfg.QueueName)
 	}
 	if cfg.ResultQueueName != "" {
-		t.Errorf("Expected empty ResultQueueName for backward compat, got %q", cfg.ResultQueueName)
+		t.Errorf("Expected empty ResultQueueName, got %q", cfg.ResultQueueName)
+	}
+}
+
+func TestLoadQueueConfigs_DuplicateIDError(t *testing.T) {
+	input := `[{"id":"same","igw_base_url":"http://a"},{"id":"same","igw_base_url":"http://b"}]`
+	_, err := parseQueueConfigs([]byte(input))
+	if err != nil {
+		t.Fatalf("parseQueueConfigs should succeed: %v", err)
+	}
+
+	configs := []queueConfig{
+		{ID: "same", QueueName: "q1"},
+		{ID: "same", QueueName: "q2"},
+	}
+	seen := make(map[string]bool, len(configs))
+	var dupErr error
+	for i := range configs {
+		applyQueueConfigDefaults(&configs[i])
+		if seen[configs[i].ID] {
+			dupErr = fmt.Errorf("duplicate queue id %q", configs[i].ID)
+			break
+		}
+		seen[configs[i].ID] = true
+	}
+	if dupErr == nil {
+		t.Fatal("Expected duplicate ID error, got nil")
+	}
+}
+
+func TestLoadQueueConfigs_InferredDuplicateIDError(t *testing.T) {
+	configs := []queueConfig{
+		{QueueName: "same-queue"},
+		{QueueName: "same-queue"},
+	}
+	seen := make(map[string]bool, len(configs))
+	var dupErr error
+	for i := range configs {
+		applyQueueConfigDefaults(&configs[i])
+		if seen[configs[i].ID] {
+			dupErr = fmt.Errorf("duplicate queue id %q", configs[i].ID)
+			break
+		}
+		seen[configs[i].ID] = true
+	}
+	if dupErr == nil {
+		t.Fatal("Expected duplicate ID error for inferred IDs, got nil")
 	}
 }
 
@@ -1162,5 +1197,54 @@ func TestSortedSetFlow_ResultQueueIgnoresMessagePayload(t *testing.T) {
 	messageLen, _ := rdb.LLen(ctx, messageResult).Result()
 	if messageLen != 0 {
 		t.Errorf("Expected 0 messages in message-level result queue (should be ignored), got %d", messageLen)
+	}
+}
+
+func TestSortedSetFlow_ResultQueueFallsBackToMessageLevel(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	messageResult := "producer-result-queue"
+	origQueue := *ssResultQueueName
+	*ssResultQueueName = "global-default"
+	defer func() { *ssResultQueueName = origQueue }()
+
+	flow := &RedisSortedSetFlow{
+		rdb:           rdb,
+		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
+		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
+		gate:          noopGate(),
+		configMap: map[string]queueConfig{
+			"no-result-cfg": {ID: "no-result-cfg", QueueName: "req", ResultQueueName: ""},
+		},
+	}
+
+	// Config exists but has no ResultQueueName → should fall back to message-level
+	flow.resultChannel <- api.ResultMessage{
+		ID:      "fallback-1",
+		Payload: "data",
+		Routing: api.InternalRouting{QueueID: "no-result-cfg", ResultQueueName: messageResult},
+	}
+	// No config match and no message-level → should fall back to global default
+	flow.resultChannel <- api.ResultMessage{
+		ID:      "global-1",
+		Payload: "data",
+		Routing: api.InternalRouting{},
+	}
+
+	go flow.resultWorker(ctx)
+	time.Sleep(200 * time.Millisecond)
+
+	msgLen, _ := rdb.LLen(ctx, messageResult).Result()
+	if msgLen != 1 {
+		t.Errorf("Expected 1 message in producer result queue (message-level fallback), got %d", msgLen)
+	}
+
+	globalLen, _ := rdb.LLen(ctx, "global-default").Result()
+	if globalLen != 1 {
+		t.Errorf("Expected 1 message in global default queue, got %d", globalLen)
 	}
 }

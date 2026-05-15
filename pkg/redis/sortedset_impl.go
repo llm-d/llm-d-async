@@ -214,21 +214,19 @@ func loadQueueConfigs() ([]queueConfig, error) {
 			GateParams:         parseGateParams(*ssGateParamsJSON),
 		}}
 	}
+	seen := make(map[string]bool, len(configs))
 	for i := range configs {
 		applyQueueConfigDefaults(&configs[i])
+		if seen[configs[i].ID] {
+			return nil, fmt.Errorf("duplicate queue id %q", configs[i].ID)
+		}
+		seen[configs[i].ID] = true
 	}
 	return configs, nil
 }
 
 func applyQueueConfigDefaults(cfg *queueConfig) {
-	if cfg.ID != "" {
-		if cfg.QueueName == "" {
-			cfg.QueueName = "request:" + cfg.ID
-		}
-		if cfg.ResultQueueName == "" {
-			cfg.ResultQueueName = "result:" + cfg.ID
-		}
-	} else {
+	if cfg.ID == "" {
 		cfg.ID = cfg.QueueName
 	}
 }
@@ -504,6 +502,8 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 		resultQueue := defaultQueue
 		if cfg, ok := r.configMap[result.Routing.QueueID]; ok && cfg.ResultQueueName != "" {
 			resultQueue = cfg.ResultQueueName
+		} else if result.Routing.ResultQueueName != "" {
+			resultQueue = result.Routing.ResultQueueName
 		}
 		queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
 	}
