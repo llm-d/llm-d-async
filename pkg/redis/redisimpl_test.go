@@ -3,8 +3,10 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -570,5 +572,85 @@ func TestRequestWorker_ReconnectsAfterChannelClose(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout: requestWorker did not recover after reconnect")
+	}
+}
+
+func TestRetryRedisOp_SuccessOnFirstAttempt(t *testing.T) {
+	var calls atomic.Int32
+	err := retryRedisOp(context.Background(), func(_ context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if c := calls.Load(); c != 1 {
+		t.Fatalf("expected 1 call, got %d", c)
+	}
+}
+
+func TestRetryRedisOp_SuccessAfterRetry(t *testing.T) {
+	var calls atomic.Int32
+	err := retryRedisOp(context.Background(), func(_ context.Context) error {
+		if calls.Add(1) == 1 {
+			return errors.New("transient")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if c := calls.Load(); c != 2 {
+		t.Fatalf("expected 2 calls, got %d", c)
+	}
+}
+
+func TestRetryRedisOp_AllRetriesExhausted(t *testing.T) {
+	var calls atomic.Int32
+	sentinel := errors.New("persistent")
+	err := retryRedisOp(context.Background(), func(_ context.Context) error {
+		calls.Add(1)
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+	if c := calls.Load(); c != int32(maxRetries) {
+		t.Fatalf("expected %d calls, got %d", maxRetries, c)
+	}
+}
+
+func TestRetryRedisOp_BackoffSkippedOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_ = retryRedisOp(ctx, func(_ context.Context) error {
+		return errors.New("fail")
+	})
+	elapsed := time.Since(start)
+
+	// Normal backoff would be 100ms + 200ms = 300ms between 3 attempts.
+	// With a cancelled context the select falls through immediately.
+	// Use a generous upper bound to avoid flakiness on slow CI runners.
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("expected backoff to be skipped (elapsed %v), but it took too long", elapsed)
+	}
+}
+
+func TestRetryRedisOp_UsesBackgroundCtxAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var received []context.Context
+	_ = retryRedisOp(ctx, func(c context.Context) error {
+		received = append(received, c)
+		return errors.New("fail")
+	})
+
+	for i, c := range received {
+		if c.Err() != nil {
+			t.Errorf("attempt %d: expected non-cancelled context, got err=%v", i, c.Err())
+		}
 	}
 }
