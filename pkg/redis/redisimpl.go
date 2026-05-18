@@ -41,6 +41,30 @@ var (
 
 const retryPopBatchSize = 100
 
+// Retry-polling interval bounds for the exponential backoff used by retryWorker.
+// When the worker drains no due messages from the retry sorted set, the next
+// sleep doubles up to maxRetryPollInterval; on a successful drain it resets to
+// baseRetryPollInterval. Declared as var (rather than const) so tests can
+// override to small values for fast, deterministic backoff coverage.
+var (
+	baseRetryPollInterval = 1 * time.Second
+	maxRetryPollInterval  = 30 * time.Second
+)
+
+// nextRetryPollInterval returns the next polling interval given the current
+// interval, base, and max. Doubles current, caps at max. Pure function so the
+// backoff math is unit-testable independently of the Redis-backed worker loop.
+func nextRetryPollInterval(current, base, max time.Duration) time.Duration {
+	if current < base {
+		return base
+	}
+	next := current * 2
+	if next > max {
+		return max
+	}
+	return next
+}
+
 // popDueRetryMessagesScript atomically fetches due retry entries (score <= now) and removes them.
 var popDueRetryMessagesScript = redis.NewScript(`
 local key = KEYS[1]
@@ -348,6 +372,12 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 		msgChannels[channelData.queueName] = channelData.requestChannel.Channel
 	}
 
+	// sleepDuration grows exponentially when no due retries are found and resets
+	// to baseRetryPollInterval whenever the drain cycle processes at least one
+	// message. This avoids hammering Redis with ZRANGEBYSCORE/ZREM at fixed 1Hz
+	// while idle. See #100.
+	sleepDuration := baseRetryPollInterval
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -357,6 +387,7 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 			// Keep one fixed cutoff for this drain cycle so we only process
 			// messages due at cycle start, avoiding an ever-expanding window.
 			currentTimeSec := time.Now().Unix()
+			drainedAny := false
 
 			for {
 				results, err := popDueRetryMessages(ctx, rdb, *retryQueueName, currentTimeSec, retryPopBatchSize)
@@ -367,6 +398,7 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 				if len(results) == 0 {
 					break
 				}
+				drainedAny = true
 
 				for i, msg := range results {
 					var message api.InternalRequest
@@ -393,7 +425,21 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 					}
 				}
 			}
-			time.Sleep(time.Second)
+
+			if drainedAny {
+				sleepDuration = baseRetryPollInterval
+			} else {
+				sleepDuration = nextRetryPollInterval(sleepDuration, baseRetryPollInterval, maxRetryPollInterval)
+			}
+
+			// Cancellable sleep — exit promptly on shutdown instead of waiting
+			// out the remainder of the current interval (which can be up to
+			// maxRetryPollInterval under the backoff).
+			select {
+			case <-time.After(sleepDuration):
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }

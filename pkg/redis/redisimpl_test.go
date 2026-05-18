@@ -654,3 +654,88 @@ func TestRetryRedisOp_UsesBackgroundCtxAfterCancel(t *testing.T) {
 		}
 	}
 }
+
+// TestNextRetryPollInterval covers the pure backoff math for retryWorker.
+// See #100.
+func TestNextRetryPollInterval(t *testing.T) {
+	base := 1 * time.Second
+	max := 30 * time.Second
+
+	tests := []struct {
+		name    string
+		current time.Duration
+		want    time.Duration
+	}{
+		{"zero current snaps to base", 0, base},
+		{"below base snaps to base", 100 * time.Millisecond, base},
+		{"base doubles to 2x", base, 2 * time.Second},
+		{"2s doubles to 4s", 2 * time.Second, 4 * time.Second},
+		{"8s doubles to 16s (still below cap)", 8 * time.Second, 16 * time.Second},
+		{"16s doubles to 30s (capped at max)", 16 * time.Second, 30 * time.Second},
+		{"at-cap stays at cap", max, max},
+		{"above cap clamps to cap", 60 * time.Second, max},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nextRetryPollInterval(tt.current, base, max)
+			if got != tt.want {
+				t.Errorf("nextRetryPollInterval(%v, %v, %v) = %v, want %v",
+					tt.current, base, max, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMQRetryWorker_ExitsPromptlyOnCancelDuringSleep verifies that ctx
+// cancellation interrupts the worker's sleep instead of waiting out the full
+// interval. With maxRetryPollInterval overridden to several seconds and the
+// retry queue empty (so the worker reaches the long sleep), cancelling the
+// context should cause the worker to exit within ~100ms rather than after
+// the full interval. Regression guard for the cancellable-sleep change in #100.
+func TestMQRetryWorker_ExitsPromptlyOnCancelDuringSleep(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	// Override intervals: short base so the worker quickly reaches the long
+	// max-clamped sleep, long max so an uncancellable sleep would visibly stall.
+	oldBase, oldMax := baseRetryPollInterval, maxRetryPollInterval
+	baseRetryPollInterval = 5 * time.Millisecond
+	maxRetryPollInterval = 5 * time.Second
+	defer func() {
+		baseRetryPollInterval = oldBase
+		maxRetryPollInterval = oldMax
+	}()
+
+	flow := &RedisMQFlow{
+		rdb:             rdb,
+		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),
+		retryChannel:    make(chan pipeline.RetryMessage),
+		requestChannels: []RequestChannelData{},
+	}
+
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		flow.retryWorker(workerCtx, rdb)
+		close(done)
+	}()
+
+	// Let the worker run long enough to traverse the backoff curve and reach
+	// the max-clamped sleep, then cancel.
+	time.Sleep(200 * time.Millisecond)
+	cancelStart := time.Now()
+	workerCancel()
+
+	select {
+	case <-done:
+		exitLatency := time.Since(cancelStart)
+		if exitLatency > 500*time.Millisecond {
+			t.Errorf("retryWorker took %v to exit after cancel; want < 500ms (uncancellable sleep would have taken up to %v)",
+				exitLatency, maxRetryPollInterval)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("retryWorker did not exit within 2s of context cancellation")
+	}
+}
