@@ -673,7 +673,9 @@ func TestClientError_NoRetry(t *testing.T) {
 
 func TestWorker_RetriesOnShutdown(t *testing.T) {
 	msgId := "shutdown-retry"
+	reqStarted := make(chan struct{})
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		close(reqStarted)
 		<-req.Context().Done()
 		return nil, req.Context().Err()
 	})
@@ -693,7 +695,7 @@ func TestWorker_RetriesOnShutdown(t *testing.T) {
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
-	time.Sleep(50 * time.Millisecond)
+	<-reqStarted
 	cancel()
 
 	select {

@@ -74,9 +74,10 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 					return
 				}
 
-				// Shutdown: parent context canceled, re-enqueue via the drain path.
-				// Send directly — retryMessage's select would take ctx.Done() immediately.
-				if ctx.Err() != nil {
+				// Shutdown: parent context cancelled and the error is context-related
+				// (not a completed HTTP response like 4xx). Re-enqueue directly —
+				// retryMessage's select would take ctx.Done() immediately.
+				if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 					retryChannel <- pipeline.RetryMessage{
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,

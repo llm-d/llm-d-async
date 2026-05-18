@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
@@ -125,6 +126,7 @@ type RedisMQFlow struct {
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
 	drainCancel     context.CancelFunc
+	drainWg         sync.WaitGroup
 }
 
 func NewRedisMQFlow() (*RedisMQFlow, error) {
@@ -171,24 +173,24 @@ func NewRedisMQFlow() (*RedisMQFlow, error) {
 }
 
 func (r *RedisMQFlow) Start(ctx context.Context) {
-	drainCtx, drainCancel := context.WithCancel(context.Background())
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), log.FromContext(ctx)))
 	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
 		go requestWorker(ctx, r.rdb, channelData.requestChannel.Channel, channelData.queueName)
 	}
 
-	go addMsgToRetryWorker(drainCtx, r.rdb, r.retryChannel, *retryQueueName)
-
-	go r.retryWorker(drainCtx, r.rdb)
-
-	go r.resultWorker(drainCtx, *resultQueueName) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+	r.drainWg.Add(3)
+	go func() { defer r.drainWg.Done(); addMsgToRetryWorker(drainCtx, r.rdb, r.retryChannel, *retryQueueName) }()
+	go func() { defer r.drainWg.Done(); r.retryWorker(drainCtx, r.rdb) }()
+	go func() { defer r.drainWg.Done(); r.resultWorker(drainCtx, *resultQueueName) }() // #nosec G118
 }
 
 func (r *RedisMQFlow) Shutdown() {
 	if r.drainCancel != nil {
 		r.drainCancel()
 	}
+	r.drainWg.Wait()
 }
 func (r *RedisMQFlow) RequestChannels() []pipeline.RequestChannel {
 

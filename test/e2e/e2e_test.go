@@ -207,8 +207,8 @@ var _ = ginkgo.Describe("General Integration", func() {
 		// The Worker should have re-queued the in-flight messages back to
 		// Redis on shutdown instead of treating them as fatal errors.
 		count := rdb.ZCard(ctx, integrationRequestQueue).Val()
-		gomega.Expect(count).To(gomega.BeNumerically(">=", 1),
-			"expected re-queued messages in request queue after shutdown")
+		gomega.Expect(count).To(gomega.BeNumerically(">=", int64(len(ids))),
+			"expected all in-flight messages re-queued after shutdown")
 	})
 
 	ginkgo.It("does not lose messages on pod termination", func() {

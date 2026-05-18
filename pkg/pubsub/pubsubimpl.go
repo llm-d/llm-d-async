@@ -55,6 +55,7 @@ type PubSubMQFlow struct {
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 	drainCancel     context.CancelFunc
+	drainWg         sync.WaitGroup
 }
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
@@ -173,22 +174,23 @@ func (r *PubSubMQFlow) RequestChannels() []pipeline.RequestChannel {
 }
 
 func (r *PubSubMQFlow) Start(ctx context.Context) {
-	drainCtx, drainCancel := context.WithCancel(context.Background())
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), log.FromContext(ctx)))
 	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
 		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.Channel, channelData.gate)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
-	go resultWorker(drainCtx, publisher, r.resultChannel)
-
-	go addMsgToRetryQueue(drainCtx, r.retryChannel)
+	r.drainWg.Add(2)
+	go func() { defer r.drainWg.Done(); resultWorker(drainCtx, publisher, r.resultChannel) }()
+	go func() { defer r.drainWg.Done(); addMsgToRetryQueue(drainCtx, r.retryChannel) }()
 }
 
 func (r *PubSubMQFlow) Shutdown() {
 	if r.drainCancel != nil {
 		r.drainCancel()
 	}
+	r.drainWg.Wait()
 }
 
 func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChannel chan api.ResultMessage) {
