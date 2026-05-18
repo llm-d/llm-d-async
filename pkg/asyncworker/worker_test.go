@@ -670,3 +670,40 @@ func TestClientError_NoRetry(t *testing.T) {
 		t.Errorf("Timeout waiting for result")
 	}
 }
+
+func TestWorker_RetriesOnShutdown(t *testing.T) {
+	msgId := "shutdown-retry"
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(5 * time.Minute).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case msg := <-retryChannel:
+		if msg.PublicRequest.ReqID() != msgId {
+			t.Errorf("Expected retry message id %s, got %s", msgId, msg.PublicRequest.ReqID())
+		}
+	case r := <-resultChannel:
+		t.Errorf("Expected retry, got fatal result: %s", r.Payload)
+	case <-time.After(5 * time.Second):
+		t.Errorf("Worker did not retry within 5s after shutdown")
+	}
+}

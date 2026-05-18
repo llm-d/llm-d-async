@@ -12,6 +12,7 @@ data:
         - name: static
           static_layer:
             fault.http.abort.abort_percent: 0
+            fault.http.delay.fixed_delay_percent: 0
         - name: admin
           admin_layer: {}
     admin:
@@ -110,6 +111,11 @@ data:
                       - name: envoy.filters.http.fault
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
+                          delay:
+                            percentage:
+                              numerator: 0
+                              denominator: HUNDRED
+                            fixed_delay: 60s
                           abort:
                             percentage:
                               numerator: 0

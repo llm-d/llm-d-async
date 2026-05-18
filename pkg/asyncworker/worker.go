@@ -74,6 +74,16 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 					return
 				}
 
+				// Shutdown: parent context canceled, re-enqueue via the drain path.
+				// Send directly — retryMessage's select would take ctx.Done() immediately.
+				if ctx.Err() != nil {
+					retryChannel <- pipeline.RetryMessage{
+						EmbelishedRequestMessage: msg,
+						BackoffDurationSeconds:   0,
+					}
+					return
+				}
+
 				// Check if error implements InferenceError
 				var inferenceErr asyncapi.InferenceError
 				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {

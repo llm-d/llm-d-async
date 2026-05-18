@@ -124,6 +124,7 @@ type RedisMQFlow struct {
 	requestChannels []RequestChannelData
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
+	drainCancel     context.CancelFunc
 }
 
 func NewRedisMQFlow() (*RedisMQFlow, error) {
@@ -170,16 +171,24 @@ func NewRedisMQFlow() (*RedisMQFlow, error) {
 }
 
 func (r *RedisMQFlow) Start(ctx context.Context) {
+	drainCtx, drainCancel := context.WithCancel(context.Background())
+	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
 		go requestWorker(ctx, r.rdb, channelData.requestChannel.Channel, channelData.queueName)
 	}
 
-	go addMsgToRetryWorker(ctx, r.rdb, r.retryChannel, *retryQueueName)
+	go addMsgToRetryWorker(drainCtx, r.rdb, r.retryChannel, *retryQueueName)
 
-	go r.retryWorker(ctx, r.rdb)
+	go r.retryWorker(drainCtx, r.rdb)
 
-	go r.resultWorker(ctx, *resultQueueName) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+	go r.resultWorker(drainCtx, *resultQueueName) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+}
+
+func (r *RedisMQFlow) Shutdown() {
+	if r.drainCancel != nil {
+		r.drainCancel()
+	}
 }
 func (r *RedisMQFlow) RequestChannels() []pipeline.RequestChannel {
 

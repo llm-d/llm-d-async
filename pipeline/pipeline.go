@@ -9,6 +9,7 @@ import (
 type Flow interface {
 	Characteristics() Characteristics
 	Start(ctx context.Context)
+	Shutdown()
 	RequestChannels() []RequestChannel
 	RetryChannel() chan RetryMessage
 	ResultChannel() chan api.ResultMessage

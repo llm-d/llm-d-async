@@ -246,6 +246,21 @@ func setEnvoyFaultAbort(envoyAdminURL string, percent int) {
 	}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
 
+// setEnvoyFaultDelay configures Envoy's fault injection delay via the admin
+// runtime API. percent is 0–100 (percentage of requests delayed by 60s,
+// the duration configured in the static Envoy config).
+func setEnvoyFaultDelay(envoyAdminURL string, percent int) {
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		body := fmt.Sprintf("fault.http.delay.fixed_delay_percent=%d", percent)
+		req, err := http.NewRequest(http.MethodPost, envoyAdminURL+"/runtime_modify?"+body, nil)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		resp, err := httpClient.Do(req)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
+}
+
 func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string) {
 	gomega.ExpectWithOffset(1, rdb.Set(ctx, dispatchGateBudgetKey, budget, 0).Err()).NotTo(gomega.HaveOccurred())
 }

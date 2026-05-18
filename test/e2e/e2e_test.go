@@ -30,6 +30,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 
 	ginkgo.AfterEach(func() {
 		setEnvoyFaultAbort(envoyAdminURL, 0)
+		setEnvoyFaultDelay(envoyAdminURL, 0)
 	})
 
 	ginkgo.It("processes a message end-to-end", func() {
@@ -151,11 +152,70 @@ var _ = ginkgo.Describe("General Integration", func() {
 		}
 	})
 
+	ginkgo.It("re-queues in-flight messages on pod termination", func() {
+		// Add a 60s delay to 100% of requests so they stay in-flight in the Worker.
+		setEnvoyFaultDelay(envoyAdminURL, 100)
+
+		// Ensure the deployment is restored even if the test fails.
+		ginkgo.DeferCleanup(func() {
+			setEnvoyFaultDelay(envoyAdminURL, 0)
+			cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+				"-n", nsName, "scale", "deployment/integration-async-processor",
+				"--replicas=1", "--timeout=60s")
+			session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+
+			cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+				"-n", nsName, "rollout", "status",
+				"deployment/integration-async-processor", "--timeout=120s")
+			session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
+		})
+
+		ids := []string{"shutdown-1", "shutdown-2", "shutdown-3"}
+		for _, id := range ids {
+			enqueueMessage(ctx, rdb, integrationRequestQueue, makeRequestMessage(id, 5*time.Minute))
+		}
+
+		// Wait until the processor has popped messages from the request queue
+		// (they are now in-flight, stuck in Envoy's delay).
+		gomega.Eventually(func() int64 {
+			return rdb.ZCard(ctx, integrationRequestQueue).Val()
+		}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(0)))
+
+		// Scale the deployment to 0 to trigger graceful shutdown. Using scale
+		// instead of pod delete prevents a replacement pod from consuming the
+		// re-queued messages before we can assert.
+		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "scale", "deployment/integration-async-processor",
+			"--replicas=0", "--timeout=60s")
+		session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+
+		// Wait for the pod to fully terminate.
+		cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "wait", "pod",
+			"-l", "app.kubernetes.io/instance=integration",
+			"--for=delete", "--timeout=60s")
+		session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(90 * time.Second).Should(gexec.Exit(0))
+
+		// The Worker should have re-queued the in-flight messages back to
+		// Redis on shutdown instead of treating them as fatal errors.
+		count := rdb.ZCard(ctx, integrationRequestQueue).Val()
+		gomega.Expect(count).To(gomega.BeNumerically(">=", 1),
+			"expected re-queued messages in request queue after shutdown")
+	})
+
 	ginkgo.It("does not lose messages on pod termination", func() {
 		// Enable 100% fault injection so messages fail and enter the retry loop.
 		setEnvoyFaultAbort(envoyAdminURL, 100)
 
-		ids := []string{"shutdown-1", "shutdown-2", "shutdown-3"}
+		ids := []string{"shutdown-noloss-1", "shutdown-noloss-2", "shutdown-noloss-3"}
 		for _, id := range ids {
 			enqueueMessage(ctx, rdb, integrationRequestQueue, makeRequestMessage(id, 5*time.Minute))
 		}

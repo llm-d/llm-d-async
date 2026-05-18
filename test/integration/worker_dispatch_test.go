@@ -248,3 +248,70 @@ func TestWorkerDispatch_ResultCallback(t *testing.T) {
 		t.Fatal("Timed out waiting for result")
 	}
 }
+
+// TestWorkerDispatch_RequeuesOnShutdown verifies that when the parent context
+// is cancelled (simulating SIGTERM) while an inference request is in-flight,
+// the Worker sends the message to the retry channel instead of treating it
+// as a fatal error.
+func TestWorkerDispatch_RequeuesOnShutdown(t *testing.T) {
+	// Server blocks until explicitly released (simulates in-flight request).
+	serverHit := make(chan struct{})
+	serverDone := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(serverHit)
+		<-serverDone
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+
+	client := asyncworker.NewHTTPInferenceClient(server.Client())
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+			client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
+	}()
+
+	ir := asyncapi.NewInternalRequest(
+		asyncapi.InternalRouting{RequestQueueName: "test-queue"},
+		&asyncapi.RequestMessage{
+			ID:       "shutdown-requeue-1",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Payload:  map[string]any{"model": "test", "prompt": "hello"},
+		},
+	)
+
+	requestChannel <- pipeline.EmbelishedRequestMessage{
+		InternalRequest: ir,
+		HttpHeaders:     map[string]string{"Content-Type": "application/json"},
+		RequestURL:      server.URL + "/v1/completions",
+	}
+
+	// Wait for the server to receive the request before cancelling.
+	<-serverHit
+
+	// Simulate SIGTERM.
+	cancel()
+
+	select {
+	case msg := <-retryChannel:
+		assert.Equal(t, "shutdown-requeue-1", msg.PublicRequest.ReqID())
+		assert.Equal(t, float64(0), msg.BackoffDurationSeconds)
+	case r := <-resultChannel:
+		t.Fatalf("Expected retry on shutdown, got fatal result: %s", r.Payload)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Worker did not send retry within 5s after shutdown")
+	}
+
+	// Release the server handler so it returns and server.Close() doesn't hang.
+	close(serverDone)
+	server.Close()
+	wg.Wait()
+}

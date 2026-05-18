@@ -106,6 +106,7 @@ type RedisSortedSetFlow struct {
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 	configMap       map[string]queueConfig
+	drainCancel     context.CancelFunc
 }
 
 // SortedSetOption is a functional option for configuring RedisSortedSetFlow
@@ -237,11 +238,20 @@ func applyQueueConfigDefaults(cfg *queueConfig) {
 }
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {
+	drainCtx, drainCancel := context.WithCancel(context.Background())
+	r.drainCancel = drainCancel
+
 	for _, ch := range r.requestChannels {
 		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName, ch.queueID)
 	}
-	go r.retryWorker(ctx)  // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
-	go r.resultWorker(ctx) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+	go r.retryWorker(drainCtx)  // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+	go r.resultWorker(drainCtx) // #nosec G118 -- lifecycle-scoped ctx, not request-scoped
+}
+
+func (r *RedisSortedSetFlow) Shutdown() {
+	if r.drainCancel != nil {
+		r.drainCancel()
+	}
 }
 
 func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {

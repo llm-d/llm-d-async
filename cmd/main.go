@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -171,13 +172,19 @@ func main() {
 	inferenceClient := asyncworker.NewHTTPInferenceClient(inferenceHTTPClient)
 
 	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel
+	var wg sync.WaitGroup
 	for w := 1; w <= concurrency; w++ {
-
-		go asyncworker.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			asyncworker.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
+		}()
 	}
 
 	impl.Start(ctx)
 	<-ctx.Done()
+	wg.Wait()
+	impl.Shutdown()
 }
 
 func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify bool) (*tls.Config, error) {
