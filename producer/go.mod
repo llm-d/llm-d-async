@@ -4,8 +4,7 @@ go 1.25.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.37.0
-	// TODO(#107): After the first tagged api release (e.g. api/v0.1.0), bump this require from v0.0.0 to that semver (e.g. v0.1.0).
-	github.com/llm-d-incubation/llm-d-async/api v0.0.0
+	github.com/llm-d-incubation/llm-d-async/api v0.7.0-RC
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 )
@@ -20,5 +19,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// TODO(#107): Keep for monorepo builds; omitted when consumers require published versions only.
 replace github.com/llm-d-incubation/llm-d-async/api => ../api
