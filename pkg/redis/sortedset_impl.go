@@ -48,7 +48,7 @@ func parseGateParams(s string) map[string]string {
 }
 
 // StringMap is a map[string]string that tolerates non-string JSON values
-// by converting them to their string representation during unmarshaling.
+// by converting them to their string representation during unmarshalling.
 type StringMap map[string]string
 
 func (m *StringMap) UnmarshalJSON(data []byte) error {
