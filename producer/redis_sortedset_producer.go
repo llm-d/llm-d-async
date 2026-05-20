@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
@@ -46,48 +45,31 @@ type RedisSortedSetConfig struct {
 	// Required unless a client is injected via WithRedisClient.
 	RedisURL string
 
-	// TenantID is the unique identifier for the tenant/customer.
-	// Required for multi-tenant isolation.
-	// System should assign this (e.g., from auth token, API key).
-	// Example: "tenant-abc123", "customer-xyz"
-	TenantID string
-
 	// RequestQueueName is the name of the Redis sorted set for requests.
 	// Typically shared across all tenants.
 	// Default: "request-sortedset"
 	RequestQueueName string
 
-	// ResultQueueName is the customer's choice for their result queue name.
-	// Will be namespaced as: results:{tenantID}:{resultQueueName}
-	// Default: "default"
+	// ResultQueueName is the full Redis list key for results.
+	// Must match the dispatcher/consumer result_queue_name configuration.
+	// Example: "llm-d-async:results:pool-a:$batch"
 	ResultQueueName string
 }
 
 // NewRedisSortedSetProducer creates a new producer using Redis sorted set.
-// Multi-tenant safe: TenantID ensures result queue isolation between tenants.
 // Use WithRedisClient to inject a pre-configured client (e.g. with tracing hooks).
 func NewRedisSortedSetProducer(config RedisSortedSetConfig, opts ...ProducerOption) (*RedisSortedSetProducer, error) {
-	if config.TenantID == "" {
-		return nil, errors.New("TenantID is required for multi-tenant isolation")
-	}
-
-	if strings.Contains(config.TenantID, ":") {
-		return nil, errors.New("TenantID must not contain ':' ")
+	if config.ResultQueueName == "" {
+		return nil, errors.New("ResultQueueName is required")
 	}
 
 	if config.RequestQueueName == "" {
 		config.RequestQueueName = "request-sortedset"
 	}
 
-	if config.ResultQueueName == "" {
-		config.ResultQueueName = "default"
-	}
-
-	namespacedResultQueue := fmt.Sprintf("results:%s:%s", config.TenantID, config.ResultQueueName)
-
 	p := &RedisSortedSetProducer{
 		requestQueueName: config.RequestQueueName,
-		resultQueueName:  namespacedResultQueue,
+		resultQueueName:  config.ResultQueueName,
 	}
 
 	for _, opt := range opts {

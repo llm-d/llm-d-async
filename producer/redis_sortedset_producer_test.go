@@ -22,7 +22,6 @@ func setupTestProducer(t *testing.T) (*RedisSortedSetProducer, *miniredis.Minire
 
 	producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
 		RedisURL:         "redis://" + mr.Addr(),
-		TenantID:         "test-tenant",
 		RequestQueueName: "test-request-queue",
 		ResultQueueName:  "test-result-queue",
 	})
@@ -68,7 +67,7 @@ func TestSubmitRequest(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "test-123", ir.PublicRequest.ReqID())
 	assert.Equal(t, "test-user", ir.PublicRequest.ReqMetadata()["user"])
-	assert.Equal(t, "results:test-tenant:test-result-queue", ir.ResultQueueName)
+	assert.Equal(t, "test-result-queue", ir.ResultQueueName)
 }
 
 func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
@@ -161,13 +160,13 @@ func TestGetResult(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Push a result to the namespaced list
+	// Push a result to the result list
 	resultMsg := api.ResultMessage{
 		ID:      "test-123",
 		Payload: `{"response": "Hello!"}`,
 	}
 	resultJSON, _ := json.Marshal(resultMsg)
-	_, err := mr.Lpush("results:test-tenant:test-result-queue", string(resultJSON))
+	_, err := mr.Lpush("test-result-queue", string(resultJSON))
 	require.NoError(t, err)
 
 	// Get the result
@@ -186,7 +185,7 @@ func TestGetResultWithContextTimeout(t *testing.T) {
 			Payload: "test response",
 		}
 		resultJSON, _ := json.Marshal(resultMsg)
-		_, err := mr.Lpush("results:test-tenant:test-result-queue", string(resultJSON))
+		_, err := mr.Lpush("test-result-queue", string(resultJSON))
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -207,11 +206,13 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 
 	ctx := context.Background()
 
+	alphaResultQueue := "results:tenant-alpha:my-results"
+	betaResultQueue := "results:tenant-beta:my-results"
+
 	tenant1Producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
 		RedisURL:         "redis://" + mr.Addr(),
-		TenantID:         "tenant-alice",
 		RequestQueueName: "shared-request-queue",
-		ResultQueueName:  "my-results",
+		ResultQueueName:  alphaResultQueue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -222,9 +223,8 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 
 	tenant2Producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
 		RedisURL:         "redis://" + mr.Addr(),
-		TenantID:         "tenant-bob",
 		RequestQueueName: "shared-request-queue",
-		ResultQueueName:  "my-results",
+		ResultQueueName:  betaResultQueue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -233,27 +233,25 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 		}
 	})
 
-	// Verify they have different namespaced result queues
-	assert.Equal(t, "results:tenant-alice:my-results", tenant1Producer.resultQueueName)
-	assert.Equal(t, "results:tenant-bob:my-results", tenant2Producer.resultQueueName)
-	assert.NotEqual(t, tenant1Producer.resultQueueName, tenant2Producer.resultQueueName,
-		"Different tenants should have different result queues even with same ResultQueueName")
+	assert.Equal(t, alphaResultQueue, tenant1Producer.resultQueueName)
+	assert.Equal(t, betaResultQueue, tenant2Producer.resultQueueName)
+	assert.NotEqual(t, tenant1Producer.resultQueueName, tenant2Producer.resultQueueName)
 
 	// Submit requests from both tenants
 	req1 := &api.RequestMessage{
-		ID:       "alice-request",
+		ID:       "alpha-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"tenant": "alice"},
+		Payload:  map[string]interface{}{"tenant": "alpha"},
 	}
 	err = tenant1Producer.SubmitRequest(ctx, req1)
 	require.NoError(t, err)
 
 	req2 := &api.RequestMessage{
-		ID:       "bob-request",
+		ID:       "beta-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"tenant": "bob"},
+		Payload:  map[string]interface{}{"tenant": "beta"},
 	}
 	err = tenant2Producer.SubmitRequest(ctx, req2)
 	require.NoError(t, err)
@@ -267,24 +265,24 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir1))
 	require.NoError(t, json.Unmarshal([]byte(members[1]), &ir2))
 
-	assert.Equal(t, "results:tenant-alice:my-results", ir1.ResultQueueName)
-	assert.Equal(t, "results:tenant-bob:my-results", ir2.ResultQueueName)
+	assert.Equal(t, alphaResultQueue, ir1.ResultQueueName)
+	assert.Equal(t, betaResultQueue, ir2.ResultQueueName)
 
 	// Simulate worker routing results to correct tenant queues
 	result1 := api.ResultMessage{
-		ID:      "alice-request",
-		Payload: `{"response": "alice result"}`,
+		ID:      "alpha-request",
+		Payload: `{"response": "alpha result"}`,
 	}
 	result1JSON, _ := json.Marshal(result1)
-	_, err = mr.Lpush("results:tenant-alice:my-results", string(result1JSON))
+	_, err = mr.Lpush(alphaResultQueue, string(result1JSON))
 	require.NoError(t, err)
 
 	result2 := api.ResultMessage{
-		ID:      "bob-request",
-		Payload: `{"response": "bob result"}`,
+		ID:      "beta-request",
+		Payload: `{"response": "beta result"}`,
 	}
 	result2JSON, _ := json.Marshal(result2)
-	_, err = mr.Lpush("results:tenant-bob:my-results", string(result2JSON))
+	_, err = mr.Lpush(betaResultQueue, string(result2JSON))
 	require.NoError(t, err)
 
 	// Each tenant should only receive their own result
@@ -294,14 +292,14 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	res1, err := tenant1Producer.GetResult(ctxT)
 	require.NoError(t, err)
 	require.NotNil(t, res1)
-	assert.Equal(t, "alice-request", res1.ID)
-	assert.Contains(t, res1.Payload, "alice result")
+	assert.Equal(t, "alpha-request", res1.ID)
+	assert.Contains(t, res1.Payload, "alpha result")
 
 	res2, err := tenant2Producer.GetResult(ctxT)
 	require.NoError(t, err)
 	require.NotNil(t, res2)
-	assert.Equal(t, "bob-request", res2.ID)
-	assert.Contains(t, res2.Payload, "bob result")
+	assert.Equal(t, "beta-request", res2.ID)
+	assert.Contains(t, res2.Payload, "beta result")
 }
 
 func TestProducerAuth(t *testing.T) {
@@ -313,8 +311,8 @@ func TestProducerAuth(t *testing.T) {
 
 	t.Run("fails without password", func(t *testing.T) {
 		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-			RedisURL: "redis://" + mr.Addr(),
-			TenantID: "test",
+			RedisURL:        "redis://" + mr.Addr(),
+			ResultQueueName: "test-result-queue",
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "NOAUTH")
@@ -322,8 +320,8 @@ func TestProducerAuth(t *testing.T) {
 
 	t.Run("succeeds with password in URL", func(t *testing.T) {
 		producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-			RedisURL: "redis://default:producer-secret@" + mr.Addr(),
-			TenantID: "test",
+			RedisURL:        "redis://default:producer-secret@" + mr.Addr(),
+			ResultQueueName: "test-result-queue",
 		})
 		assert.NoError(t, err)
 		defer producer.Close() //nolint:errcheck
@@ -340,7 +338,7 @@ func TestProducerAuth(t *testing.T) {
 	})
 }
 
-func TestTenantIDRequired(t *testing.T) {
+func TestResultQueueNameRequired(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
@@ -348,23 +346,9 @@ func TestTenantIDRequired(t *testing.T) {
 	_, err = NewRedisSortedSetProducer(RedisSortedSetConfig{
 		RedisURL:         "redis://" + mr.Addr(),
 		RequestQueueName: "test",
-		ResultQueueName:  "test",
 	})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "TenantID is required")
-}
-
-func TestTenantIDWithColon(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
-
-	_, err = NewRedisSortedSetProducer(RedisSortedSetConfig{
-		RedisURL: "redis://" + mr.Addr(),
-		TenantID: "tenant:bad",
-	})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must not contain ':'")
+	assert.Contains(t, err.Error(), "ResultQueueName is required")
 }
 
 func TestContextCancellation(t *testing.T) {
@@ -387,7 +371,7 @@ func TestMalformedResultHandling(t *testing.T) {
 	producer, mr := setupTestProducer(t)
 
 	t.Run("invalid JSON", func(t *testing.T) {
-		_, err := mr.Lpush("results:test-tenant:test-result-queue", "invalid-json{{{")
+		_, err := mr.Lpush("test-result-queue", "invalid-json{{{")
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -402,7 +386,7 @@ func TestMalformedResultHandling(t *testing.T) {
 	t.Run("missing id field", func(t *testing.T) {
 		invalidResult := map[string]interface{}{"payload": "data"}
 		resultJSON, _ := json.Marshal(invalidResult)
-		_, err := mr.Lpush("results:test-tenant:test-result-queue", string(resultJSON))
+		_, err := mr.Lpush("test-result-queue", string(resultJSON))
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -425,7 +409,7 @@ func TestWithRedisClient(t *testing.T) {
 
 	t.Run("injected client is used, RedisURL not required", func(t *testing.T) {
 		p, err := NewRedisSortedSetProducer(
-			RedisSortedSetConfig{TenantID: "test-tenant"},
+			RedisSortedSetConfig{ResultQueueName: "test-result-queue"},
 			WithRedisClient(client),
 		)
 		require.NoError(t, err)
@@ -443,7 +427,7 @@ func TestWithRedisClient(t *testing.T) {
 
 	t.Run("fails with nil client", func(t *testing.T) {
 		_, err := NewRedisSortedSetProducer(
-			RedisSortedSetConfig{TenantID: "test-tenant"},
+			RedisSortedSetConfig{ResultQueueName: "test-result-queue"},
 			WithRedisClient(nil),
 		)
 		assert.Error(t, err)
@@ -451,7 +435,7 @@ func TestWithRedisClient(t *testing.T) {
 	})
 
 	t.Run("fails without RedisURL and without WithRedisClient", func(t *testing.T) {
-		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{TenantID: "test-tenant"})
+		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{ResultQueueName: "test-result-queue"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "RedisURL is required when no RedisClient is provided")
 	})
@@ -464,8 +448,8 @@ func TestCloseOwnership(t *testing.T) {
 		defer mr.Close()
 
 		p, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-			RedisURL: "redis://" + mr.Addr(),
-			TenantID: "test",
+			RedisURL:        "redis://" + mr.Addr(),
+			ResultQueueName: "test-result-queue",
 		})
 		require.NoError(t, err)
 
@@ -491,7 +475,7 @@ func TestCloseOwnership(t *testing.T) {
 		defer client.Close() //nolint:errcheck
 
 		p, err := NewRedisSortedSetProducer(
-			RedisSortedSetConfig{TenantID: "test"},
+			RedisSortedSetConfig{ResultQueueName: "test-result-queue"},
 			WithRedisClient(client),
 		)
 		require.NoError(t, err)
@@ -505,15 +489,17 @@ func TestCloseOwnership(t *testing.T) {
 	})
 }
 
-func TestSameTenantMultipleQueues(t *testing.T) {
+func TestMultipleResultQueues(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
 
+	batchQueue := "results:tenant-acme:batch-jobs"
+	realtimeQueue := "results:tenant-acme:realtime"
+
 	prod1, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
 		RedisURL:        "redis://" + mr.Addr(),
-		TenantID:        "alice",
-		ResultQueueName: "batch-jobs",
+		ResultQueueName: batchQueue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -524,8 +510,7 @@ func TestSameTenantMultipleQueues(t *testing.T) {
 
 	prod2, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
 		RedisURL:        "redis://" + mr.Addr(),
-		TenantID:        "alice",
-		ResultQueueName: "realtime",
+		ResultQueueName: realtimeQueue,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -534,8 +519,114 @@ func TestSameTenantMultipleQueues(t *testing.T) {
 		}
 	})
 
-	// Verify different namespaced queues
-	assert.Equal(t, "results:alice:batch-jobs", prod1.resultQueueName)
-	assert.Equal(t, "results:alice:realtime", prod2.resultQueueName)
+	assert.Equal(t, batchQueue, prod1.resultQueueName)
+	assert.Equal(t, realtimeQueue, prod2.resultQueueName)
 	assert.NotEqual(t, prod1.resultQueueName, prod2.resultQueueName)
+}
+
+func TestResultQueueNameNoNamespacing(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	shortName := "batch-jobs"
+	legacyNamespaced := "results:tenant-acme:batch-jobs"
+
+	producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:        "redis://" + mr.Addr(),
+		ResultQueueName: shortName,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := producer.Close(); err != nil {
+			t.Logf("failed to close producer: %v", err)
+		}
+	})
+
+	assert.Equal(t, shortName, producer.resultQueueName)
+	assert.NotEqual(t, legacyNamespaced, producer.resultQueueName,
+		"producer must not prepend results:{tenant}: to ResultQueueName")
+
+	ctx := context.Background()
+	req := &api.RequestMessage{
+		ID:       "short-name-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  map[string]interface{}{"job": "batch"},
+	}
+	require.NoError(t, producer.SubmitRequest(ctx, req))
+
+	members, err := mr.ZMembers("request-sortedset")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	assert.Equal(t, shortName, ir.ResultQueueName)
+	assert.NotEqual(t, legacyNamespaced, ir.ResultQueueName)
+
+	resultJSON, _ := json.Marshal(api.ResultMessage{
+		ID:      "short-name-request",
+		Payload: `{"status":"done"}`,
+	})
+	_, err = mr.Lpush(shortName, string(resultJSON))
+	require.NoError(t, err)
+
+	ctxT, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := producer.GetResult(ctxT)
+	require.NoError(t, err)
+	assert.Equal(t, "short-name-request", result.ID)
+}
+
+func TestComplexResultQueueKeyShape(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	complexKey := "llm-d-async:results:pool-a:$batch"
+
+	producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:         "redis://" + mr.Addr(),
+		RequestQueueName: "llm-d-async:requests:pool-a",
+		ResultQueueName:  complexKey,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := producer.Close(); err != nil {
+			t.Logf("failed to close producer: %v", err)
+		}
+	})
+
+	assert.Equal(t, complexKey, producer.resultQueueName)
+
+	ctx := context.Background()
+	req := &api.RequestMessage{
+		ID:       "complex-key-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  map[string]interface{}{"pool": "a"},
+	}
+	require.NoError(t, producer.SubmitRequest(ctx, req))
+
+	members, err := mr.ZMembers("llm-d-async:requests:pool-a")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	assert.Equal(t, complexKey, ir.ResultQueueName)
+
+	resultJSON, _ := json.Marshal(api.ResultMessage{
+		ID:      "complex-key-request",
+		Payload: `{"response":"ok"}`,
+	})
+	_, err = mr.Lpush(complexKey, string(resultJSON))
+	require.NoError(t, err)
+
+	ctxT, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := producer.GetResult(ctxT)
+	require.NoError(t, err)
+	assert.Equal(t, "complex-key-request", result.ID)
 }
