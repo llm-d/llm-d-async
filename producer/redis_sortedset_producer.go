@@ -107,10 +107,16 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 	ir := &api.InternalRequest{InternalRouting: api.InternalRouting{}}
 	switch v := req.(type) {
 	case *api.RequestMessage:
+		if v == nil {
+			return ir
+		}
 		cp := *v
 		ir.PublicRequest = &cp
 		return ir
 	case *api.RedisRequest:
+		if v == nil {
+			return ir
+		}
 		ir2 := *v
 		if ir2.RequestQueueName != "" {
 			ir.RequestQueueName = ir2.RequestQueueName
@@ -121,6 +127,9 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 		ir.PublicRequest = &ir2
 		return ir
 	case *api.PubSubRequest:
+		if v == nil {
+			return ir
+		}
 		ir2 := *v
 		if ir2.PubSubID != "" {
 			ir.TransportCorrelationID = ir2.PubSubID
@@ -134,6 +143,8 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 			Deadline: req.ReqDeadline(),
 			Payload:  req.ReqPayload(),
 			Metadata: req.ReqMetadata(),
+			Headers:  req.ReqHeaders(),
+			Endpoint: req.ReqEndpoint(),
 		}
 		return ir
 	}
@@ -142,6 +153,9 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 // SubmitRequest adds a request to the Redis sorted set.
 // The score is the deadline, ensuring earlier deadlines are processed first.
 func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Request) error {
+	if req == nil {
+		return errors.New("request is required")
+	}
 	ir := toInternalRequest(req)
 	r := ir.PublicRequest
 	if r == nil {
