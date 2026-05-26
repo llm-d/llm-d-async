@@ -13,6 +13,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// customRequest is a user-defined Request implementation for testing the
+// default branch of toInternalRequest.
+type customRequest struct {
+	id, endpoint      string
+	created, deadline int64
+	payload           map[string]any
+	metadata          map[string]string
+	headers           map[string]string
+}
+
+func (r *customRequest) ReqID() string                  { return r.id }
+func (r *customRequest) ReqCreated() int64              { return r.created }
+func (r *customRequest) ReqDeadline() int64             { return r.deadline }
+func (r *customRequest) ReqPayload() map[string]any     { return r.payload }
+func (r *customRequest) ReqMetadata() map[string]string { return r.metadata }
+func (r *customRequest) ReqHeaders() map[string]string  { return r.headers }
+func (r *customRequest) ReqEndpoint() string            { return r.endpoint }
+
 func setupTestProducer(t *testing.T) (*RedisSortedSetProducer, *miniredis.Miniredis) {
 	t.Helper()
 
@@ -81,6 +99,23 @@ func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
 	assert.Equal(t, "ps-123", ir.TransportCorrelationID)
 }
 
+func TestToInternalRequest_CustomRequestPreservesHeadersAndEndpoint(t *testing.T) {
+	req := &customRequest{
+		id: "custom-1", created: 1, deadline: 2,
+		payload:  map[string]any{"k": "v"},
+		metadata: map[string]string{"m": "d"},
+		headers:  map[string]string{"Authorization": "Bearer tok"},
+		endpoint: "/v1/chat/completions",
+	}
+	ir := toInternalRequest(req)
+	rm, ok := ir.PublicRequest.(*api.RequestMessage)
+	require.True(t, ok, "expected *api.RequestMessage for custom Request type")
+	assert.Equal(t, "custom-1", rm.ID)
+	assert.Equal(t, map[string]string{"Authorization": "Bearer tok"}, rm.Headers)
+	assert.Equal(t, "/v1/chat/completions", rm.Endpoint)
+	assert.Equal(t, map[string]string{"m": "d"}, rm.Metadata)
+}
+
 func TestToInternalRequest_RedisQueueFieldsCopyToInternalRouting(t *testing.T) {
 	req := &api.RedisRequest{
 		RequestMessage: api.RequestMessage{
@@ -92,6 +127,38 @@ func TestToInternalRequest_RedisQueueFieldsCopyToInternalRouting(t *testing.T) {
 	ir := toInternalRequest(req)
 	assert.Equal(t, "req-q", ir.RequestQueueName)
 	assert.Equal(t, "res-q", ir.ResultQueueName)
+}
+
+func TestSubmitRequest_NilRequest(t *testing.T) {
+	producer, _ := setupTestProducer(t)
+	ctx := context.Background()
+
+	t.Run("untyped nil", func(t *testing.T) {
+		err := producer.SubmitRequest(ctx, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
+
+	t.Run("typed nil RequestMessage", func(t *testing.T) {
+		var req *api.RequestMessage
+		err := producer.SubmitRequest(ctx, req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
+
+	t.Run("typed nil RedisRequest", func(t *testing.T) {
+		var req *api.RedisRequest
+		err := producer.SubmitRequest(ctx, req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
+
+	t.Run("typed nil PubSubRequest", func(t *testing.T) {
+		var req *api.PubSubRequest
+		err := producer.SubmitRequest(ctx, req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
 }
 
 func TestSubmitRequest_Validation(t *testing.T) {
