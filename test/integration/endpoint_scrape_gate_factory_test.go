@@ -36,11 +36,11 @@ func TestGateFactory_EndpointScrape_StaticMaxCount(t *testing.T) {
 	factory := flowcontrol.NewGateFactoryWithCacheTTL("", 200*time.Millisecond)
 
 	gate, err := factory.CreateGate("endpoint-scrape", map[string]string{
-		"url":                server.URL,
-		"metric":             "vllm:num_requests_waiting",
-		"max_count_per_pod":  "10",
-		"baseline":           "0.0",
-		"fallback":           "0.0",
+		"url":               server.URL,
+		"metric":            "vllm:num_requests_waiting",
+		"max_count_per_pod": "10",
+		"baseline":          "0.0",
+		"fallback":          "0.0",
 	})
 	require.NoError(t, err)
 
@@ -111,12 +111,12 @@ ready_pods{name="pool-a"} 3
 	factory := flowcontrol.NewGateFactoryWithCacheTTL("", 0)
 
 	gate, err := factory.CreateGate("endpoint-scrape", map[string]string{
-		"url":                simServer.URL,
-		"metric":             "vllm:num_requests_waiting",
-		"max_count_per_pod":  "10",
-		"pods_url":           podsServer.URL,
-		"pods_metric":        "ready_pods",
-		"pods_labels":        `{"name":"pool-a"}`,
+		"url":               simServer.URL,
+		"metric":            "vllm:num_requests_waiting",
+		"max_count_per_pod": "10",
+		"pods_url":          podsServer.URL,
+		"pods_metric":       "ready_pods",
+		"pods_labels":       `{"name":"pool-a"}`,
 	})
 	require.NoError(t, err)
 
