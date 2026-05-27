@@ -1,0 +1,27 @@
+ap:
+  imagePullPolicy: Never
+  messageQueueImpl: "redis-sortedset"
+  concurrency: 1
+  prometheusCacheTTL: "0s"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    enabled: true
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
+    resultQueueName: "endpoint-scrape-result-list"
+    pollIntervalMs: 500
+    batchSize: 10
+    queuesConfig:
+      - queue_name: "endpoint-scrape-request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+        gate_type: "endpoint-scrape"
+        gate_params:
+          url: "http://llm-sim.e2e-integration.svc.cluster.local:8000/metrics"
+          metric: "vllm:num_requests_waiting"
+          max_count_per_pod: "5"
+          fallback: "1.0"
+  modelServerMonitor:
+    enabled: false

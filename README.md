@@ -106,6 +106,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `prometheus-saturation`: Queries Prometheus for pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
 - `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
 - `prometheus-query`: Evaluates an arbitrary user-supplied PromQL expression as the dispatch budget. The expression must resolve to an instant vector with a single sample whose value is in [0, 1]. Unlike `prometheus-saturation` and `prometheus-budget`, this gate does not construct queries internally — the user provides the complete PromQL expression. Values outside [0, 1] are clamped.
+- `endpoint-scrape`: Scrapes a raw Prometheus `/metrics` endpoint directly (no Prometheus server required). Extracts a named metric, computes saturation, and returns the available budget. Supports two modes: **direct saturation** (metric value is already in [0, 1], e.g., from the EPP) and **computed saturation** (raw count divided by `max_count_per_pod`, e.g., `vllm:num_requests_waiting`). Optionally scrapes a second endpoint for dynamic pod count.
 
 **Example Configuration with Per-Queue Gates:**
 
@@ -165,6 +166,18 @@ For more fine-grained control, configure gates per queue in your configuration f
        "gate_type": "composite",
        "gate_params": {
           "gates": "[{\"gate_type\":\"prometheus-saturation\",\"gate_params\":{\"pool\":\"inference_pool_1\"}},{\"gate_type\":\"redis-quota\",\"gate_params\":{\"address\":\"localhost:6379\",\"limit\":\"100\"}}]"
+       }
+    },
+    {
+       "queue_name": "scrape_gated_queue",
+       "inference_objective": "batch-task",
+       "request_path_url": "/v1/completions",
+       "gate_type": "endpoint-scrape",
+       "gate_params": {
+          "url": "http://vllm-sim:8000/metrics",
+          "metric": "vllm:num_requests_waiting",
+          "max_count_per_pod": "5",
+          "fallback": "1.0"
        }
     }
 ]
@@ -230,6 +243,23 @@ For more fine-grained control, configure gates per queue in your configuration f
     The result is used directly as the dispatch budget (no transformation is applied).
   - `fallback` (optional): Fallback budget value (0.0-1.0) returned when the query fails or returns no data.
     Default is `0.0` (fail closed).
+
+- `endpoint-scrape`: Scrapes a raw Prometheus text-format `/metrics` endpoint directly.
+  Computes budget as `clamp(1 - saturation - baseline, 0, 1)`.
+
+  - `url` (**required**): Full URL to scrape (e.g., `http://vllm-sim:8000/metrics`).
+  - `metric` (**required**): Metric name to extract (e.g., `vllm:num_requests_waiting`).
+  - `labels` (optional): JSON object of label filters (e.g., `{"model_name":"my-model"}`). Only samples matching all labels are used.
+  - `max_count_per_pod` (optional): Per-pod capacity. When > 0, saturation = `value / max_count`. When 0, the metric value is used directly as saturation (assumed to be in [0, 1]). Default is `0`.
+  - `baseline` (optional): Reserved headroom subtracted from budget. Default is `0.0`.
+  - `fallback` (optional): Budget returned when scrape fails or metric is missing. Default is `0.0` (fail closed).
+  - `pods_url` (optional): URL to scrape for dynamic pod count (e.g., `http://epp-svc:9090/metrics`). When set with `pods_metric`, `max_count = ready_pods * max_count_per_pod`.
+  - `pods_metric` (optional): Metric name for ready pods (e.g., `inference_pool_ready_pods`).
+  - `pods_labels` (optional): JSON label filters for the pods metric (e.g., `{"name":"my-pool"}`).
+
+  **No Prometheus server required.** This gate scrapes endpoints directly, making it suitable for
+  deployments without a dedicated Prometheus instance. Use `max_count_per_pod` with `pods_url`/`pods_metric`
+  for dynamic scaling, or set `max_count_per_pod` to a static value for single-pod setups.
 
 ## Request Messages and Consumption
 

@@ -282,6 +282,57 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 		}
 		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback), nil
 
+	case "endpoint-scrape":
+		url := params["url"]
+		if url == "" {
+			return nil, fmt.Errorf("endpoint-scrape gate requires a 'url' parameter")
+		}
+		metric := params["metric"]
+		if metric == "" {
+			return nil, fmt.Errorf("endpoint-scrape gate requires a 'metric' parameter")
+		}
+
+		var labels map[string]string
+		if labelsJSON := params["labels"]; labelsJSON != "" {
+			if err := json.Unmarshal([]byte(labelsJSON), &labels); err != nil {
+				return nil, fmt.Errorf("endpoint-scrape gate failed to parse 'labels': %w", err)
+			}
+		}
+
+		maxCountPerPod, err := parseFloat("max_count_per_pod", params["max_count_per_pod"], 0)
+		if err != nil {
+			return nil, err
+		}
+		baseline, err := parseFloat("baseline", params["baseline"], 0.0)
+		if err != nil {
+			return nil, err
+		}
+		fallback, err := parseFloat("fallback", params["fallback"], 0.0)
+		if err != nil {
+			return nil, err
+		}
+
+		var podsLabels map[string]string
+		if podsLabelsJSON := params["pods_labels"]; podsLabelsJSON != "" {
+			if err := json.Unmarshal([]byte(podsLabelsJSON), &podsLabels); err != nil {
+				return nil, fmt.Errorf("endpoint-scrape gate failed to parse 'pods_labels': %w", err)
+			}
+		}
+
+		cfg := ScrapeConfig{
+			URL:            url,
+			MetricName:     metric,
+			Labels:         labels,
+			MaxCountPerPod: maxCountPerPod,
+			PodsURL:        params["pods_url"],
+			PodsMetric:     params["pods_metric"],
+			PodsLabels:     podsLabels,
+		}
+
+		var ms MetricSource = NewScrapeMetricSource(cfg)
+		ms = cachedSource(ms, f.cacheTTL)
+		return NewMetricDispatchGate(ms, baseline, fallback), nil
+
 	default:
 		// Unknown gate types default to open gate
 		return ConstOpenGate(), nil

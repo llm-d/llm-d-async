@@ -320,6 +320,7 @@ func applyManifests() {
 		{"quota", helmValuesDir + "/quota.yaml"},
 		{"composite", helmValuesDir + "/composite.yaml"},
 		{"prometheus-query", helmValuesDir + "/prometheus-query.yaml"},
+		{"endpoint-scrape", helmValuesDir + "/endpoint-scrape.yaml"},
 	} {
 		helmInstall(r.name, r.values, map[string]string{
 			"ap.image.repository": imageRepo,
@@ -536,6 +537,7 @@ func doRedeployEPPWithFlowControl() {
 		"quota-async-processor",
 		"composite-async-processor",
 		"prometheus-query-async-processor",
+		"endpoint-scrape-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
@@ -551,6 +553,7 @@ func doRedeployEPPWithFlowControl() {
 		"quota-async-processor",
 		"composite-async-processor",
 		"prometheus-query-async-processor",
+		"endpoint-scrape-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")
