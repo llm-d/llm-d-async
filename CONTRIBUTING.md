@@ -114,6 +114,31 @@ To add a new integration test, create a `*_test.go` file in `test/integration/` 
 package integration_test
 ```
 
+## Releasing
+
+This repository is a multi-module Go repo. The lightweight sub-modules (`api`, `pipeline`, `producer`) each have their own `go.mod` so that external consumers can depend on them without pulling in the heavyweight root module.
+
+### Preparing a release
+
+1. Update cross-module version references:
+
+```bash
+make set-version VERSION=v0.8.0
+```
+
+This rewrites all `require` directives across `go.mod` files and runs `go mod tidy`. Sub-modules are detected automatically from subdirectories containing a `go.mod`.
+
+2. Commit the result and push a tag on the root module:
+
+```bash
+git tag v0.8.0
+git push origin v0.8.0
+```
+
+3. The `CI - Tag Go Submodules` workflow automatically creates the prefixed tags required by Go modules (e.g. `api/v0.8.0`, `pipeline/v0.8.0`, `producer/v0.8.0`).
+
+Go requires sub-module tags to carry the directory prefix — see [Managing module source](https://go.dev/doc/modules/managing-source) for details.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for our vulnerability disclosure process.
