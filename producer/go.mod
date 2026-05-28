@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.37.0
-	github.com/llm-d-incubation/llm-d-async/api v0.7.0-RC
+	github.com/llm-d-incubation/llm-d-async/api v0.7.0-rc.4
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 )
