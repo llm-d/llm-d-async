@@ -344,8 +344,6 @@ endef
 
 # SUBMODULES discovers Go sub-modules by finding subdirectories with their own go.mod.
 SUBMODULES := $(patsubst %/go.mod,%,$(wildcard */go.mod))
-# Regex alternation for sed (e.g. api\|pipeline\|producer).
-SUBMODULES_RE := $(shell echo '$(SUBMODULES)' | sed 's/ /\\|/g')
 
 ## set-version: Update cross-module require versions in all go.mod files (e.g. make set-version VERSION=v0.8.0)
 .PHONY: set-version
@@ -353,11 +351,19 @@ set-version:
 	@if [ -z "$(VERSION)" ]; then \
 	  echo "VERSION is required (e.g. make set-version VERSION=v0.8.0)"; exit 1; \
 	fi
+	@if [ -z "$(SUBMODULES)" ]; then \
+	  echo "No submodules detected (no */go.mod found). Nothing to update."; exit 1; \
+	fi
 	@echo "Setting cross-module versions to $(VERSION)..."
 	@echo "Detected submodules: $(SUBMODULES)"
 	@for f in go.mod $(foreach m,$(SUBMODULES),$(m)/go.mod); do \
 	  if [ -f "$$f" ]; then \
-	    sed -i.bak -E 's|(github\.com/llm-d-incubation/llm-d-async/($(SUBMODULES_RE))) v[^ ]+|\1 $(VERSION)|g' "$$f" && rm -f "$$f.bak"; \
+	    dir=$$(dirname "$$f"); \
+	    for sub in $(SUBMODULES); do \
+	      if grep -q "github.com/llm-d-incubation/llm-d-async/$$sub " "$$f"; then \
+	        (cd "$$dir" && go mod edit -require "github.com/llm-d-incubation/llm-d-async/$$sub@$(VERSION)"); \
+	      fi; \
+	    done; \
 	  fi; \
 	done
 	@echo "Running go mod tidy..."
@@ -367,12 +373,14 @@ set-version:
 	done
 	@echo "Updated cross-module versions:"
 	@printf "  %-20s %-12s %s\n" "SOURCE" "REQUIRES" "VERSION"
-	@grep -rn 'llm-d-async/' ./go.mod ./*/go.mod \
-	  | grep -v module | grep -v replace \
-	  | sed -E 's|^([^:]+):[0-9]+:.*llm-d-async/($(SUBMODULES_RE)) (v[^ ]+).*|\1 \2 \3|' \
-	  | while read file sub ver; do \
-	    printf "  %-20s %-12s %s\n" "$$file" "$$sub" "$$ver"; \
-	  done
+	@for d in . $(SUBMODULES); do \
+	  if [ -f "$$d/go.mod" ]; then \
+	    (cd "$$d" && go mod edit -json | jq -r '.Require[]? | select(.Path | startswith("github.com/llm-d-incubation/llm-d-async/")) | "\(.Path | ltrimstr("github.com/llm-d-incubation/llm-d-async/")) \(.Version)"') \
+	    | while read sub ver; do \
+	      printf "  %-20s %-12s %s\n" "$$d/go.mod" "$$sub" "$$ver"; \
+	    done; \
+	  fi; \
+	done
 
 ## Copied from https://github.com/llm-d-incubation/batch-gateway
 ## publish-helm-chart: Patch chart for VERSION, package, append chart to SHA256SUMS, push to oci://ghcr.io/llm-d-incubation/charts (requires VERSION, yq, helm; GITHUB_TOKEN, GITHUB_ACTOR for push).

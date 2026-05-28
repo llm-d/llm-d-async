@@ -21,10 +21,20 @@ jobs:
           echo "Root tag: ${VERSION}"
           echo "Detected submodules: ${SUBMODULES}"
 
+          CREATED_TAGS=""
           for prefix in ${SUBMODULES}; do
             TAG="${prefix}/${VERSION}"
-            echo "Creating tag: ${TAG}"
-            git tag "${TAG}"
+            if git rev-parse "${TAG}" >/dev/null 2>&1; then
+              echo "Tag already exists, skipping: ${TAG}"
+            else
+              echo "Creating tag: ${TAG}"
+              git tag "${TAG}"
+              CREATED_TAGS="${CREATED_TAGS} ${TAG}"
+            fi
           done
 
-          git push origin --tags
+          if [ -n "${CREATED_TAGS}" ]; then
+            git push origin ${CREATED_TAGS}
+          else
+            echo "No new tags to push"
+          fi
