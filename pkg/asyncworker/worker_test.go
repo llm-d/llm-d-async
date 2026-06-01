@@ -729,7 +729,7 @@ func TestMetrics_SuccessfulRequest(t *testing.T) {
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       nil,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
 			Header:     make(http.Header),
 		}, nil
 	})
@@ -737,7 +737,8 @@ func TestMetrics_SuccessfulRequest(t *testing.T) {
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
@@ -778,7 +779,7 @@ func TestMetrics_RateLimited(t *testing.T) {
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusTooManyRequests,
-			Body:       nil,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
 			Header:     make(http.Header),
 		}, nil
 	})
@@ -786,7 +787,8 @@ func TestMetrics_RateLimited(t *testing.T) {
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
@@ -825,7 +827,8 @@ func TestMetrics_FatalError(t *testing.T) {
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
@@ -858,13 +861,14 @@ func TestMetrics_DeadlineExceeded(t *testing.T) {
 	queueName := "metrics-deadline-queue"
 
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
@@ -894,13 +898,14 @@ func TestMetrics_LabelsIsolated(t *testing.T) {
 	queueB := "metrics-iso-b"
 
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 

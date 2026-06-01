@@ -348,8 +348,8 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 **Example PromQL queries:**
 
 ```promql
-# Per-queue success rate over the last 5 minutes
-rate(llm_d_async_async_successful_requests_total[5m])
+# Per-queue success ratio over the last 5 minutes
+rate(llm_d_async_async_successful_requests_total[5m]) / rate(llm_d_async_async_request_total[5m])
 
 # Which queues are getting rate-limited?
 rate(llm_d_async_async_shedded_requests_total[5m])
