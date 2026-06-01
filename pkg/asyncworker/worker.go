@@ -10,8 +10,14 @@ import (
 	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -47,6 +53,24 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 
 			// Using a function object for easy boundaries for 'return' and 'defer'!
 			sendInferenceRequest := func() {
+				// Restore parent trace context from request metadata (producer injects W3C trace context).
+				reqCtx := ctx
+				if md := msg.PublicRequest.ReqMetadata(); len(md) > 0 {
+					reqCtx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(md))
+				}
+
+				spanAttrs := []attribute.KeyValue{
+					attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
+					attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
+				}
+				if msg.QueueID != "" {
+					spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueName, msg.QueueID))
+				}
+				reqCtx, span := uotel.StartSpan(reqCtx, "process-request",
+					trace.WithAttributes(spanAttrs...),
+				)
+				defer span.End()
+
 				// Create a per-request context bounded by both the message deadline
 				// and the configured request timeout, whichever comes first.
 				reqDeadline := time.Now().Add(requestTimeout)
@@ -55,7 +79,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 						reqDeadline = msgDeadline
 					}
 				}
-				reqCtx, cancel := context.WithDeadline(ctx, reqDeadline)
+				reqCtx, cancel := context.WithDeadline(reqCtx, reqDeadline)
 				defer cancel()
 
 				logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
@@ -80,6 +104,8 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				// (not a completed HTTP response like 4xx). Re-enqueue directly —
 				// retryMessage's select would take ctx.Done() immediately.
 				if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+					_, bgSpan := uotel.DetachedContext(reqCtx, "re-enqueue")
+					defer bgSpan.End()
 					retryChannel <- pipeline.RetryMessage{
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,
@@ -91,6 +117,9 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				var inferenceErr asyncapi.InferenceError
 				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
 					// Unknown error type or fatal error - fail immediately
+					span.RecordError(err)
+					span.SetStatus(codes.Error, "inference request failed")
+					span.SetAttributes(attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)))
 					metrics.RecordFailedReq(queueID, queueName)
 					select {
 					case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
@@ -103,6 +132,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				if inferenceErr.Category().Sheddable() {
 					metrics.RecordSheddedReq(queueID, queueName)
 				}
+				span.SetAttributes(attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())))
 				// Pass server-specified Retry-After duration if available.
 				var retryAfter time.Duration
 				var clientErr *asyncapi.ClientError
@@ -218,6 +248,14 @@ func CreateErrorResultMessage(req asyncapi.Request, routing asyncapi.InternalRou
 
 func CreateDeadlineExceededResultMessage(req asyncapi.Request, routing asyncapi.InternalRouting) asyncapi.ResultMessage {
 	return CreateErrorResultMessage(req, routing, "deadline exceeded")
+}
+
+func inferenceErrorCategory(err error) string {
+	var inferenceErr asyncapi.InferenceError
+	if errors.As(err, &inferenceErr) {
+		return string(inferenceErr.Category())
+	}
+	return string(asyncapi.ErrCategoryUnknown)
 }
 
 // https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/

@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -108,6 +109,7 @@ type RedisSortedSetFlow struct {
 	configMap       map[string]queueConfig
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
+	enableTracing   bool
 }
 
 // SortedSetOption is a functional option for configuring RedisSortedSetFlow
@@ -118,6 +120,13 @@ type SortedSetOption func(*RedisSortedSetFlow)
 func WithGateFactory(factory pipeline.GateFactory) SortedSetOption {
 	return func(r *RedisSortedSetFlow) {
 		r.gateFactory = factory
+	}
+}
+
+// WithSortedSetRedisTracing enables per-command Redis tracing spans via redisotel.
+func WithSortedSetRedisTracing(enable bool) SortedSetOption {
+	return func(r *RedisSortedSetFlow) {
+		r.enableTracing = enable
 	}
 }
 
@@ -141,6 +150,13 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 
 	for _, opt := range opts {
 		opt(r)
+	}
+
+	if r.enableTracing {
+		if err := redisotel.InstrumentTracing(r.rdb); err != nil {
+			_ = r.rdb.Close()
+			return nil, fmt.Errorf("failed to instrument Redis tracing: %w", err)
+		}
 	}
 
 	r.configMap = make(map[string]queueConfig, len(configs))

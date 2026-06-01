@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
+	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
@@ -20,6 +22,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pkg/pubsub"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
 	"github.com/llm-d-incubation/llm-d-async/pkg/version"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -41,6 +44,8 @@ func main() {
 	var requestMergePolicy string
 	var messageQueueImpl string
 
+	var redisTracing bool
+
 	var tlsCACert string
 	var tlsCert string
 	var tlsKey string
@@ -56,6 +61,8 @@ func main() {
 
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
+
+	flag.BoolVar(&redisTracing, "redis-tracing", false, "Enable per-command Redis tracing spans (high volume, use for debugging only)")
 
 	flag.StringVar(&tlsCACert, "tls-ca-cert", "", "Path to CA certificate file (PEM) for verifying the inference gateway")
 	flag.StringVar(&tlsCert, "tls-cert", "", "Path to client certificate file (PEM) for mTLS")
@@ -78,6 +85,19 @@ func main() {
 
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("Logger initialized")
+
+	tracerShutdown, err := uotel.InitTracer(logr.NewContext(context.Background(), setupLog))
+	if err != nil {
+		setupLog.Error(err, "Failed to initialize OpenTelemetry tracer")
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerShutdown(shutdownCtx); err != nil {
+			setupLog.Error(err, "Failed to shutdown tracer")
+		}
+	}()
 
 	setupLog.Info("Async Processor starting", "version", version.Version, "commit", version.Commit, "buildDate", version.BuildDate)
 
@@ -102,14 +122,14 @@ func main() {
 	var impl pipeline.Flow
 	switch messageQueueImpl {
 	case "redis-pubsub":
-		flow, err := redis.NewRedisMQFlow()
+		flow, err := redis.NewRedisMQFlow(redis.WithRedisTracing(redisTracing))
 		if err != nil {
 			setupLog.Error(err, "Failed to create Redis pub/sub flow")
 			os.Exit(1)
 		}
 		impl = flow
 	case "redis-sortedset":
-		flow, err := redis.NewRedisSortedSetFlow(redis.WithGateFactory(gateFactory))
+		flow, err := redis.NewRedisSortedSetFlow(redis.WithGateFactory(gateFactory), redis.WithSortedSetRedisTracing(redisTracing))
 		if err != nil {
 			setupLog.Error(err, "Failed to create Redis sorted-set flow")
 			os.Exit(1)
@@ -168,7 +188,11 @@ func main() {
 		IdleConnTimeout:     90 * time.Second,
 		TLSClientConfig:     tlsConfig,
 	}
-	inferenceHTTPClient := &http.Client{Transport: inferenceTransport}
+	inferenceHTTPClient := &http.Client{Transport: otelhttp.NewTransport(inferenceTransport,
+		otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
+			return "http-request"
+		}),
+	)}
 	inferenceClient := asyncworker.NewHTTPInferenceClient(inferenceHTTPClient)
 
 	requestChannel := policy.MergeRequestChannels(impl.RequestChannels()).Channel

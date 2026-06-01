@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -151,14 +152,25 @@ type RedisMQFlow struct {
 	resultChannel   chan api.ResultMessage
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
+	enableTracing   bool
 }
 
-func NewRedisMQFlow() (*RedisMQFlow, error) {
-	opts, err := RedisOptions()
+// PubSubOption is a functional option for configuring RedisMQFlow.
+type PubSubOption func(*RedisMQFlow)
+
+// WithRedisTracing enables per-command Redis tracing spans via redisotel.
+func WithRedisTracing(enable bool) PubSubOption {
+	return func(r *RedisMQFlow) {
+		r.enableTracing = enable
+	}
+}
+
+func NewRedisMQFlow(opts ...PubSubOption) (*RedisMQFlow, error) {
+	redisOpts, err := RedisOptions()
 	if err != nil {
 		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
 	}
-	rdb := redis.NewClient(opts)
+	rdb := redis.NewClient(redisOpts)
 	var configs []QueueConfig
 	if *queuesConfig != "" {
 		if err := json.Unmarshal([]byte(*queuesConfig), &configs); err != nil {
@@ -188,12 +200,22 @@ func NewRedisMQFlow() (*RedisMQFlow, error) {
 			IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
 		}, cfg.QueueName})
 	}
-	return &RedisMQFlow{
+	flow := &RedisMQFlow{
 		rdb:             rdb,
 		requestChannels: channels,
 		retryChannel:    make(chan pipeline.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(flow)
+	}
+	if flow.enableTracing {
+		if err := redisotel.InstrumentTracing(rdb); err != nil {
+			_ = rdb.Close()
+			return nil, fmt.Errorf("failed to instrument Redis tracing: %w", err)
+		}
+	}
+	return flow, nil
 }
 
 func (r *RedisMQFlow) Start(ctx context.Context) {

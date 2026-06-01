@@ -12,11 +12,16 @@ import (
 	"time"
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-
-	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 const defaultRequestTimeout = 5 * time.Minute
@@ -944,5 +949,329 @@ func TestMetrics_LabelsIsolated(t *testing.T) {
 	}
 	if bCount < 1 {
 		t.Errorf("SuccessfulReqs for queue B = %f, want >= 1", bCount)
+	}
+}
+
+// --- OTel span verification tests ---
+
+func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {
+	t.Helper()
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+	})
+	return exporter
+}
+
+func findSpan(spans tracetest.SpanStubs, name string) *tracetest.SpanStub {
+	for i := range spans {
+		if spans[i].Name == name {
+			return &spans[i]
+		}
+	}
+	return nil
+}
+
+func spanAttr(s *tracetest.SpanStub, key string) string {
+	for _, attr := range s.Attributes {
+		if string(attr.Key) == key {
+			return attr.Value.String()
+		}
+	}
+	return ""
+}
+
+func TestWorker_SpanOnSuccess(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: nil, Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-success", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload: map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	spans := exporter.GetSpans()
+	s := findSpan(spans, "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	if spanAttr(s, uotel.AttrRequestID) != "span-success" {
+		t.Errorf("expected request.id=span-success, got %s", spanAttr(s, uotel.AttrRequestID))
+	}
+	if spanAttr(s, uotel.AttrRetryCount) != "0" {
+		t.Errorf("expected retry.count=0, got %s", spanAttr(s, uotel.AttrRetryCount))
+	}
+	if s.Status.Code == codes.Error {
+		t.Error("expected non-error status on success span")
+	}
+}
+
+func TestWorker_SpanOnFatalError(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("network unreachable")
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-fatal", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload: map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	spans := exporter.GetSpans()
+	s := findSpan(spans, "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	if s.Status.Code != codes.Error {
+		t.Error("expected error status on fatal error span")
+	}
+	if spanAttr(s, uotel.AttrErrorCategory) != "UNKNOWN" {
+		t.Errorf("expected error.category=UNKNOWN, got %s", spanAttr(s, uotel.AttrErrorCategory))
+	}
+	if len(s.Events) == 0 {
+		t.Error("expected recorded error event on span")
+	}
+}
+
+func TestWorker_SpanOnRetryableError(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: nil, Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-429", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload: map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-retryChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for retry")
+	}
+
+	spans := exporter.GetSpans()
+	s := findSpan(spans, "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	if spanAttr(s, uotel.AttrErrorCategory) != "RATE_LIMIT" {
+		t.Errorf("expected error.category=RATE_LIMIT, got %s", spanAttr(s, uotel.AttrErrorCategory))
+	}
+	if s.Status.Code == codes.Error {
+		t.Error("retryable error should not set span error status")
+	}
+}
+
+func TestWorker_SpanOnServerError(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusInternalServerError, Body: nil, Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-500", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload: map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-retryChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for retry")
+	}
+
+	spans := exporter.GetSpans()
+	s := findSpan(spans, "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	if spanAttr(s, uotel.AttrErrorCategory) != "SERVER_ERROR" {
+		t.Errorf("expected error.category=SERVER_ERROR, got %s", spanAttr(s, uotel.AttrErrorCategory))
+	}
+}
+
+func TestWorker_TraceContextExtraction(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: nil, Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create a parent span and inject its context into metadata
+	parentCtx, parentSpan := otel.Tracer("test").Start(ctx, "parent-operation")
+	parentTraceID := parentSpan.SpanContext().TraceID()
+	metadata := make(map[string]string)
+	otel.GetTextMapPropagator().Inject(parentCtx, propagation.MapCarrier(metadata))
+	parentSpan.End()
+
+	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-ctx", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Metadata: metadata,
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	spans := exporter.GetSpans()
+	s := findSpan(spans, "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	if s.SpanContext.TraceID() != parentTraceID {
+		t.Errorf("expected process-request span to share parent trace ID %s, got %s",
+			parentTraceID, s.SpanContext.TraceID())
+	}
+}
+
+func TestWorker_SpanOnShutdownReenqueue(t *testing.T) {
+	exporter := setupTestTracer(t)
+	reqStarted := make(chan struct{})
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		close(reqStarted)
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-shutdown", Created: time.Now().Unix(), Deadline: time.Now().Add(5 * time.Minute).Unix(),
+		Payload: map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	<-reqStarted
+	cancel()
+
+	select {
+	case <-retryChannel:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for retry")
+	}
+
+	spans := exporter.GetSpans()
+	processSpan := findSpan(spans, "process-request")
+	if processSpan == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	reenqueueSpan := findSpan(spans, "re-enqueue")
+	if reenqueueSpan == nil {
+		t.Fatal("expected 're-enqueue' span")
+	}
+	if len(reenqueueSpan.Links) == 0 {
+		t.Error("expected re-enqueue span to have a link to process-request span")
+	} else {
+		linked := false
+		for _, link := range reenqueueSpan.Links {
+			if link.SpanContext.SpanID() == processSpan.SpanContext.SpanID() {
+				linked = true
+				break
+			}
+		}
+		if !linked {
+			t.Error("re-enqueue span link does not reference process-request span")
+		}
+	}
+}
+
+func TestWorker_SpanIncludesQueueName(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: nil, Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmbR(
+		asyncapi.InternalRouting{QueueID: "my-test-queue"},
+		asyncapi.RequestMessage{
+			ID: "span-queue", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+			Payload: map[string]any{"model": "test", "prompt": "hi"},
+		}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	spans := exporter.GetSpans()
+	s := findSpan(spans, "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	if spanAttr(s, uotel.AttrQueueName) != "my-test-queue" {
+		t.Errorf("expected queue.name=my-test-queue, got %s", spanAttr(s, uotel.AttrQueueName))
 	}
 }

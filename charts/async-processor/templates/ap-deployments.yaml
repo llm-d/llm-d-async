@@ -76,6 +76,9 @@ spec:
           {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 8 }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}
+          {{- if and .Values.ap.otel.redisTracing .Values.ap.otel.endpoint }}
+          - --redis-tracing=true
+          {{- end }}
           {{- if .Values.ap.tls.insecureSkipVerify }}
           - --tls-insecure-skip-verify=true
           {{- end }}
@@ -91,6 +94,28 @@ spec:
         env:
           - name: LOG_LEVEL
             value: {{ if .Values.ap.logging }}{{ .Values.ap.logging.level | default "info" | quote }}{{ else }}"info"{{ end }}
+          {{- if .Values.ap.otel.endpoint }}
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: {{ .Values.ap.otel.endpoint | quote }}
+          - name: OTEL_EXPORTER_OTLP_INSECURE
+            value: {{ .Values.ap.otel.insecure | quote }}
+          - name: OTEL_TRACES_SAMPLER
+            value: {{ .Values.ap.otel.sampler | quote }}
+          - name: OTEL_TRACES_SAMPLER_ARG
+            value: {{ .Values.ap.otel.samplerArg | quote }}
+          - name: OTEL_SERVICE_NAME
+            value: "async-processor"
+          - name: OTEL_RESOURCE_ATTRIBUTES
+            value: "k8s.namespace.name=$(NAMESPACE),k8s.pod.name=$(POD_NAME),service.version={{ .Chart.AppVersion }}"
+          {{- end }}
           {{- if .Values.ap.redis.enabled }}
           - name: REDIS_URL
             valueFrom:

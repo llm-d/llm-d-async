@@ -4,6 +4,12 @@ ap:
   igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
   concurrency: 1
   prometheusCacheTTL: "0s"
+  otel:
+    endpoint: "http://jaeger.e2e-integration.svc.cluster.local:4317"
+    insecure: true
+    sampler: "always_on"
+    samplerArg: "1.0"
+    redisTracing: false
   metrics:
     enabled: true
     port: 9090

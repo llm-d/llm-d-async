@@ -40,6 +40,7 @@ const (
 	simDeployManifest  = "./yaml/sim-deploy.yaml"
 	envoyManifest      = "./yaml/envoy.yaml"
 	prometheusManifest = "./yaml/prometheus.yaml"
+	jaegerManifest     = "./yaml/jaeger.yaml"
 
 	// Helm chart and per-instance values for async-processor deployments.
 	chartPath     = "../../charts/async-processor"
@@ -52,6 +53,7 @@ var (
 	simPort        string = env.GetEnvString("E2E_INTEGRATION_SIM_PORT", "30490", ginkgo.GinkgoLogr)
 	envoyPort      string = env.GetEnvString("E2E_INTEGRATION_ENVOY_PORT", "30492", ginkgo.GinkgoLogr)
 	envoyAdminPort string = env.GetEnvString("E2E_INTEGRATION_ENVOY_ADMIN_PORT", "30493", ginkgo.GinkgoLogr)
+	jaegerPort     string = env.GetEnvString("E2E_INTEGRATION_JAEGER_PORT", "30494", ginkgo.GinkgoLogr)
 
 	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d-incubation/async-processor:e2e-test", ginkgo.GinkgoLogr)
@@ -71,6 +73,7 @@ var (
 	simAdminURL   string
 	envoyURL      string
 	envoyAdminURL string
+	jaegerURL     string
 )
 
 func TestEndToEnd(t *testing.T) {
@@ -168,6 +171,7 @@ func setupK8sCluster() {
 		cfg = strings.ReplaceAll(cfg, "${SIM_PORT}", simPort)
 		cfg = strings.ReplaceAll(cfg, "${ENVOY_PORT}", envoyPort)
 		cfg = strings.ReplaceAll(cfg, "${ENVOY_ADMIN_PORT}", envoyAdminPort)
+		cfg = strings.ReplaceAll(cfg, "${JAEGER_PORT}", jaegerPort)
 		_, err := io.WriteString(stdin, cfg)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	}()
@@ -213,6 +217,9 @@ func setupK8sCluster() {
 
 	pullIfMissing("prom/prometheus:v2.53.0")
 	kindLoadImage("prom/prometheus:v2.53.0")
+
+	pullIfMissing("jaegertracing/all-in-one:1.76.0")
+	kindLoadImage("jaegertracing/all-in-one:1.76.0")
 
 	// The sim image is pulled with imagePullPolicy: Always directly by the cluster.
 }
@@ -301,6 +308,9 @@ func applyManifests() {
 
 	ginkgo.By("Applying Prometheus manifest")
 	kubectlApplyFile(prometheusManifest, nil)
+
+	ginkgo.By("Applying Jaeger manifest")
+	kubectlApplyFile(jaegerManifest, nil)
 
 	ginkgo.By("Applying Envoy manifest")
 	kubectlApplyFile(envoyManifest, map[string]string{
@@ -397,6 +407,7 @@ func setupClients() {
 	simAdminURL = "http://localhost:" + simPort
 	envoyURL = "http://localhost:" + envoyPort
 	envoyAdminURL = "http://localhost:" + envoyAdminPort
+	jaegerURL = "http://localhost:" + jaegerPort
 
 	ginkgo.By("Creating Redis client on localhost:" + redisPort)
 	rdb = redis.NewClient(&redis.Options{Addr: "localhost:" + redisPort})
@@ -415,6 +426,14 @@ func setupClients() {
 	ginkgo.By("Waiting for sim to be ready")
 	gomega.Eventually(func(g gomega.Gomega) {
 		resp, err := http.Get(simAdminURL + "/metrics")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
+
+	ginkgo.By("Waiting for Jaeger to be ready")
+	gomega.Eventually(func(g gomega.Gomega) {
+		resp, err := http.Get(jaegerURL + "/")
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close() //nolint:errcheck
 		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
@@ -602,5 +621,8 @@ nodes:
     protocol: TCP
   - containerPort: 30493
     hostPort: ${ENVOY_ADMIN_PORT}
+    protocol: TCP
+  - containerPort: 30494
+    hostPort: ${JAEGER_PORT}
     protocol: TCP
 `

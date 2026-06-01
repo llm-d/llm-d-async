@@ -39,6 +39,9 @@ The architecture adheres to the following core principles:
   - [Request Messages and Consumption](#request-messages-and-consumption)
     - [Request Merge Policy](#request-merge-policy)
   - [Retries](#retries)
+  - [Observability](#observability)
+    - [OpenTelemetry Tracing](#opentelemetry-tracing)
+    - [Prometheus Metrics](#prometheus-metrics)
   - [Results](#results)
   - [Metrics](#metrics)
   - [Implementations](#implementations)
@@ -310,6 +313,94 @@ Currently the only policy supported is `Random Robin Policy` which randomly pick
 
 When a message processing has failed, either shedded or due to a server-side error, it will be scheduled for a retry (assuming the deadline has not passed).
 
+## Observability
+
+### OpenTelemetry Tracing
+
+The Async Processor supports distributed tracing via [OpenTelemetry](https://opentelemetry.io/). When enabled, it exports traces to an OTLP-compatible collector (e.g., Jaeger, Grafana Tempo, OpenTelemetry Collector).
+
+**Spans emitted:**
+
+| Span Name | Description |
+|-----------|-------------|
+| `process-request` | Per-request span covering validation, dispatch, and result routing |
+| `http-request` | Child span for the outgoing HTTP call to the inference gateway (via `otelhttp`) |
+| `re-enqueue` | Linked span created when a request is re-enqueued during graceful shutdown |
+
+**Span attributes:**
+
+| Attribute | Description |
+|-----------|-------------|
+| `request.id` | Request identifier |
+| `queue.name` | Source queue identifier |
+| `retry.count` | Current retry attempt (0 for first attempt) |
+| `error.category` | Error classification on failure (`RATE_LIMIT`, `SERVER_ERROR`, `UNKNOWN`, etc.) |
+
+**Trace context propagation:**
+
+Producers can inject W3C Trace Context (`traceparent`/`tracestate`) and Baggage into the request's `metadata` field. The processor extracts it and creates child spans under the producer's trace, enabling end-to-end distributed tracing across the queue boundary.
+
+```json
+{
+    "id": "req-123",
+    "deadline": 1764045130,
+    "payload": {"model": "my-model", "prompt": "hello"},
+    "metadata": {
+        "traceparent": "00-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6-1234567890abcdef-01"
+    }
+}
+```
+
+The processor also injects trace context into outgoing inference requests via W3C headers, so the inference gateway can continue the trace.
+
+**Configuration:**
+
+Tracing is controlled via standard OpenTelemetry environment variables. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable; leave it empty to disable (no-op).
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC collector endpoint (e.g., `http://jaeger:4317`). Empty disables tracing. | _(disabled)_ |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Use plaintext gRPC connection | `true` |
+| `OTEL_SERVICE_NAME` | Service name for traces | `llm-d-async` |
+| `OTEL_TRACES_SAMPLER` | Sampling strategy (`always_on`, `parentbased_traceidratio`, etc.) | `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | Sampling ratio (0.0–1.0) | `1.0` |
+
+**CLI flag:**
+
+- `--redis-tracing`: Enable per-command Redis tracing spans via `redisotel`. Produces high span volume — use only for debugging. Default: `false`.
+
+**Helm chart:**
+
+```yaml
+ap:
+  otel:
+    endpoint: "http://jaeger:4317"  # leave empty to disable
+    insecure: true
+    sampler: "parentbased_traceidratio"
+    samplerArg: "1.0"
+    redisTracing: false
+```
+
+### Prometheus Metrics
+
+The processor exports the following Prometheus metrics on the metrics port (default `9090`). All counters and histograms carry `queue_id` and `queue_name` labels for per-queue visibility.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `llm_d_async_async_request_total` | Counter | Total number of new requests (first attempt only) |
+| `llm_d_async_async_request_retries_total` | Counter | Total retry attempts |
+| `llm_d_async_async_successful_requests_total` | Counter | Successful requests |
+| `llm_d_async_async_failed_requests_total` | Counter | Failed requests (fatal errors) |
+| `llm_d_async_async_exceeded_deadline_requests_total` | Counter | Requests that exceeded their deadline |
+| `llm_d_async_async_shedded_requests_total` | Counter | Rate-limited/shed requests (429) |
+| `llm_d_async_async_message_latency_time_millis` | Histogram | Message latency (Pub/Sub only) |
+
+**Labels:**
+
+| Label | Description |
+|-------|-------------|
+| `queue_id` | Queue identifier (from queue config `id` field, defaults to queue name) |
+| `queue_name` | Queue name (Redis sorted set name, channel name, or Pub/Sub subscriber ID) |
 
 ## Results
 
