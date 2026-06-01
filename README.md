@@ -40,6 +40,7 @@ The architecture adheres to the following core principles:
     - [Request Merge Policy](#request-merge-policy)
   - [Retries](#retries)
   - [Results](#results)
+  - [Metrics](#metrics)
   - [Implementations](#implementations)
     - [Redis Sorted Set (Persisted)](#redis-sorted-set-persisted)
       - [Redis Sorted Set Command line parameters](#redis-sorted-set-command-line-parameters)
@@ -321,6 +322,40 @@ Results will be written to the results queue and will have the following structu
     // or
     "error" : "error's reason"
 }
+```
+
+## Metrics
+
+The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem. All counters and histograms carry `queue_id` and `queue_name` labels so you can filter and aggregate per queue.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `llm_d_async_async_request_total` | Counter | New async requests (first attempt only) |
+| `llm_d_async_async_successful_requests_total` | Counter | Requests that received a successful inference response |
+| `llm_d_async_async_failed_requests_total` | Counter | Requests that failed with a fatal or non-retryable error |
+| `llm_d_async_async_shedded_requests_total` | Counter | Requests shedded due to rate limiting (429 / capacity) |
+| `llm_d_async_async_exceeded_deadline_requests_total` | Counter | Requests that exceeded their deadline before completion |
+| `llm_d_async_async_request_retries_total` | Counter | Retry attempts |
+| `llm_d_async_async_message_latency_time_millis` | Histogram | End-to-end message latency in milliseconds (publish to successful processing). Only registered when the transport supports message latency (e.g., GCP Pub/Sub). |
+
+**Labels:**
+
+| Label | Description |
+|-------|-------------|
+| `queue_id` | Transport-level queue identifier |
+| `queue_name` | Logical queue name from the queue configuration |
+
+**Example PromQL queries:**
+
+```promql
+# Per-queue success rate over the last 5 minutes
+rate(llm_d_async_async_successful_requests_total[5m])
+
+# Which queues are getting rate-limited?
+rate(llm_d_async_async_shedded_requests_total[5m])
+
+# Retry ratio by queue
+rate(llm_d_async_async_request_retries_total[5m]) / rate(llm_d_async_async_request_total[5m])
 ```
 
 ## Implementations

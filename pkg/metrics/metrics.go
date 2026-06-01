@@ -11,39 +11,72 @@ import (
 const (
 	// SchedulerSubsystem is the metric prefix of the package.
 	SchedulerSubsystem = "llm_d_async"
+
+	LabelQueueID   = "queue_id"
+	LabelQueueName = "queue_name"
 )
 
+var queueLabels = []string{LabelQueueID, LabelQueueName}
+
 var (
-	Retries = prometheus.NewCounter(prometheus.CounterOpts{
+	Retries = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_request_retries_total",
 		Help: "Total number of async request retries.",
-	})
-	AsyncReqs = prometheus.NewCounter(prometheus.CounterOpts{
+	}, queueLabels)
+	AsyncReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_request_total",
 		Help: "Total number of async requests.",
-	})
-	ExceededDeadlineReqs = prometheus.NewCounter(prometheus.CounterOpts{
+	}, queueLabels)
+	ExceededDeadlineReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_exceeded_deadline_requests_total",
 		Help: "Total number of async requests that exceeded their deadline.",
-	})
-	FailedReqs = prometheus.NewCounter(prometheus.CounterOpts{
+	}, queueLabels)
+	FailedReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_failed_requests_total",
 		Help: "Total number of async requests that failed.",
-	})
-	SuccessfulReqs = prometheus.NewCounter(prometheus.CounterOpts{
+	}, queueLabels)
+	SuccessfulReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_successful_requests_total",
 		Help: "Total number of async requests that succeeded.",
-	})
-	SheddedRequests = prometheus.NewCounter(prometheus.CounterOpts{
+	}, queueLabels)
+	SheddedRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_shedded_requests_total",
 		Help: "Total number of async requests that were shedded.",
-	})
-	MessageLatencyTime = prometheus.NewHistogram(prometheus.HistogramOpts{
+	}, queueLabels)
+	MessageLatencyTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_message_latency_time_millis",
 		Help:    "Time from message publish to message being successfully processed.",
 		Buckets: []float64{100, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000},
-	})
+	}, queueLabels)
 )
+
+func RecordRetry(queueID, queueName string) {
+	Retries.WithLabelValues(queueID, queueName).Inc()
+}
+
+func RecordAsyncReq(queueID, queueName string) {
+	AsyncReqs.WithLabelValues(queueID, queueName).Inc()
+}
+
+func RecordExceededDeadlineReq(queueID, queueName string) {
+	ExceededDeadlineReqs.WithLabelValues(queueID, queueName).Inc()
+}
+
+func RecordFailedReq(queueID, queueName string) {
+	FailedReqs.WithLabelValues(queueID, queueName).Inc()
+}
+
+func RecordSuccessfulReq(queueID, queueName string) {
+	SuccessfulReqs.WithLabelValues(queueID, queueName).Inc()
+}
+
+func RecordSheddedReq(queueID, queueName string) {
+	SheddedRequests.WithLabelValues(queueID, queueName).Inc()
+}
+
+func RecordMessageLatency(millis float64, queueID, queueName string) {
+	MessageLatencyTime.WithLabelValues(queueID, queueName).Observe(millis)
+}
 
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {

@@ -362,7 +362,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		if !result {
 			msg.Nack()
 		} else {
-			metrics.MessageLatencyTime.Observe(float64(time.Since(msg.PublishTime).Milliseconds()))
+			metrics.RecordMessageLatency(float64(time.Since(msg.PublishTime).Milliseconds()), ir.QueueID, ir.RequestQueueName)
 			msg.Ack()
 		}
 	})

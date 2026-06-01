@@ -34,9 +34,11 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 			if msg.InternalRequest == nil || msg.PublicRequest == nil {
 				continue
 			}
+			queueID := msg.QueueID
+			queueName := msg.RequestQueueName
 			if msg.RetryCount == 0 {
 				// Only count first attempt as a new request.
-				metrics.AsyncReqs.Inc()
+				metrics.RecordAsyncReq(queueID, queueName)
 			}
 			payloadBytes := validateAndMarshal(ctx, resultChannel, msg)
 			if payloadBytes == nil {
@@ -61,7 +63,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 
 				if err == nil {
 					// Success - got a valid response
-					metrics.SuccessfulReqs.Inc()
+					metrics.RecordSuccessfulReq(queueID, queueName)
 					select {
 					case resultChannel <- asyncapi.ResultMessage{
 						ID:       msg.PublicRequest.ReqID(),
@@ -89,7 +91,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				var inferenceErr asyncapi.InferenceError
 				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
 					// Unknown error type or fatal error - fail immediately
-					metrics.FailedReqs.Inc()
+					metrics.RecordFailedReq(queueID, queueName)
 					select {
 					case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
 					case <-ctx.Done():
@@ -99,7 +101,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 
 				// Retryable error - check if it's due to rate limiting
 				if inferenceErr.Category().Sheddable() {
-					metrics.SheddedRequests.Inc()
+					metrics.RecordSheddedReq(queueID, queueName)
 				}
 				// Pass server-specified Retry-After duration if available.
 				var retryAfter time.Duration
@@ -119,10 +121,12 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	if msg.PublicRequest == nil {
 		return nil
 	}
+	queueID := msg.QueueID
+	queueName := msg.RequestQueueName
 	r := msg.PublicRequest
 	deadline := r.ReqDeadline()
 	if deadline <= 0 {
-		metrics.FailedReqs.Inc()
+		metrics.RecordFailedReq(queueID, queueName)
 		select {
 		case resultChannel <- CreateErrorResultMessage(r, msg.InternalRouting, "Failed: deadline is missing or invalid (Unix seconds)."):
 		case <-ctx.Done():
@@ -131,7 +135,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	}
 
 	if deadline < time.Now().Unix() {
-		metrics.ExceededDeadlineReqs.Inc()
+		metrics.RecordExceededDeadlineReq(queueID, queueName)
 		select {
 		case resultChannel <- CreateDeadlineExceededResultMessage(r, msg.InternalRouting):
 		case <-ctx.Done():
@@ -141,7 +145,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 
 	payloadBytes, err := json.Marshal(r.ReqPayload())
 	if err != nil {
-		metrics.FailedReqs.Inc()
+		metrics.RecordFailedReq(queueID, queueName)
 		select {
 		case resultChannel <- CreateErrorResultMessage(r, msg.InternalRouting, fmt.Sprintf("Failed to marshal message's payload: %s", err.Error())):
 		case <-ctx.Done():
@@ -156,10 +160,12 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	if msg.PublicRequest == nil {
 		return
 	}
+	queueID := msg.QueueID
+	queueName := msg.RequestQueueName
 	deadline := msg.PublicRequest.ReqDeadline()
 	secondsToDeadline := deadline - time.Now().Unix()
 	if secondsToDeadline <= 0 {
-		metrics.ExceededDeadlineReqs.Inc()
+		metrics.RecordExceededDeadlineReq(queueID, queueName)
 		select {
 		case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
 		case <-ctx.Done():
@@ -175,7 +181,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	}
 
 	if finalDuration >= float64(secondsToDeadline) {
-		metrics.ExceededDeadlineReqs.Inc()
+		metrics.RecordExceededDeadlineReq(queueID, queueName)
 		select {
 		case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
 		case <-ctx.Done():
@@ -184,7 +190,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	}
 
 	msg.RetryCount++
-	metrics.Retries.Inc()
+	metrics.RecordRetry(queueID, queueName)
 	select {
 	case retryChannel <- pipeline.RetryMessage{
 		EmbelishedRequestMessage: msg,
