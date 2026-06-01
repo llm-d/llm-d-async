@@ -13,6 +13,10 @@ import (
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 )
 
 const defaultRequestTimeout = 5 * time.Minute
@@ -707,5 +711,233 @@ func TestWorker_RetriesOnShutdown(t *testing.T) {
 		t.Errorf("Expected retry, got fatal result: %s", r.Payload)
 	case <-time.After(5 * time.Second):
 		t.Errorf("Worker did not retry within 5s after shutdown")
+	}
+}
+
+func counterValue(cv *prometheus.CounterVec, queueID, queueName string) float64 {
+	c, err := cv.GetMetricWithLabelValues(queueID, queueName)
+	if err != nil {
+		return 0
+	}
+	return testutil.ToFloat64(c)
+}
+
+func TestMetrics_SuccessfulRequest(t *testing.T) {
+	queueID := "metrics-success-qid"
+	queueName := "metrics-success-queue"
+
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       nil,
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{
+		QueueID:          queueID,
+		RequestQueueName: queueName,
+	}, asyncapi.RequestMessage{
+		ID:       "m-success",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	if got := counterValue(metrics.AsyncReqs, queueID, queueName); got < 1 {
+		t.Errorf("AsyncReqs(%s,%s) = %f, want >= 1", queueID, queueName, got)
+	}
+	if got := counterValue(metrics.SuccessfulReqs, queueID, queueName); got < 1 {
+		t.Errorf("SuccessfulReqs(%s,%s) = %f, want >= 1", queueID, queueName, got)
+	}
+	if got := counterValue(metrics.FailedReqs, queueID, queueName); got != 0 {
+		t.Errorf("FailedReqs(%s,%s) = %f, want 0", queueID, queueName, got)
+	}
+	if got := counterValue(metrics.SheddedRequests, queueID, queueName); got != 0 {
+		t.Errorf("SheddedRequests(%s,%s) = %f, want 0", queueID, queueName, got)
+	}
+}
+
+func TestMetrics_RateLimited(t *testing.T) {
+	queueID := "metrics-shedded-qid"
+	queueName := "metrics-shedded-queue"
+
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       nil,
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{
+		QueueID:          queueID,
+		RequestQueueName: queueName,
+	}, asyncapi.RequestMessage{
+		ID:       "m-shedded",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-retryChannel:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	if got := counterValue(metrics.SheddedRequests, queueID, queueName); got < 1 {
+		t.Errorf("SheddedRequests(%s,%s) = %f, want >= 1", queueID, queueName, got)
+	}
+	if got := counterValue(metrics.Retries, queueID, queueName); got < 1 {
+		t.Errorf("Retries(%s,%s) = %f, want >= 1", queueID, queueName, got)
+	}
+}
+
+func TestMetrics_FatalError(t *testing.T) {
+	queueID := "metrics-fatal-qid"
+	queueName := "metrics-fatal-queue"
+
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("connection refused")
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{
+		QueueID:          queueID,
+		RequestQueueName: queueName,
+	}, asyncapi.RequestMessage{
+		ID:       "m-fatal",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	if got := counterValue(metrics.FailedReqs, queueID, queueName); got < 1 {
+		t.Errorf("FailedReqs(%s,%s) = %f, want >= 1", queueID, queueName, got)
+	}
+	if got := counterValue(metrics.SuccessfulReqs, queueID, queueName); got != 0 {
+		t.Errorf("SuccessfulReqs(%s,%s) = %f, want 0", queueID, queueName, got)
+	}
+}
+
+func TestMetrics_DeadlineExceeded(t *testing.T) {
+	queueID := "metrics-deadline-qid"
+	queueName := "metrics-deadline-queue"
+
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{
+		QueueID:          queueID,
+		RequestQueueName: queueName,
+	}, asyncapi.RequestMessage{
+		ID:       "m-deadline",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(-10 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	if got := counterValue(metrics.ExceededDeadlineReqs, queueID, queueName); got < 1 {
+		t.Errorf("ExceededDeadlineReqs(%s,%s) = %f, want >= 1", queueID, queueName, got)
+	}
+}
+
+func TestMetrics_LabelsIsolated(t *testing.T) {
+	queueA := "metrics-iso-a"
+	queueB := "metrics-iso-b"
+
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+	deadline := time.Now().Add(100 * time.Second).Unix()
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{
+		QueueID: queueA, RequestQueueName: queueA,
+	}, asyncapi.RequestMessage{
+		ID: "iso-a", Created: time.Now().Unix(), Deadline: deadline,
+		Payload: map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for message A")
+	}
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{
+		QueueID: queueB, RequestQueueName: queueB,
+	}, asyncapi.RequestMessage{
+		ID: "iso-b", Created: time.Now().Unix(), Deadline: deadline,
+		Payload: map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for message B")
+	}
+
+	aCount := counterValue(metrics.SuccessfulReqs, queueA, queueA)
+	bCount := counterValue(metrics.SuccessfulReqs, queueB, queueB)
+	if aCount < 1 {
+		t.Errorf("SuccessfulReqs for queue A = %f, want >= 1", aCount)
+	}
+	if bCount < 1 {
+		t.Errorf("SuccessfulReqs for queue B = %f, want >= 1", bCount)
 	}
 }
