@@ -8,13 +8,18 @@ import (
 	"math"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
+	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
+	"google.golang.org/api/iterator"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -30,6 +35,8 @@ var (
 	resultTopicID       = flag.String("pubsub.result-topic-id", "", "GCP PubSub topic ID for results")
 	topicsConfigFile    = flag.String("pubsub.topics-config-file", "", "Topics Configuration file. Mutually exclusive with pubsub.igw-base-url, pubsub.request-subscriber-id, pubsub.request-path-url and pubsub.inference-objective flags. See documentation about syntax")
 	batchSize           = flag.Int("pubsub.batch-size", 10, "Number of inflight messages")
+	reportBacklogFromMonitoring = flag.Bool("pubsub.report-backlog-from-monitoring", false, "Report PubSub backlog from Cloud Monitoring")
+	monitoringPollInterval      = flag.Duration("pubsub.monitoring-poll-interval", 60*time.Second, "Interval to poll Cloud Monitoring for backlog")
 
 	resultChannels sync.Map
 )
@@ -48,19 +55,22 @@ type TopicConfig struct {
 var _ pipeline.Flow = (*PubSubMQFlow)(nil)
 
 type PubSubMQFlow struct {
-	resultTopicID   string
-	requestChannels []RequestChannelData
-	retryChannel    chan pipeline.RetryMessage
-	resultChannel   chan api.ResultMessage
-	gate            pipeline.DispatchGate
-	gateFactory     pipeline.GateFactory
-	drainCancel     context.CancelFunc
-	drainWg         sync.WaitGroup
+	resultTopicID    string
+	requestChannels  []RequestChannelData
+	retryChannel     chan pipeline.RetryMessage
+	resultChannel    chan api.ResultMessage
+	gate             pipeline.DispatchGate
+	gateFactory      pipeline.GateFactory
+	monitoringClient *monitoring.MetricClient
+	drainCancel      context.CancelFunc
+	drainWg          sync.WaitGroup
 }
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
 	subscriberID   string
+	queueID        string
 	gate           pipeline.DispatchGate
+	inFlight       *atomic.Int64
 }
 
 // PubSubOption is a functional option for configuring PubSubMQFlow
@@ -137,8 +147,20 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 				Gate:               gate,
 			},
 			subscriberID: cfg.SubscriberID,
+			queueID:      cfg.SubscriberID, // Use subscriberID as default queueID
 			gate:         gate,
+			inFlight:     new(atomic.Int64),
 		})
+	}
+
+	if *reportBacklogFromMonitoring {
+		var err error
+		p.monitoringClient, err = monitoring.NewMetricClient(ctx)
+		if err != nil {
+			// Log and disable monitoring if it fails to initialize
+			fmt.Fprintf(os.Stderr, "failed to initialize monitoring client: %v\n", err)
+			*reportBacklogFromMonitoring = false
+		}
 	}
 
 	// Set default gate if not already set
@@ -178,12 +200,17 @@ func (r *PubSubMQFlow) Start(ctx context.Context) {
 	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
-		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.Channel, channelData.gate)
+		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.queueID, channelData.requestChannel.Channel, channelData.gate, channelData.inFlight)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	r.drainWg.Add(2)
 	go func() { defer r.drainWg.Done(); resultWorker(drainCtx, publisher, r.resultChannel) }()
 	go func() { defer r.drainWg.Done(); addMsgToRetryQueue(drainCtx, r.retryChannel) }()
+
+	if *reportBacklogFromMonitoring && r.monitoringClient != nil {
+		r.drainWg.Add(1)
+		go func() { defer r.drainWg.Done(); r.monitoringWorker(drainCtx) }()
+	}
 }
 
 func (r *PubSubMQFlow) Shutdown() {
@@ -258,7 +285,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, queueID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate, inFlight *atomic.Int64) {
 	logger := log.FromContext(ctx)
 
 	sub := pubSubClient.Subscriber(subscriberID)
@@ -293,7 +320,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			continue
 		}
 
-		err := r.processMessages(receiveCtx, sub.Receive, ch, gate)
+		err := r.processMessages(receiveCtx, sub.Receive, ch, gate, inFlight, queueID, subscriberID)
 
 		cancel()
 		// TODO
@@ -306,9 +333,15 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 type receiveFunc func(context.Context, func(context.Context, *pubsub.Message)) error
 
-func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, ch chan *api.InternalRequest, gate pipeline.DispatchGate) error {
+func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, ch chan *api.InternalRequest, gate pipeline.DispatchGate, inFlight *atomic.Int64, queueID string, subscriberID string) error {
 	logger := log.FromContext(ctx)
 	return receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		inFlight.Add(1)
+		metrics.IncInFlightRequests(queueID, subscriberID)
+		defer func() {
+			inFlight.Add(-1)
+			metrics.DecInFlightRequests(queueID, subscriberID)
+		}()
 
 		var body api.RequestMessage
 		err := json.Unmarshal(msg.Data, &body)
@@ -318,7 +351,11 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			return
 		}
 
-		irout := api.InternalRouting{TransportCorrelationID: msg.ID}
+		irout := api.InternalRouting{
+			TransportCorrelationID: msg.ID,
+			QueueID:                queueID,
+			RequestQueueName:       subscriberID,
+		}
 		if msg.DeliveryAttempt != nil {
 			irout.RetryCount = *msg.DeliveryAttempt - 1
 		}
@@ -366,4 +403,67 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			msg.Ack()
 		}
 	})
+}
+
+func (r *PubSubMQFlow) monitoringWorker(ctx context.Context) {
+	ticker := time.NewTicker(*monitoringPollInterval)
+	defer ticker.Stop()
+	defer r.monitoringClient.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.reportBacklog(ctx)
+		}
+	}
+}
+
+func (r *PubSubMQFlow) reportBacklog(ctx context.Context) {
+	logger := log.FromContext(ctx)
+	if *projectID == "" {
+		logger.V(logutil.DEFAULT).Info("PubSub project ID is not set, skipping backlog reporting from Monitoring")
+		return
+	}
+	for _, ch := range r.requestChannels {
+		depth, err := r.getSubscriptionDepth(ctx, ch.subscriberID)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to get PubSub backlog from Monitoring", "subscriberID", ch.subscriberID)
+			continue
+		}
+		metrics.RecordQueueDepth(float64(depth), ch.queueID, ch.subscriberID)
+	}
+}
+
+func (r *PubSubMQFlow) getSubscriptionDepth(ctx context.Context, subscriberID string) (int64, error) {
+	now := time.Now()
+	startTime := now.Add(-5 * time.Minute)
+
+	req := &monitoringpb.ListTimeSeriesRequest{
+		Name: fmt.Sprintf("projects/%s", *projectID),
+		Filter: fmt.Sprintf(`metric.type = "pubsub.googleapis.com/subscription/num_undelivered_messages" AND resource.labels.subscription_id = "%s"`,
+			subscriberID),
+		Interval: &monitoringpb.TimeInterval{
+			StartTime: timestamppb.New(startTime),
+			EndTime:   timestamppb.New(now),
+		},
+		View: monitoringpb.ListTimeSeriesRequest_FULL,
+	}
+
+	it := r.monitoringClient.ListTimeSeries(ctx, req)
+	for {
+		resp, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+		// Get the latest point
+		if len(resp.Points) > 0 {
+			return resp.Points[len(resp.Points)-1].Value.GetInt64Value(), nil
+		}
+	}
+	return 0, fmt.Errorf("no time series data found for subscription %s", subscriberID)
 }

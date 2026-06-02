@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -119,7 +120,8 @@ func TestProcessMessages_QuotaGating(t *testing.T) {
 				}
 			}()
 
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			inFlight := new(atomic.Int64)
+			_ = flow.processMessages(ctx, receive, ch, gate, inFlight, "test-queue", "test-sub")
 		})
 	}
 }

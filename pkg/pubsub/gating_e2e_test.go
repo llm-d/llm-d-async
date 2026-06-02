@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,7 +61,8 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg1)
 				return nil
 			}
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			inFlight := new(atomic.Int64)
+			_ = flow.processMessages(ctx, receive, ch, gate, inFlight, "test-queue", "test-sub")
 		}()
 
 		// Verification: Request 1 should reach the channel
@@ -84,7 +86,8 @@ func TestGating_EndToEnd(t *testing.T) {
 				return nil
 			}
 			// We expect this to return without putting anything in 'ch'
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			inFlight := new(atomic.Int64)
+			_ = flow.processMessages(ctx, receive, ch, gate, inFlight, "test-queue", "test-sub")
 			deniedChan <- true
 		}()
 
@@ -111,7 +114,8 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg3)
 				return nil
 			}
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			inFlight := new(atomic.Int64)
+			_ = flow.processMessages(ctx, receive, ch, gate, inFlight, "test-queue", "test-sub")
 		}()
 
 		select {
@@ -137,7 +141,9 @@ func TestGating_EndToEnd(t *testing.T) {
 					f(ctx, msg)
 					return nil
 				}
-				_ = flow.processMessages(context.Background(), receive, ch, gate)
+				inFlight := new(atomic.Int64)
+				_ = flow.processMessages(context.Background(), receive, ch, gate, inFlight, "test-queue", "test-sub")
+
 			}()
 
 			select {
@@ -160,7 +166,8 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg3)
 				return nil
 			}
-			_ = flow.processMessages(context.Background(), receive, ch, gate)
+			inFlight := new(atomic.Int64)
+			_ = flow.processMessages(context.Background(), receive, ch, gate, inFlight, "test-queue", "test-sub")
 			deniedChan <- true
 		}()
 
@@ -183,7 +190,8 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg4)
 				return nil
 			}
-			_ = flow.processMessages(context.Background(), receive, ch, gate)
+			inFlight := new(atomic.Int64)
+			_ = flow.processMessages(context.Background(), receive, ch, gate, inFlight, "test-queue", "test-sub")
 		}()
 
 		select {

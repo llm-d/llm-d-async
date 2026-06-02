@@ -9,11 +9,13 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 
 	"github.com/redis/go-redis/v9"
@@ -91,6 +93,7 @@ type requestChannelData struct {
 	queueName string
 	queueID   string
 	gate      pipeline.DispatchGate
+	inFlight  *atomic.Int64
 }
 
 var _ pipeline.Flow = (*RedisSortedSetFlow)(nil)
@@ -106,6 +109,7 @@ type RedisSortedSetFlow struct {
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 	configMap       map[string]queueConfig
+	inFlightCounters map[string]*atomic.Int64
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 }
@@ -144,6 +148,7 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 	}
 
 	r.configMap = make(map[string]queueConfig, len(configs))
+	r.inFlightCounters = make(map[string]*atomic.Int64, len(configs))
 	for _, cfg := range configs {
 		var gate pipeline.DispatchGate
 		if r.gateFactory != nil && cfg.GateType != "" {
@@ -166,11 +171,14 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 		}
 
 		r.configMap[cfg.ID] = cfg
+		inflight := new(atomic.Int64)
+		r.inFlightCounters[cfg.ID] = inflight
 		r.requestChannels = append(r.requestChannels, requestChannelData{
 			channel:   ch,
 			queueName: cfg.QueueName,
 			queueID:   cfg.ID,
 			gate:      gate,
+			inFlight:  inflight,
 		})
 	}
 
@@ -243,7 +251,7 @@ func (r *RedisSortedSetFlow) Start(ctx context.Context) {
 	r.drainCancel = drainCancel
 
 	for _, ch := range r.requestChannels {
-		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName, ch.queueID)
+		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName, ch.queueID, ch.inFlight)
 	}
 	r.drainWg.Add(2)
 	go func() { defer r.drainWg.Done(); r.retryWorker(drainCtx) }()  // #nosec G118
@@ -278,7 +286,7 @@ func (r *RedisSortedSetFlow) Characteristics() pipeline.Characteristics {
 }
 
 // Polls sorted set and processes messages by deadline priority (earliest first)
-func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string) {
+func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string, inFlight *atomic.Int64) {
 	logger := log.FromContext(ctx)
 	ticker := time.NewTicker(r.pollInterval)
 	defer ticker.Stop()
@@ -300,12 +308,20 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.processMessages(ctx, msgChannel, queueName, queueID, gate, logger)
+			// Report backlog depth
+			card, err := r.rdb.ZCard(ctx, queueName).Result()
+			if err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to get queue depth from Redis", "queueName", queueName)
+			} else {
+				metrics.RecordQueueDepth(float64(card), queueID, queueName)
+			}
+
+			r.processMessages(ctx, msgChannel, queueName, queueID, gate, logger, inFlight)
 		}
 	}
 }
 
-func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string, gate pipeline.DispatchGate, logger logr.Logger) {
+func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string, gate pipeline.DispatchGate, logger logr.Logger, inFlight *atomic.Int64) {
 	currentTime := float64(time.Now().Unix())
 
 	budget := gate.Budget(ctx)
@@ -373,6 +389,8 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 
 		select {
 		case msgChannel <- ir:
+			inFlight.Add(1)
+			metrics.IncInFlightRequests(queueID, queueName)
 		case <-ctx.Done():
 			r.activeReleases.Delete(rview.ReqID())
 			if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
@@ -414,6 +432,13 @@ func (r *RedisSortedSetFlow) parseMessage(z redis.Z, logger logr.Logger) (*api.I
 func (r *RedisSortedSetFlow) retryWorker(ctx context.Context) {
 	processMsg := func(processCtx context.Context, msg pipeline.RetryMessage) {
 		batch := drainBatch(msg, r.retryChannel, maxBatchSize)
+		// Decrement in-flight counter for the queue
+		for _, m := range batch {
+			if counter, ok := r.inFlightCounters[m.QueueID]; ok {
+				counter.Add(-1)
+				metrics.DecInFlightRequests(m.QueueID, m.RequestQueueName)
+			}
+		}
 		r.flushRetryBatch(processCtx, batch)
 	}
 
@@ -490,6 +515,11 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 		for _, m := range batch {
 			if rel, ok := r.activeReleases.LoadAndDelete(m.ID); ok {
 				rel.(func())()
+			}
+			// Decrement in-flight counter for the queue
+			if counter, ok := r.inFlightCounters[m.Routing.QueueID]; ok {
+				counter.Add(-1)
+				metrics.DecInFlightRequests(m.Routing.QueueID, m.Routing.RequestQueueName)
 			}
 		}
 		r.flushResultBatch(flushCtx, batch)

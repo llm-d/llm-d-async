@@ -48,6 +48,14 @@ var (
 		Help:    "Time from message publish to message being successfully processed.",
 		Buckets: []float64{100, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000},
 	}, queueLabels)
+	QueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_queue_depth",
+		Help: "Current number of items in the queue (backlog).",
+	}, queueLabels)
+	InFlightRequests = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_in_flight_requests",
+		Help: "Current number of requests being processed by the application.",
+	}, queueLabels)
 )
 
 func RecordRetry(queueID, queueName string) {
@@ -78,10 +86,27 @@ func RecordMessageLatency(millis float64, queueID, queueName string) {
 	MessageLatencyTime.WithLabelValues(queueID, queueName).Observe(millis)
 }
 
+func RecordQueueDepth(depth float64, queueID, queueName string) {
+	QueueDepth.WithLabelValues(queueID, queueName).Set(depth)
+}
+
+func RecordInFlightRequests(count float64, queueID, queueName string) {
+	InFlightRequests.WithLabelValues(queueID, queueName).Set(count)
+}
+
+func IncInFlightRequests(queueID, queueName string) {
+	InFlightRequests.WithLabelValues(queueID, queueName).Inc()
+}
+
+func DecInFlightRequests(queueID, queueName string) {
+	InFlightRequests.WithLabelValues(queueID, queueName).Dec()
+}
+
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
 		Retries, AsyncReqs, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests,
+		QueueDepth, InFlightRequests,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

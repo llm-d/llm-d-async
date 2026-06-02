@@ -203,6 +203,7 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 		requestChannels: []requestChannelData{{
 			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
+			inFlight:  new(atomic.Int64),
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
@@ -218,7 +219,7 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "", flow.requestChannels[0].inFlight)
 
 	select {
 	case received := <-flow.requestChannels[0].channel.Channel:
@@ -268,7 +269,8 @@ func TestSortedSetFlow_DeadlineOrdering(t *testing.T) {
 	}
 
 	msgChannel := make(chan *api.InternalRequest, 10)
-	go flow.requestWorker(ctx, msgChannel, queue, "")
+	inFlight := new(atomic.Int64)
+	go flow.requestWorker(ctx, msgChannel, queue, "", inFlight)
 
 	var processed []string
 	for i := 0; i < 3; i++ {
@@ -300,6 +302,7 @@ func TestSortedSetFlow_ExpiredMessages(t *testing.T) {
 		requestChannels: []requestChannelData{{
 			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
+			inFlight:  new(atomic.Int64),
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
@@ -310,7 +313,7 @@ func TestSortedSetFlow_ExpiredMessages(t *testing.T) {
 	msg := api.RequestMessage{ID: "expired", Created: time.Now().Unix(), Deadline: pastDeadline}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(pastDeadline), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "", flow.requestChannels[0].inFlight)
 
 	select {
 	case msg := <-flow.requestChannels[0].channel.Channel:
@@ -337,6 +340,7 @@ func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 		requestChannels: []requestChannelData{{
 			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
+			inFlight:  new(atomic.Int64),
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
@@ -360,7 +364,7 @@ func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 	validMsg := api.RequestMessage{ID: "valid", Created: time.Now().Unix(), Deadline: 9999999999}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(validMsg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "", flow.requestChannels[0].inFlight)
 
 	// Should skip malformed and receive valid message
 	select {
@@ -582,7 +586,8 @@ func TestSortedSetFlow_NoRaceCondition(t *testing.T) {
 			defer wg.Done()
 			workerCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 			defer cancel()
-			go flow.requestWorker(workerCtx, msgChan, queue, "")
+			inFlight := new(atomic.Int64)
+			go flow.requestWorker(workerCtx, msgChan, queue, "", inFlight)
 			for {
 				select {
 				case msg := <-msgChan:
@@ -633,7 +638,8 @@ func TestSortedSetFlow_ContextCancellation(t *testing.T) {
 
 	done := make(chan bool)
 	go func() {
-		flow.requestWorker(workerCtx, msgChan, queue, "")
+		inFlight := new(atomic.Int64)
+		flow.requestWorker(workerCtx, msgChan, queue, "", inFlight)
 		done <- true
 	}()
 
@@ -708,6 +714,7 @@ func TestSortedSetFlow_ZeroBudget(t *testing.T) {
 		requestChannels: []requestChannelData{{
 			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
+			inFlight:  new(atomic.Int64),
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
@@ -723,7 +730,7 @@ func TestSortedSetFlow_ZeroBudget(t *testing.T) {
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "", flow.requestChannels[0].inFlight)
 
 	// Wait for several poll cycles - message should NOT be pulled (budget=0)
 	select {
@@ -932,6 +939,7 @@ func TestSortedSetFlow_PartialBudget(t *testing.T) {
 		requestChannels: []requestChannelData{{
 			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 20)},
 			queueName: queue,
+			inFlight:  new(atomic.Int64),
 		}},
 		pollInterval: 200 * time.Millisecond,
 		batchSize:    10,
@@ -948,7 +956,7 @@ func TestSortedSetFlow_PartialBudget(t *testing.T) {
 		rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix() + int64(i)), Member: envelopeJSON(msg)})
 	}
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "", flow.requestChannels[0].inFlight)
 
 	// Wait for one poll cycle (200ms interval + buffer)
 	time.Sleep(250 * time.Millisecond)
@@ -973,12 +981,14 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	// This guarantees the re-queue path is exercised deterministically.
 	msgChan := make(chan *api.InternalRequest)
 
+	inFlight := new(atomic.Int64)
 	flow := &RedisSortedSetFlow{
 		rdb: rdb,
 		requestChannels: []requestChannelData{{
 			channel:   pipeline.RequestChannel{Channel: msgChan},
 			queueName: queue,
 			gate:      noopGate(),
+			inFlight:  inFlight,
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
@@ -998,7 +1008,7 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		flow.requestWorker(workerCtx, msgChan, queue, "")
+		flow.requestWorker(workerCtx, msgChan, queue, "", inFlight)
 		close(done)
 	}()
 
@@ -1159,6 +1169,7 @@ func TestSortedSetFlow_QueueIDSetOnDequeue(t *testing.T) {
 			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
 			queueName: queue,
 			queueID:   queueID,
+			inFlight:  new(atomic.Int64),
 		}},
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
@@ -1168,7 +1179,7 @@ func TestSortedSetFlow_QueueIDSetOnDequeue(t *testing.T) {
 	msg := api.RequestMessage{ID: "msg-qid", Created: time.Now().Unix(), Deadline: 9999999999}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
-	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, queueID)
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, queueID, flow.requestChannels[0].inFlight)
 
 	select {
 	case received := <-flow.requestChannels[0].channel.Channel:
