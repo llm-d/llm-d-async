@@ -408,7 +408,11 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 func (r *PubSubMQFlow) monitoringWorker(ctx context.Context) {
 	ticker := time.NewTicker(*monitoringPollInterval)
 	defer ticker.Stop()
-	defer r.monitoringClient.Close()
+	defer func() {
+		if err := r.monitoringClient.Close(); err != nil {
+			log.FromContext(ctx).V(logutil.DEFAULT).Error(err, "Failed to close monitoring client")
+		}
+	}()
 
 	for {
 		select {
