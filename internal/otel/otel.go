@@ -66,7 +66,7 @@ func DetachedContext(ctx context.Context, name string) (context.Context, trace.S
 
 // InitTracer sets up an OpenTelemetry TracerProvider with an OTLP gRPC exporter.
 // It reads the endpoint from the OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
-// If the endpoint is not set, tracing is disabled (no-op) and a nil shutdown function is returned.
+// If the endpoint is not set, tracing is disabled and a no-op shutdown function is returned.
 // The service name defaults to "llm-d-async" and can be overridden via OTEL_SERVICE_NAME.
 func InitTracer(ctx context.Context) (shutdown func(context.Context) error, err error) {
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")

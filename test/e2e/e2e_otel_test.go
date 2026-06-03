@@ -46,39 +46,36 @@ var _ = ginkgo.Describe("OpenTelemetry tracing", ginkgo.Ordered, func() {
 
 		popResult(ctx, rdb, integrationResultQueue)
 
-		// Give Jaeger time to index
-		time.Sleep(3 * time.Second)
-
-		// Query Jaeger for the specific trace ID we injected
+		// Poll Jaeger for the specific trace ID instead of a fixed sleep
 		jaegerQueryURL := fmt.Sprintf("%s/api/traces/%s", jaegerURL, knownTraceID)
-		resp, err := jaegerClient.Get(jaegerQueryURL)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer resp.Body.Close() //nolint:errcheck
-
-		body, err := io.ReadAll(resp.Body)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
-			"Jaeger API returned %d: %s", resp.StatusCode, string(body))
-
-		var result struct {
-			Data []struct {
-				TraceID string `json:"traceID"`
-				Spans   []struct {
-					OperationName string `json:"operationName"`
-				} `json:"spans"`
-			} `json:"data"`
-		}
-		gomega.Expect(json.Unmarshal(body, &result)).To(gomega.Succeed())
-		gomega.Expect(result.Data).NotTo(gomega.BeEmpty(),
-			"expected trace with ID %s in Jaeger — producer context was not propagated", knownTraceID)
-
-		// Verify the process-request span exists in this trace
 		var spanNames []string
-		for _, span := range result.Data[0].Spans {
-			spanNames = append(spanNames, span.OperationName)
-		}
-		gomega.Expect(spanNames).To(gomega.ContainElement("process-request"),
-			"expected 'process-request' span in trace, got: %v", spanNames)
+		gomega.Eventually(func(g gomega.Gomega) {
+			resp, err := jaegerClient.Get(jaegerQueryURL)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			defer resp.Body.Close() //nolint:errcheck
+
+			body, err := io.ReadAll(resp.Body)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+
+			var result struct {
+				Data []struct {
+					TraceID string `json:"traceID"`
+					Spans   []struct {
+						OperationName string `json:"operationName"`
+					} `json:"spans"`
+				} `json:"data"`
+			}
+			g.Expect(json.Unmarshal(body, &result)).To(gomega.Succeed())
+			g.Expect(result.Data).NotTo(gomega.BeEmpty(),
+				"trace %s not yet indexed in Jaeger", knownTraceID)
+
+			spanNames = nil
+			for _, span := range result.Data[0].Spans {
+				spanNames = append(spanNames, span.OperationName)
+			}
+			g.Expect(spanNames).To(gomega.ContainElement("process-request"))
+		}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
 
 		ginkgo.GinkgoLogr.Info("Trace context propagation verified",
 			"traceID", knownTraceID, "spans", spanNames)
@@ -94,7 +91,6 @@ var _ = ginkgo.Describe("OpenTelemetry tracing", ginkgo.Ordered, func() {
 		}
 		checkResp.Body.Close() //nolint:errcheck
 
-		// Enqueue without metadata — processor should create its own root span
 		msg := makeRequestMessage("otel-no-context-test", 2*time.Minute)
 		enqueueMessage(ctx, rdb, integrationRequestQueue, msg)
 
@@ -104,26 +100,25 @@ var _ = ginkgo.Describe("OpenTelemetry tracing", ginkgo.Ordered, func() {
 
 		popResult(ctx, rdb, integrationResultQueue)
 
-		time.Sleep(3 * time.Second)
-
-		// Query for any traces from the async-processor service
+		// Poll Jaeger for traces from async-processor instead of a fixed sleep
 		jaegerQueryURL := jaegerURL + "/api/traces?service=async-processor&limit=5&lookback=1m"
-		resp, err := jaegerClient.Get(jaegerQueryURL)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer resp.Body.Close() //nolint:errcheck
+		gomega.Eventually(func(g gomega.Gomega) {
+			resp, err := jaegerClient.Get(jaegerQueryURL)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			defer resp.Body.Close() //nolint:errcheck
 
-		body, err := io.ReadAll(resp.Body)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+			body, err := io.ReadAll(resp.Body)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
-		var result struct {
-			Data []json.RawMessage `json:"data"`
-		}
-		gomega.Expect(json.Unmarshal(body, &result)).To(gomega.Succeed())
-		gomega.Expect(result.Data).NotTo(gomega.BeEmpty(),
-			"expected at least 1 trace from async-processor — OTel export is not working")
+			var result struct {
+				Data []json.RawMessage `json:"data"`
+			}
+			g.Expect(json.Unmarshal(body, &result)).To(gomega.Succeed())
+			g.Expect(result.Data).NotTo(gomega.BeEmpty(),
+				"no traces from async-processor in Jaeger yet")
+		}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
 
-		ginkgo.GinkgoLogr.Info("OTel export verified (no producer context)",
-			"traceCount", len(result.Data))
+		ginkgo.GinkgoLogr.Info("OTel export verified (no producer context)")
 	})
 })

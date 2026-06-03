@@ -987,7 +987,7 @@ func spanAttr(s *tracetest.SpanStub, key string) string {
 func TestWorker_SpanOnSuccess(t *testing.T) {
 	exporter := setupTestTracer(t)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: nil, Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
@@ -1069,7 +1069,7 @@ func TestWorker_SpanOnFatalError(t *testing.T) {
 func TestWorker_SpanOnRetryableError(t *testing.T) {
 	exporter := setupTestTracer(t)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: nil, Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
@@ -1107,7 +1107,7 @@ func TestWorker_SpanOnRetryableError(t *testing.T) {
 func TestWorker_SpanOnServerError(t *testing.T) {
 	exporter := setupTestTracer(t)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusInternalServerError, Body: nil, Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
@@ -1142,7 +1142,7 @@ func TestWorker_SpanOnServerError(t *testing.T) {
 func TestWorker_TraceContextExtraction(t *testing.T) {
 	exporter := setupTestTracer(t)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: nil, Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
@@ -1242,7 +1242,7 @@ func TestWorker_SpanOnShutdownReenqueue(t *testing.T) {
 func TestWorker_SpanIncludesQueueName(t *testing.T) {
 	exporter := setupTestTracer(t)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: nil, Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)

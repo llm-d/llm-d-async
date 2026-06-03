@@ -56,7 +56,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				// Restore parent trace context from request metadata (producer injects W3C trace context).
 				reqCtx := ctx
 				if md := msg.PublicRequest.ReqMetadata(); len(md) > 0 {
-					reqCtx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(md))
+					reqCtx = otel.GetTextMapPropagator().Extract(reqCtx, propagation.MapCarrier(md))
 				}
 
 				spanAttrs := []attribute.KeyValue{

@@ -38,8 +38,7 @@ func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {
 // is wrapped with otelhttp, the outgoing request to the inference gateway
 // contains the W3C traceparent header.
 func TestWorkerDispatch_TraceparentInjected(t *testing.T) {
-	exporter := setupTestTracer(t)
-	_ = exporter
+	setupTestTracer(t)
 
 	var mu sync.Mutex
 	var receivedTraceparent string
