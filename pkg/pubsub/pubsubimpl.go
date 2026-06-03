@@ -14,7 +14,6 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
-	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -22,9 +21,9 @@ import (
 var pubSubClient *pubsub.Client
 
 var (
-	igwBaseURL          = flag.String("pubsub.igw-base-url", "", "Base URL for IGW. Mutually exclusive with pubsub.topics-config-file flag.")
+	_                   = flag.String("pubsub.igw-base-url", "", "Base URL for IGW. Mutually exclusive with pubsub.topics-config-file flag.")
 	projectID           = flag.String("pubsub.project-id", "", "GCP project ID for PubSub")
-	requestPathURL      = flag.String("pubsub.request-path-url", "/v1/completions", "inference request path url. Mutually exclusive with pubsub.topics-config-file flag.")
+	_                   = flag.String("pubsub.request-path-url", "/v1/completions", "inference request path url. Mutually exclusive with pubsub.topics-config-file flag.")
 	inferenceObjective  = flag.String("pubsub.inference-objective", "", "inference objective to use in requests. Mutually exclusive with pubsub.topics-config-file flag.")
 	requestSubscriberID = flag.String("pubsub.request-subscriber-id", "", "GCP PubSub request topic subscriber ID. Mutually exclusive with pubsub.topics-config-file flag.")
 	resultTopicID       = flag.String("pubsub.result-topic-id", "", "GCP PubSub topic ID for results")
@@ -38,9 +37,8 @@ const quotaExceededNackDelay = 10 * time.Second
 
 type TopicConfig struct {
 	SubscriberID       string            `json:"subscriber_id"`
+	PoolID             string            `json:"pool_id"`
 	InferenceObjective string            `json:"inference_objective"`
-	RequestPathURL     string            `json:"request_path_url"`
-	IGWBaseURL         string            `json:"igw_base_url"`
 	GateType           string            `json:"gate_type"`
 	GateParams         map[string]string `json:"gate_params,omitempty"`
 }
@@ -54,6 +52,7 @@ type PubSubMQFlow struct {
 	resultChannel   chan api.ResultMessage
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
+	pools           []pipeline.PoolConfig
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 }
@@ -71,6 +70,13 @@ type PubSubOption func(*PubSubMQFlow)
 func WithGateFactory(factory pipeline.GateFactory) PubSubOption {
 	return func(p *PubSubMQFlow) {
 		p.gateFactory = factory
+	}
+}
+
+// WithPools sets the pool configurations to resolve named pools.
+func WithPools(pools []pipeline.PoolConfig) PubSubOption {
+	return func(p *PubSubMQFlow) {
+		p.pools = pools
 	}
 }
 
@@ -94,7 +100,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			panic(fmt.Sprintf("failed to unmarshal topics config: %v", err))
 		}
 	} else {
-		configs = []TopicConfig{{SubscriberID: *requestSubscriberID, IGWBaseURL: *igwBaseURL, InferenceObjective: *inferenceObjective, RequestPathURL: *requestPathURL}}
+		configs = []TopicConfig{{SubscriberID: *requestSubscriberID, PoolID: "default", InferenceObjective: *inferenceObjective}}
 	}
 	p := &PubSubMQFlow{
 		resultTopicID:   *resultTopicID,
@@ -110,6 +116,22 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 
 	// Create per-topic channels with gates
 	for _, cfg := range configs {
+		poolID := cfg.PoolID
+		if poolID == "" {
+			panic(fmt.Sprintf("topic config for subscriber %q: pool_id must be specified", cfg.SubscriberID))
+		}
+
+		found := false
+		for _, pool := range p.pools {
+			if pool.ID == poolID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			panic(fmt.Sprintf("pool %q specified in topic config not found in pool configuration", poolID))
+		}
+
 		// Determine gate for this topic
 		var gate pipeline.DispatchGate
 		if p.gateFactory != nil && cfg.GateType != "" {
@@ -131,10 +153,9 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		p.requestChannels = append(p.requestChannels, RequestChannelData{
 			requestChannel: pipeline.RequestChannel{
 				Channel:            ch,
-				IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
 				InferenceObjective: cfg.InferenceObjective,
-				RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
 				Gate:               gate,
+				PoolID:             poolID,
 			},
 			subscriberID: cfg.SubscriberID,
 			gate:         gate,

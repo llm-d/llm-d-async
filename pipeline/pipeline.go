@@ -68,15 +68,23 @@ func ConstOpenGate() DispatchGate {
 }
 
 type RequestMergePolicy interface {
-	MergeRequestChannels(channels []RequestChannel) EmbelishedRequestChannel
+	MergeRequestChannels(channels []RequestChannel, pools map[string]PoolConfig) PoolDispatch
 }
 
 type RequestChannel struct {
 	Channel            chan *api.InternalRequest
-	IGWBaseURL         string
 	InferenceObjective string
-	RequestPathURL     string
 	Gate               DispatchGate
+	PoolID             string
+}
+
+// PoolDispatch is the merge policy's output: one buffered channel per
+// inference pool. Each channel carries fully-embellished messages
+// destined for that pool's worker pool. Backpressure on one pool's
+// channel does not affect other pools' channels — that isolation is
+// the whole reason for the per-pool topology.
+type PoolDispatch struct {
+	Channels map[string]chan EmbelishedRequestMessage
 }
 
 type EmbelishedRequestChannel struct {

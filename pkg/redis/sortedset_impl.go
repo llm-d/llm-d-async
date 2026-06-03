@@ -14,7 +14,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	"github.com/llm-d-incubation/llm-d-async/pkg/util"
 
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -23,8 +22,8 @@ import (
 )
 
 var (
-	ssIGWBaseURL         = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
-	ssRequestPathURL     = flag.String("redis.ss.request-path-url", "/v1/completions", "Request path URL")
+	_                    = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
+	_                    = flag.String("redis.ss.request-path-url", "/v1/completions", "Request path URL")
 	ssInferenceObjective = flag.String("redis.ss.inference-objective", "", "Inference objective header")
 	ssRequestQueueName   = flag.String("redis.ss.request-queue-name", "request-sortedset", "Request sorted set name")
 	ssResultQueueName    = flag.String("redis.ss.result-queue-name", "result-list", "Result list name")
@@ -80,9 +79,8 @@ type queueConfig struct {
 	ID                 string    `json:"id,omitempty"`
 	QueueName          string    `json:"queue_name,omitempty"`
 	ResultQueueName    string    `json:"result_queue_name,omitempty"`
+	PoolID             string    `json:"pool_id"`
 	InferenceObjective string    `json:"inference_objective"`
-	RequestPathURL     string    `json:"request_path_url"`
-	IGWBaseURL         string    `json:"igw_base_url"`
 	GateType           string    `json:"gate_type"`
 	GateParams         StringMap `json:"gate_params,omitempty"`
 }
@@ -107,6 +105,7 @@ type RedisSortedSetFlow struct {
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 	configMap       map[string]queueConfig
+	pools           []pipeline.PoolConfig
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 	enableTracing   bool
@@ -127,6 +126,13 @@ func WithGateFactory(factory pipeline.GateFactory) SortedSetOption {
 func WithSortedSetRedisTracing(enable bool) SortedSetOption {
 	return func(r *RedisSortedSetFlow) {
 		r.enableTracing = enable
+	}
+}
+
+// WithSortedSetPools sets the pool configurations to resolve named pools.
+func WithSortedSetPools(pools []pipeline.PoolConfig) SortedSetOption {
+	return func(r *RedisSortedSetFlow) {
+		r.pools = pools
 	}
 }
 
@@ -173,12 +179,27 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 			gate = pipeline.ConstOpenGate()
 		}
 
+		poolID := cfg.PoolID
+		if poolID == "" {
+			return nil, fmt.Errorf("queue config for queue %q: pool_id must be specified", cfg.QueueName)
+		}
+
+		found := false
+		for _, pool := range r.pools {
+			if pool.ID == poolID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("pool %q specified in queue config not found in pool configuration", poolID)
+		}
+
 		ch := pipeline.RequestChannel{
 			Channel:            make(chan *api.InternalRequest),
 			InferenceObjective: cfg.InferenceObjective,
-			RequestPathURL:     util.NormalizeURLPath(cfg.RequestPathURL),
-			IGWBaseURL:         util.NormalizeBaseURL(cfg.IGWBaseURL),
 			Gate:               gate,
+			PoolID:             poolID,
 		}
 
 		r.configMap[cfg.ID] = cfg
@@ -226,10 +247,9 @@ func loadQueueConfigs() ([]queueConfig, error) {
 		configs = []queueConfig{{
 			QueueName:          *ssRequestQueueName,
 			InferenceObjective: *ssInferenceObjective,
-			RequestPathURL:     *ssRequestPathURL,
-			IGWBaseURL:         *ssIGWBaseURL,
 			GateType:           *ssGateType,
 			GateParams:         parseGateParams(*ssGateParamsJSON),
+			PoolID:             "default",
 		}}
 	}
 	seenID := make(map[string]bool, len(configs))

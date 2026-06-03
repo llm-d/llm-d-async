@@ -315,3 +315,114 @@ func TestWorkerDispatch_RequeuesOnShutdown(t *testing.T) {
 	server.Close()
 	wg.Wait()
 }
+
+// TestWorkerDispatch_PoolIsolation verifies that saturating one pool's workers
+// does not affect or block processing in other pools.
+func TestWorkerDispatch_PoolIsolation(t *testing.T) {
+	// 1. Setup a blocked server (simulates slow/hung gateway for pool-blocked)
+	blockedHit := make(chan struct{})
+	blockedRelease := make(chan struct{})
+	blockedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(blockedHit)
+		<-blockedRelease
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"blocked-resolved"}`))
+	}))
+	defer blockedServer.Close()
+
+	// 2. Setup an active server (simulates healthy gateway for pool-active)
+	activeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"active-success"}`))
+	}))
+	defer activeServer.Close()
+
+	clientBlocked := asyncworker.NewHTTPInferenceClient(blockedServer.Client())
+	clientActive := asyncworker.NewHTTPInferenceClient(activeServer.Client())
+
+	// Channels for pool-blocked
+	reqChanBlocked := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChanBlocked := make(chan pipeline.RetryMessage, 1)
+	resultChanBlocked := make(chan asyncapi.ResultMessage, 1)
+
+	// Channels for pool-active
+	reqChanActive := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChanActive := make(chan pipeline.RetryMessage, 1)
+	resultChanActive := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Spawn 1 worker for pool-blocked
+	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+		clientBlocked, reqChanBlocked, retryChanBlocked, resultChanBlocked, 5*time.Minute)
+
+	// Spawn 1 worker for pool-active
+	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+		clientActive, reqChanActive, retryChanActive, resultChanActive, 5*time.Minute)
+
+	// 3. Send message 1 (to pool-blocked)
+	irBlocked := asyncapi.NewInternalRequest(
+		asyncapi.InternalRouting{RequestQueueName: "queue-blocked"},
+		&asyncapi.RequestMessage{
+			ID:       "msg-blocked",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Payload:  map[string]any{},
+		},
+	)
+	reqChanBlocked <- pipeline.EmbelishedRequestMessage{
+		InternalRequest: irBlocked,
+		RequestURL:      blockedServer.URL + "/completions",
+	}
+
+	// Wait until the blocked worker is processing and hits the blocked mock server
+	select {
+	case <-blockedHit:
+		// worker is now stuck inside the server handler
+	case <-ctx.Done():
+		t.Fatal("Blocked worker did not start processing")
+	}
+
+	// 4. Send message 2 (to pool-active)
+	irActive := asyncapi.NewInternalRequest(
+		asyncapi.InternalRouting{RequestQueueName: "queue-active"},
+		&asyncapi.RequestMessage{
+			ID:       "msg-active",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Payload:  map[string]any{},
+		},
+	)
+	reqChanActive <- pipeline.EmbelishedRequestMessage{
+		InternalRequest: irActive,
+		RequestURL:      activeServer.URL + "/completions",
+	}
+
+	// 5. Verify that msg-active succeeds immediately
+	select {
+	case result := <-resultChanActive:
+		assert.Equal(t, "msg-active", result.ID)
+		assert.Equal(t, `{"result":"active-success"}`, result.Payload)
+	case <-ctx.Done():
+		t.Fatal("Active pool was blocked by the saturated pool")
+	}
+
+	// Verify that the blocked request has NOT completed yet
+	select {
+	case <-resultChanBlocked:
+		t.Fatal("Blocked request should not have completed yet")
+	default:
+		// success: blocked channel is still empty
+	}
+
+	// 6. Release blocked server and verify blocked request completes
+	close(blockedRelease)
+	select {
+	case result := <-resultChanBlocked:
+		assert.Equal(t, "msg-blocked", result.ID)
+		assert.Equal(t, `{"result":"blocked-resolved"}`, result.Payload)
+	case <-ctx.Done():
+		t.Fatal("Blocked request did not complete after release")
+	}
+}

@@ -27,7 +27,13 @@ func TestRedisImpl(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	flow, err := redis.NewRedisMQFlow()
+	flow, err := redis.NewRedisMQFlow(redis.WithPools([]pipeline.PoolConfig{
+		{
+			ID:             "default",
+			IGWBaseURL:     "http://localhost:30800",
+			RequestPathURL: "/v1/completions",
+		},
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +70,18 @@ func TestRedisImpl(t *testing.T) {
 	}
 	time.Sleep(3 * time.Second)
 
-	mergedChannel := ap.NewRandomRobinPolicy().MergeRequestChannels(flow.RequestChannels())
+	pools := map[string]pipeline.PoolConfig{
+		"default": {
+			ID:             "default",
+			IGWBaseURL:     "http://localhost:30800",
+			RequestPathURL: "/v1/completions",
+		},
+	}
+	dispatch := ap.NewRandomRobinPolicy().MergeRequestChannels(flow.RequestChannels(), pools)
+	mergedChannel := dispatch.Channels["default"]
 
 	select {
-	case req := <-mergedChannel.Channel:
+	case req := <-mergedChannel:
 		if req.PublicRequest == nil || req.PublicRequest.ReqID() != "test-id" {
 			t.Errorf("Expected message id to be test-id, got %v", req.PublicRequest)
 		}
@@ -85,7 +99,11 @@ func TestRedisImplWithAuth(t *testing.T) {
 	ctx := context.Background()
 	_ = flag.Set("redis.url", redisURL)
 
-	flow, err := redis.NewRedisSortedSetFlow()
+	flow, err := redis.NewRedisSortedSetFlow(redis.WithSortedSetPools([]pipeline.PoolConfig{
+		{
+			ID: "default",
+		},
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}

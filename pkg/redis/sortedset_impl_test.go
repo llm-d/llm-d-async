@@ -663,7 +663,7 @@ func TestSortedSetFlow_Integration(t *testing.T) {
 	*RedisURL = "redis://" + s.Addr()
 	defer func() { *RedisURL = origURL }()
 
-	flow, err := NewRedisSortedSetFlow()
+	flow, err := NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "default"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1272,5 +1272,37 @@ func TestSortedSetFlow_ResultQueueFallsBackToMessageLevel(t *testing.T) {
 	globalLen, _ := rdb.LLen(ctx, "global-default").Result()
 	if globalLen != 1 {
 		t.Errorf("Expected 1 message in global default queue, got %d", globalLen)
+	}
+}
+
+func TestNewRedisSortedSetFlow_PoolRequiredAndValidation(t *testing.T) {
+	origConfig := *ssQueuesConfig
+	origURL := *RedisURL
+	defer func() {
+		*ssQueuesConfig = origConfig
+		*RedisURL = origURL
+	}()
+
+	*RedisURL = "redis://localhost:6379"
+
+	// Case 1: pool_id is missing from configuration
+	*ssQueuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj"}]`
+	_, err := NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	if err == nil {
+		t.Error("Expected error when pool_id is missing in queue config, got nil")
+	}
+
+	// Case 2: pool_id is specified but pool does not exist
+	*ssQueuesConfig = `[{"queue_name":"test-queue","pool_id":"non-existent","inference_objective":"obj"}]`
+	_, err = NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	if err == nil {
+		t.Error("Expected error when specified pool_id does not exist, got nil")
+	}
+
+	// Case 3: pool_id specified and pool exists
+	*ssQueuesConfig = `[{"queue_name":"test-queue","pool_id":"test-pool","inference_objective":"obj"}]`
+	_, err = NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	if err != nil {
+		t.Errorf("Unexpected error when pool_id exists: %v", err)
 	}
 }

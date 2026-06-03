@@ -739,3 +739,35 @@ func TestMQRetryWorker_ExitsPromptlyOnCancelDuringSleep(t *testing.T) {
 		t.Fatal("retryWorker did not exit within 2s of context cancellation")
 	}
 }
+
+func TestNewRedisMQFlow_PoolRequiredAndValidation(t *testing.T) {
+	origConfig := *queuesConfig
+	origURL := *RedisURL
+	defer func() {
+		*queuesConfig = origConfig
+		*RedisURL = origURL
+	}()
+
+	*RedisURL = "redis://localhost:6379"
+
+	// Case 1: pool_id is missing from configuration
+	*queuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj"}]`
+	_, err := NewRedisMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	if err == nil {
+		t.Error("Expected error when pool_id is missing in queue config, got nil")
+	}
+
+	// Case 2: pool_id is specified but pool does not exist
+	*queuesConfig = `[{"queue_name":"test-queue","pool_id":"non-existent","inference_objective":"obj"}]`
+	_, err = NewRedisMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	if err == nil {
+		t.Error("Expected error when specified pool_id does not exist, got nil")
+	}
+
+	// Case 3: pool_id specified and pool exists
+	*queuesConfig = `[{"queue_name":"test-queue","pool_id":"test-pool","inference_objective":"obj"}]`
+	_, err = NewRedisMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	if err != nil {
+		t.Errorf("Unexpected error when pool_id exists: %v", err)
+	}
+}

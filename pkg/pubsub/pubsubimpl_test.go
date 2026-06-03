@@ -3,6 +3,8 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,4 +124,86 @@ func TestProcessMessages_QuotaGating(t *testing.T) {
 			_ = flow.processMessages(ctx, receive, ch, gate)
 		})
 	}
+}
+
+func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
+	origEmulatorHost := os.Getenv("PUBSUB_EMULATOR_HOST")
+	_ = os.Setenv("PUBSUB_EMULATOR_HOST", "localhost:8085")
+	origConfig := *topicsConfigFile
+	origProject := *projectID
+	defer func() {
+		*topicsConfigFile = origConfig
+		*projectID = origProject
+		if origEmulatorHost != "" {
+			_ = os.Setenv("PUBSUB_EMULATOR_HOST", origEmulatorHost)
+		} else {
+			_ = os.Unsetenv("PUBSUB_EMULATOR_HOST")
+		}
+	}()
+
+	*projectID = "test-project"
+
+	tmpFile, err := os.CreateTemp("", "topics-config-*.json")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	// Case 1: pool_id is missing
+	missingPoolConfig := `[{"subscriber_id":"sub-1","inference_objective":"obj"}]`
+	if err := os.WriteFile(tmpFile.Name(), []byte(missingPoolConfig), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	*topicsConfigFile = tmpFile.Name()
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Expected panic when pool_id is missing in config, got none")
+			} else {
+				msg, ok := r.(string)
+				if !ok || !strings.Contains(msg, "pool_id must be specified") {
+					t.Errorf("Unexpected panic message for missing pool_id: %v", r)
+				}
+			}
+		}()
+		NewGCPPubSubMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	}()
+
+	// Case 2: pool_id specified but pool does not exist
+	nonExistentPoolConfig := `[{"subscriber_id":"sub-1","pool_id":"non-existent","inference_objective":"obj"}]`
+	if err := os.WriteFile(tmpFile.Name(), []byte(nonExistentPoolConfig), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	*topicsConfigFile = tmpFile.Name()
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Expected panic when specified pool_id does not exist, got none")
+			} else {
+				msg, ok := r.(string)
+				if !ok || !strings.Contains(msg, "not found in pool configuration") {
+					t.Errorf("Unexpected panic message for non-existent pool_id: %v", r)
+				}
+			}
+		}()
+		NewGCPPubSubMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	}()
+
+	// Case 3: pool_id specified and pool exists
+	validConfig := `[{"subscriber_id":"sub-1","pool_id":"test-pool","inference_objective":"obj"}]`
+	if err := os.WriteFile(tmpFile.Name(), []byte(validConfig), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	*topicsConfigFile = tmpFile.Name()
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Unexpected panic when pool_id exists: %v", r)
+			}
+		}()
+		NewGCPPubSubMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	}()
 }
