@@ -32,7 +32,7 @@ import (
 	"github.com/go-logr/logr"
 )
 
-const defaultServiceName = "llm-d-async"
+const defaultServiceName = "async-processor"
 
 const (
 	AttrRequestID     = "request.id"
