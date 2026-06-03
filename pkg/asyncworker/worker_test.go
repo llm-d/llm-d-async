@@ -1237,6 +1237,9 @@ func TestWorker_SpanOnShutdownReenqueue(t *testing.T) {
 			t.Error("re-enqueue span link does not reference process-request span")
 		}
 	}
+	if spanAttr(reenqueueSpan, uotel.AttrRequestID) != "span-shutdown" {
+		t.Errorf("expected request.id=span-shutdown on re-enqueue span, got %s", spanAttr(reenqueueSpan, uotel.AttrRequestID))
+	}
 }
 
 func TestWorker_SpanIncludesQueueName(t *testing.T) {
@@ -1254,7 +1257,7 @@ func TestWorker_SpanIncludesQueueName(t *testing.T) {
 	go Worker(ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
 	requestChannel <- newEmbR(
-		asyncapi.InternalRouting{QueueID: "my-test-queue"},
+		asyncapi.InternalRouting{QueueID: "my-test-qid", RequestQueueName: "my-test-queue"},
 		asyncapi.RequestMessage{
 			ID: "span-queue", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
 			Payload: map[string]any{"model": "test", "prompt": "hi"},
@@ -1270,6 +1273,9 @@ func TestWorker_SpanIncludesQueueName(t *testing.T) {
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
+	}
+	if spanAttr(s, uotel.AttrQueueID) != "my-test-qid" {
+		t.Errorf("expected queue.id=my-test-qid, got %s", spanAttr(s, uotel.AttrQueueID))
 	}
 	if spanAttr(s, uotel.AttrQueueName) != "my-test-queue" {
 		t.Errorf("expected queue.name=my-test-queue, got %s", spanAttr(s, uotel.AttrQueueName))

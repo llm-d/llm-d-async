@@ -332,7 +332,8 @@ The Async Processor supports distributed tracing via [OpenTelemetry](https://ope
 | Attribute | Description |
 |-----------|-------------|
 | `request.id` | Request identifier |
-| `queue.name` | Source queue identifier |
+| `queue.id` | Queue identifier (matches Prometheus `queue_id` label) |
+| `queue.name` | Queue name (matches Prometheus `queue_name` label) |
 | `retry.count` | Current retry attempt (0 for first attempt) |
 | `error.category` | Error classification on failure (`RATE_LIMIT`, `SERVER_ERROR`, `UNKNOWN`, etc.) |
 

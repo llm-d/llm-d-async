@@ -36,8 +36,8 @@ const defaultServiceName = "llm-d-async"
 
 const (
 	AttrRequestID     = "request.id"
+	AttrQueueID       = "queue.id"
 	AttrQueueName     = "queue.name"
-	AttrQueueType     = "queue.type"
 	AttrRetryCount    = "retry.count"
 	AttrErrorCategory = "error.category"
 )
@@ -86,6 +86,7 @@ func InitTracer(ctx context.Context) (shutdown func(context.Context) error, err 
 	}
 
 	res, err := resource.New(ctx,
+		resource.WithFromEnv(),
 		resource.WithAttributes(semconv.ServiceName(serviceName)),
 	)
 	if err != nil {

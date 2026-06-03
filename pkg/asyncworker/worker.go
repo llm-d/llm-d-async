@@ -63,8 +63,11 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 					attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
 					attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
 				}
-				if msg.QueueID != "" {
-					spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueName, msg.QueueID))
+				if queueID != "" {
+					spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueID, queueID))
+				}
+				if queueName != "" {
+					spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueName, queueName))
 				}
 				reqCtx, span := uotel.StartSpan(reqCtx, "process-request",
 					trace.WithAttributes(spanAttrs...),
@@ -105,6 +108,7 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				// retryMessage's select would take ctx.Done() immediately.
 				if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 					_, bgSpan := uotel.DetachedContext(reqCtx, "re-enqueue")
+					bgSpan.SetAttributes(attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()))
 					defer bgSpan.End()
 					retryChannel <- pipeline.RetryMessage{
 						EmbelishedRequestMessage: msg,
