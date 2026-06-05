@@ -90,6 +90,7 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChan
 						InternalRequest: ir,
 						HttpHeaders:     headers,
 						RequestURL:      requestURL,
+						PoolID:          poolID,
 					}
 					mergedChannel <- erm
 				}

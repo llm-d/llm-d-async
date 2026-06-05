@@ -199,7 +199,7 @@ func (r *PubSubMQFlow) Start(ctx context.Context) {
 	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
-		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.Channel, channelData.gate)
+		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.PoolID, channelData.requestChannel.Channel, channelData.gate)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	r.drainWg.Add(2)
@@ -279,7 +279,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID, poolID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) {
 	logger := log.FromContext(ctx)
 
 	sub := pubSubClient.Subscriber(subscriberID)
@@ -314,7 +314,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			continue
 		}
 
-		err := r.processMessages(receiveCtx, sub.Receive, ch, gate)
+		err := r.processMessages(receiveCtx, poolID, sub.Receive, ch, gate)
 
 		cancel()
 		// TODO
@@ -327,7 +327,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 type receiveFunc func(context.Context, func(context.Context, *pubsub.Message)) error
 
-func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, ch chan *api.InternalRequest, gate pipeline.DispatchGate) error {
+func (r *PubSubMQFlow) processMessages(ctx context.Context, poolID string, receive receiveFunc, ch chan *api.InternalRequest, gate pipeline.DispatchGate) error {
 	logger := log.FromContext(ctx)
 	return receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 
@@ -383,7 +383,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		if !result {
 			msg.Nack()
 		} else {
-			metrics.RecordMessageLatency(float64(time.Since(msg.PublishTime).Milliseconds()), ir.QueueID, ir.RequestQueueName)
+			metrics.RecordMessageLatency(float64(time.Since(msg.PublishTime).Milliseconds()), ir.QueueID, ir.RequestQueueName, poolID)
 			msg.Ack()
 		}
 	})

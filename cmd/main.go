@@ -228,7 +228,7 @@ func main() {
 	totalConcurrency := 0
 	poolsMap := make(map[string]pipeline.PoolConfig)
 	for _, p := range pools {
-		if p.Workers == 0 {
+		if p.Workers <= 0 {
 			p.Workers = concurrency
 		}
 		poolsMap[p.ID] = p
@@ -259,9 +259,6 @@ func main() {
 			os.Exit(1)
 		}
 		workersCount := pool.Workers
-		if workersCount <= 0 {
-			workersCount = concurrency
-		}
 
 		setupLog.Info("Spawning workers for pool", "poolID", poolID, "workers", workersCount)
 		for w := 1; w <= workersCount; w++ {

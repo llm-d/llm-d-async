@@ -99,6 +99,7 @@ type EmbelishedRequestMessage struct {
 	*api.InternalRequest
 	HttpHeaders map[string]string
 	RequestURL  string
+	PoolID      string
 }
 
 // RetryMessage carries an embellished request and backoff for re-queueing.

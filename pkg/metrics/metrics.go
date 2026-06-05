@@ -14,9 +14,10 @@ const (
 
 	LabelQueueID   = "queue_id"
 	LabelQueueName = "queue_name"
+	LabelPoolName  = "pool_name"
 )
 
-var queueLabels = []string{LabelQueueID, LabelQueueName}
+var queueLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName}
 
 var (
 	Retries = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -50,32 +51,32 @@ var (
 	}, queueLabels)
 )
 
-func RecordRetry(queueID, queueName string) {
-	Retries.WithLabelValues(queueID, queueName).Inc()
+func RecordRetry(queueID, queueName, poolName string) {
+	Retries.WithLabelValues(queueID, queueName, poolName).Inc()
 }
 
-func RecordAsyncReq(queueID, queueName string) {
-	AsyncReqs.WithLabelValues(queueID, queueName).Inc()
+func RecordAsyncReq(queueID, queueName, poolName string) {
+	AsyncReqs.WithLabelValues(queueID, queueName, poolName).Inc()
 }
 
-func RecordExceededDeadlineReq(queueID, queueName string) {
-	ExceededDeadlineReqs.WithLabelValues(queueID, queueName).Inc()
+func RecordExceededDeadlineReq(queueID, queueName, poolName string) {
+	ExceededDeadlineReqs.WithLabelValues(queueID, queueName, poolName).Inc()
 }
 
-func RecordFailedReq(queueID, queueName string) {
-	FailedReqs.WithLabelValues(queueID, queueName).Inc()
+func RecordFailedReq(queueID, queueName, poolName string) {
+	FailedReqs.WithLabelValues(queueID, queueName, poolName).Inc()
 }
 
-func RecordSuccessfulReq(queueID, queueName string) {
-	SuccessfulReqs.WithLabelValues(queueID, queueName).Inc()
+func RecordSuccessfulReq(queueID, queueName, poolName string) {
+	SuccessfulReqs.WithLabelValues(queueID, queueName, poolName).Inc()
 }
 
-func RecordSheddedReq(queueID, queueName string) {
-	SheddedRequests.WithLabelValues(queueID, queueName).Inc()
+func RecordSheddedReq(queueID, queueName, poolName string) {
+	SheddedRequests.WithLabelValues(queueID, queueName, poolName).Inc()
 }
 
-func RecordMessageLatency(millis float64, queueID, queueName string) {
-	MessageLatencyTime.WithLabelValues(queueID, queueName).Observe(millis)
+func RecordMessageLatency(millis float64, queueID, queueName, poolName string) {
+	MessageLatencyTime.WithLabelValues(queueID, queueName, poolName).Observe(millis)
 }
 
 // GetCollectors returns all custom collectors for the async processor.

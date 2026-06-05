@@ -121,7 +121,7 @@ func TestProcessMessages_QuotaGating(t *testing.T) {
 				}
 			}()
 
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			_ = flow.processMessages(ctx, "test-pool", receive, ch, gate)
 		})
 	}
 }

@@ -35,6 +35,7 @@ func newEmb(rm asyncapi.RequestMessage, requestURL string, h map[string]string) 
 		InternalRequest: asyncapi.NewInternalRequest(asyncapi.InternalRouting{}, &rm),
 		HttpHeaders:     h,
 		RequestURL:      requestURL,
+		PoolID:          "test-pool",
 	}
 }
 
@@ -47,6 +48,7 @@ func newEmbR(routing asyncapi.InternalRouting, rm asyncapi.RequestMessage, reque
 		InternalRequest: asyncapi.NewInternalRequest(routing, &rm),
 		HttpHeaders:     h,
 		RequestURL:      requestURL,
+		PoolID:          "test-pool",
 	}
 }
 
@@ -720,7 +722,7 @@ func TestWorker_RetriesOnShutdown(t *testing.T) {
 }
 
 func counterValue(cv *prometheus.CounterVec, queueID, queueName string) float64 {
-	c, err := cv.GetMetricWithLabelValues(queueID, queueName)
+	c, err := cv.GetMetricWithLabelValues(queueID, queueName, "test-pool")
 	if err != nil {
 		return 0
 	}
