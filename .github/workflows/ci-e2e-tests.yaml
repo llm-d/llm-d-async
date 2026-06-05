@@ -1,0 +1,122 @@
+name: CI - E2E Tests
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: 'Ginkgo focus pattern (empty = full suite)'
+        required: false
+        default: ''
+      skip:
+        description: 'Ginkgo skip pattern'
+        required: false
+        default: ''
+
+concurrency:
+  group: e2e-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Extract Go version from go.mod
+        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+          cache-dependency-path: ./go.sum
+
+      - name: Install kind
+        run: |
+          KIND_VERSION=v0.27.0
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Determine test scope
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.focus }}" ]]; then
+            echo "FOCUS=${{ inputs.focus }}" >> $GITHUB_ENV
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.skip }}" ]]; then
+            echo "SKIP=${{ inputs.skip }}" >> $GITHUB_ENV
+          fi
+
+      - name: Run E2E tests
+        env:
+          E2E_SKIP_CLEANUP: "true"
+          SIM_IMAGE: ghcr.io/llm-d/llm-d-inference-sim:v0.9.1
+        run: make test-e2e
+
+      - name: Collect KIND cluster logs
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-artifacts
+          kind export logs /tmp/e2e-artifacts/kind-logs --name e2e-integration-tests || true
+          KUBECONFIG="/tmp/kind-kubeconfig-e2e-integration-tests"
+          kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration get pods -o wide > /tmp/e2e-artifacts/pods.txt 2>&1 || true
+          kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration describe pods > /tmp/e2e-artifacts/pod-descriptions.txt 2>&1 || true
+          kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration get events --sort-by='.lastTimestamp' > /tmp/e2e-artifacts/events.txt 2>&1 || true
+          kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration logs -l app.kubernetes.io/name=async-processor --tail=500 > /tmp/e2e-artifacts/processor-logs.txt 2>&1 || true
+
+      - name: Upload E2E artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-artifacts-${{ github.run_id }}
+          path: /tmp/e2e-artifacts/
+          retention-days: 7
+
+      - name: Create issue on nightly failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh issue list --state open --search "Nightly E2E tests failed" --json number --jq '.[0].number')
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" \
+              --body "Still failing. **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} | **Commit:** ${{ github.sha }}"
+          else
+            gh issue create \
+              --title "Nightly E2E tests failed" \
+              --body "$(cat <<'EOF'
+          The nightly E2E test run failed.
+
+          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          **Commit:** ${{ github.sha }}
+
+          Check the uploaded artifacts for KIND cluster logs and pod details.
+          EOF
+          )" \
+              --label bug
+          fi
+
+      - name: Cleanup KIND cluster
+        if: always()
+        run: kind delete cluster --name e2e-integration-tests || true
