@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -716,6 +717,86 @@ func TestWorker_RetriesOnShutdown(t *testing.T) {
 		t.Errorf("Expected retry, got fatal result: %s", r.Payload)
 	case <-time.After(5 * time.Second):
 		t.Errorf("Worker did not retry within 5s after shutdown")
+	}
+}
+
+func TestWorker_DrainsBufferedMessagesOnShutdown(t *testing.T) {
+	tests := []struct {
+		name        string
+		concurrency int
+		messages    int
+	}{
+		{"single worker with buffered messages", 1, 3},
+		{"multiple workers fewer than messages", 2, 5},
+		{"multiple workers more than messages", 4, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inFlightCount := min(tt.concurrency, tt.messages)
+			reqStarted := make(chan struct{}, inFlightCount)
+			httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+				select {
+				case reqStarted <- struct{}{}:
+				default:
+				}
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			})
+			inferenceClient := NewHTTPInferenceClient(httpclient)
+			requestChannel := make(chan pipeline.EmbelishedRequestMessage, tt.messages)
+			retryChannel := make(chan pipeline.RetryMessage, tt.messages)
+			resultChannel := make(chan asyncapi.ResultMessage, tt.messages)
+
+			ctx, cancel := context.WithCancel(context.Background())
+
+			var wg sync.WaitGroup
+			for w := 0; w < tt.concurrency; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+				}()
+			}
+
+			ids := make([]string, tt.messages)
+			for i := range tt.messages {
+				ids[i] = fmt.Sprintf("drain-%d", i)
+				requestChannel <- newEmb(asyncapi.RequestMessage{
+					ID:       ids[i],
+					Created:  time.Now().Unix(),
+					Deadline: time.Now().Add(5 * time.Minute).Unix(),
+					Payload:  map[string]any{"model": "test", "prompt": "hi"},
+				}, "http://localhost:30800/v1/completions", map[string]string{})
+			}
+
+			for range inFlightCount {
+				<-reqStarted
+			}
+			cancel()
+
+			done := make(chan struct{})
+			go func() { wg.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Workers did not exit within 5s")
+			}
+
+			got := make(map[string]bool)
+			for range tt.messages {
+				select {
+				case msg := <-retryChannel:
+					got[msg.PublicRequest.ReqID()] = true
+				default:
+				}
+			}
+			for _, id := range ids {
+				if !got[id] {
+					t.Errorf("message %s was not re-queued on shutdown", id)
+				}
+			}
+		})
 	}
 }
 

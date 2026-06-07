@@ -34,8 +34,21 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 	for {
 		select {
 		case <-ctx.Done():
-			logger.V(logutil.DEFAULT).Info("Worker finishing.")
-			return
+			logger.V(logutil.DEFAULT).Info("Worker finishing, draining request channel.")
+			for {
+				select {
+				case msg := <-requestChannel:
+					if msg.InternalRequest == nil || msg.PublicRequest == nil {
+						continue
+					}
+					retryChannel <- pipeline.RetryMessage{
+						EmbelishedRequestMessage: msg,
+						BackoffDurationSeconds:   0,
+					}
+				default:
+					return
+				}
+			}
 		case msg := <-requestChannel:
 			if msg.InternalRequest == nil || msg.PublicRequest == nil {
 				continue

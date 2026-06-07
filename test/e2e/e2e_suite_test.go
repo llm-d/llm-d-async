@@ -58,7 +58,7 @@ var (
 	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d-incubation/async-processor:e2e-test", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "registry.k8s.io/gateway-api-inference-extension/epp:v1.5.0", ginkgo.GinkgoLogr)
-	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.0.0-test", ginkgo.GinkgoLogr)
+	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.1", ginkgo.GinkgoLogr)
 	gaieRoot         = os.Getenv("GAIE_ROOT")
 	simRoot          = os.Getenv("SIM_ROOT")
 

@@ -19,6 +19,76 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestWorkerDispatch_DrainsBufferedOnShutdown verifies that when the parent
+// context is cancelled with multiple messages buffered in the request channel
+// (only one in-flight), all messages are re-queued via the retry channel.
+// This exercises the drain loop added to the Worker's ctx.Done() handler.
+func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
+	serverHit := make(chan struct{})
+	serverDone := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case serverHit <- struct{}{}:
+		default:
+		}
+		<-serverDone
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer func() {
+		close(serverDone)
+		server.Close()
+	}()
+
+	client := asyncworker.NewHTTPInferenceClient(server.Client())
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 3)
+	retryChannel := make(chan pipeline.RetryMessage, 3)
+	resultChannel := make(chan asyncapi.ResultMessage, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+			client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
+	}()
+
+	ids := []string{"drain-int-1", "drain-int-2", "drain-int-3"}
+	for _, id := range ids {
+		ir := asyncapi.NewInternalRequest(
+			asyncapi.InternalRouting{RequestQueueName: "test-queue"},
+			&asyncapi.RequestMessage{
+				ID:       id,
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(5 * time.Minute).Unix(),
+				Payload:  map[string]any{"model": "test", "prompt": "hello"},
+			},
+		)
+		requestChannel <- pipeline.EmbelishedRequestMessage{
+			InternalRequest: ir,
+			HttpHeaders:     map[string]string{"Content-Type": "application/json"},
+			RequestURL:      server.URL + "/v1/completions",
+		}
+	}
+
+	<-serverHit
+	cancel()
+	wg.Wait()
+
+	got := make(map[string]bool)
+	for range ids {
+		select {
+		case msg := <-retryChannel:
+			got[msg.PublicRequest.ReqID()] = true
+		default:
+		}
+	}
+	for _, id := range ids {
+		assert.True(t, got[id], "message %s should have been re-queued on shutdown", id)
+	}
+}
+
 // TestWorkerDispatch_MockIGW spawns an httptest.Server as a mock inference
 // gateway and verifies that the Worker correctly assembles the request URL,
 // forwards headers, sends the payload, and routes the result back.
