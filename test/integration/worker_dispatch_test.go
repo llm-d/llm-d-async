@@ -24,7 +24,7 @@ import (
 // (only one in-flight), all messages are re-queued via the retry channel.
 // This exercises the drain loop added to the Worker's ctx.Done() handler.
 func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
-	serverHit := make(chan struct{})
+	serverHit := make(chan struct{}, 1)
 	serverDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -77,11 +77,13 @@ func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
 	wg.Wait()
 
 	got := make(map[string]bool)
+	timeout := time.After(5 * time.Second)
 	for range ids {
 		select {
 		case msg := <-retryChannel:
 			got[msg.PublicRequest.ReqID()] = true
-		default:
+		case <-timeout:
+			t.Fatal("timed out waiting for re-queued messages")
 		}
 	}
 	for _, id := range ids {

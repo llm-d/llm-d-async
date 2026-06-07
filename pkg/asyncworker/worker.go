@@ -37,13 +37,20 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 			logger.V(logutil.DEFAULT).Info("Worker finishing, draining request channel.")
 			for {
 				select {
-				case msg := <-requestChannel:
+				case msg, ok := <-requestChannel:
+					if !ok {
+						return
+					}
 					if msg.InternalRequest == nil || msg.PublicRequest == nil {
 						continue
 					}
-					retryChannel <- pipeline.RetryMessage{
+					select {
+					case retryChannel <- pipeline.RetryMessage{
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,
+					}:
+					default:
+						logger.V(logutil.DEFAULT).Error(nil, "retry channel full, dropping message on shutdown", "id", msg.PublicRequest.ReqID())
 					}
 				default:
 					return

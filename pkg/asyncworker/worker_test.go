@@ -784,11 +784,13 @@ func TestWorker_DrainsBufferedMessagesOnShutdown(t *testing.T) {
 			}
 
 			got := make(map[string]bool)
+			timeout := time.After(5 * time.Second)
 			for range tt.messages {
 				select {
 				case msg := <-retryChannel:
 					got[msg.PublicRequest.ReqID()] = true
-				default:
+				case <-timeout:
+					t.Fatal("timed out waiting for re-queued messages")
 				}
 			}
 			for _, id := range ids {
