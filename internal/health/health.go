@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -57,9 +58,21 @@ func (s *Server) SetNotReady() {
 	s.logger.Info("Readiness set to false")
 }
 
-func (s *Server) Start() error {
-	s.logger.Info("Health server starting", "addr", s.server.Addr)
-	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+// ListenAndServe binds the health port and returns the listener.
+// The caller should invoke Serve in a goroutine. This split lets
+// main() detect bind failures synchronously before proceeding.
+func (s *Server) ListenAndServe() (net.Listener, error) {
+	ln, err := net.Listen("tcp", s.server.Addr)
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("Health server listening", "addr", ln.Addr().String())
+	return ln, nil
+}
+
+// Serve accepts connections on the listener. Blocks until shutdown.
+func (s *Server) Serve(ln net.Listener) error {
+	if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
@@ -75,15 +88,7 @@ func writeJSON(w http.ResponseWriter, code int, resp response) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if s.checker != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), checkerTimeout)
-		defer cancel()
-		if err := s.checker(ctx); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, response{Status: "error", Error: err.Error()})
-			return
-		}
-	}
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, response{Status: "ok"})
 }
 

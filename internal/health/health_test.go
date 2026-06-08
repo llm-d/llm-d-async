@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,44 +35,17 @@ func parseResponse(t *testing.T, rec *httptest.ResponseRecorder) response {
 	return resp
 }
 
-func TestHealthz_NoChecker(t *testing.T) {
-	s := NewServer(0, nil, logr.Discard())
-	rec := httptest.NewRecorder()
-	s.handleHealthz(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-	resp := parseResponse(t, rec)
-	if resp.Status != "ok" {
-		t.Fatalf("expected status ok, got %s", resp.Status)
-	}
-}
-
-func TestHealthz_HealthyChecker(t *testing.T) {
-	s := NewServer(0, healthyChecker, logr.Discard())
-	rec := httptest.NewRecorder()
-	s.handleHealthz(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-}
-
-func TestHealthz_UnhealthyChecker(t *testing.T) {
+func TestHealthz_AlwaysOK(t *testing.T) {
 	s := NewServer(0, unhealthyChecker, logr.Discard())
 	rec := httptest.NewRecorder()
 	s.handleHealthz(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 regardless of checker, got %d", rec.Code)
 	}
 	resp := parseResponse(t, rec)
-	if resp.Status != "error" {
-		t.Fatalf("expected status error, got %s", resp.Status)
-	}
-	if resp.Error == "" {
-		t.Fatal("expected non-empty error message")
+	if resp.Status != "ok" {
+		t.Fatalf("expected status ok, got %s", resp.Status)
 	}
 }
 
@@ -150,12 +122,13 @@ func TestReadyz_ReadyThenNotReady(t *testing.T) {
 	}
 }
 
-func TestHealthz_CheckerTimeout(t *testing.T) {
+func TestReadyz_CheckerTimeout(t *testing.T) {
 	s := NewServer(0, slowChecker, logr.Discard())
+	s.SetReady()
 	rec := httptest.NewRecorder()
 
 	start := time.Now()
-	s.handleHealthz(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	s.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	elapsed := time.Since(start)
 
 	if rec.Code != http.StatusServiceUnavailable {
@@ -167,32 +140,20 @@ func TestHealthz_CheckerTimeout(t *testing.T) {
 }
 
 func TestServer_StartAndShutdown(t *testing.T) {
-	ln, err := net.Listen("tcp", ":0")
-	if err != nil {
-		t.Fatalf("failed to find free port: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatalf("failed to close listener: %v", err)
-	}
+	s := NewServer(0, nil, logr.Discard())
 
-	s := NewServer(port, nil, logr.Discard())
+	ln, err := s.ListenAndServe()
+	if err != nil {
+		t.Fatalf("failed to bind: %v", err)
+	}
+	addr := ln.Addr().String()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- s.Start() }()
+	go func() { errCh <- s.Serve(ln) }()
 
-	// Wait for server to be ready
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/healthz", port))
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	client := &http.Client{Timeout: 5 * time.Second}
 
-	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/healthz", port))
+	resp, err := client.Get(fmt.Sprintf("http://%s/healthz", addr))
 	if err != nil {
 		t.Fatalf("health server not reachable: %v", err)
 	}
@@ -208,6 +169,6 @@ func TestServer_StartAndShutdown(t *testing.T) {
 	}
 
 	if err := <-errCh; err != nil {
-		t.Fatalf("Start returned error: %v", err)
+		t.Fatalf("Serve returned error: %v", err)
 	}
 }

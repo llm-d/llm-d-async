@@ -15,13 +15,11 @@ import (
 
 var _ = ginkgo.Describe("Health Probes", func() {
 	ginkgo.It("exposes healthy /healthz and /readyz endpoints", func() {
-		// Pick an ephemeral local port for port-forward.
 		ln, err := net.Listen("tcp", ":0")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		localPort := ln.Addr().(*net.TCPAddr).Port
 		gomega.Expect(ln.Close()).To(gomega.Succeed())
 
-		// Port-forward the health port (8081) of the integration async-processor pod.
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "port-forward",
 			"deployment/integration-async-processor",
@@ -32,9 +30,8 @@ var _ = ginkgo.Describe("Health Probes", func() {
 
 		baseURL := fmt.Sprintf("http://localhost:%d", localPort)
 
-		// Wait for port-forward to be ready.
 		gomega.Eventually(func() error {
-			resp, err := http.Get(baseURL + "/healthz")
+			resp, err := httpClient.Get(baseURL + "/healthz")
 			if err != nil {
 				return err
 			}
@@ -43,7 +40,7 @@ var _ = ginkgo.Describe("Health Probes", func() {
 		}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed())
 
 		ginkgo.By("Verifying /healthz returns 200")
-		resp, err := http.Get(baseURL + "/healthz")
+		resp, err := httpClient.Get(baseURL + "/healthz")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close() //nolint:errcheck
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
@@ -53,7 +50,7 @@ var _ = ginkgo.Describe("Health Probes", func() {
 		gomega.Expect(healthResp["status"]).To(gomega.Equal("ok"))
 
 		ginkgo.By("Verifying /readyz returns 200")
-		resp2, err := http.Get(baseURL + "/readyz")
+		resp2, err := httpClient.Get(baseURL + "/readyz")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp2.Body.Close() //nolint:errcheck
 		gomega.Expect(resp2.StatusCode).To(gomega.Equal(http.StatusOK))

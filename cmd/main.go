@@ -160,8 +160,13 @@ func main() {
 		checker = hc.HealthCheck
 	}
 	healthServer := health.NewServer(healthPort, checker, setupLog.WithName("health"))
+	healthLn, err := healthServer.ListenAndServe()
+	if err != nil {
+		setupLog.Error(err, "Failed to bind health server")
+		os.Exit(1)
+	}
 	go func() {
-		if err := healthServer.Start(); err != nil {
+		if err := healthServer.Serve(healthLn); err != nil {
 			setupLog.Error(err, "Health server failed")
 		}
 	}()
