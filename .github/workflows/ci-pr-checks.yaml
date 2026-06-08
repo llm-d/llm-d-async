@@ -113,7 +113,7 @@ jobs:
         run: helm lint charts/async-processor
 
       - name: Install helm-unittest plugin
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git
+        run: helm plugin install --version v1.0.3 --verify=false https://github.com/helm-unittest/helm-unittest.git
 
       - name: Run Helm unit tests
         run: helm unittest charts/async-processor
