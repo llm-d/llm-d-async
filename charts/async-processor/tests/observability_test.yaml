@@ -84,7 +84,7 @@ tests:
     set:
       ap.prometheusRule.enabled: true
       ap.prometheusRule.rules.highRetryRate.enabled: false
-      ap.prometheusRule.rules.highSheddedRate.enabled: false
+      ap.prometheusRule.rules.highShedRate.enabled: false
     asserts:
       - lengthEqual:
           path: spec.groups[0].rules

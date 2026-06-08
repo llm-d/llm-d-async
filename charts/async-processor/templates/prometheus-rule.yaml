@@ -19,7 +19,7 @@ spec:
             (
               sum(rate(llm_d_async_async_request_retries_total{namespace="{{ .Release.Namespace }}"}[5m]))
               /
-              clamp_min(sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m])), 1)
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
             ) > {{ .Values.ap.prometheusRule.rules.highRetryRate.threshold }}
           for: {{ .Values.ap.prometheusRule.rules.highRetryRate.for | quote }}
           labels:
@@ -36,7 +36,7 @@ spec:
             (
               sum(rate(llm_d_async_async_exceeded_deadline_requests_total{namespace="{{ .Release.Namespace }}"}[5m]))
               /
-              clamp_min(sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m])), 1)
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
             ) > {{ .Values.ap.prometheusRule.rules.highDeadlineExceededRate.threshold }}
           for: {{ .Values.ap.prometheusRule.rules.highDeadlineExceededRate.for | quote }}
           labels:
@@ -53,7 +53,7 @@ spec:
             (
               sum(rate(llm_d_async_async_successful_requests_total{namespace="{{ .Release.Namespace }}"}[5m]))
               /
-              clamp_min(sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m])), 1)
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
             ) < {{ .Values.ap.prometheusRule.rules.lowSuccessRate.threshold }}
           for: {{ .Values.ap.prometheusRule.rules.lowSuccessRate.for | quote }}
           labels:
@@ -64,21 +64,21 @@ spec:
               Success rate is below {{ .Values.ap.prometheusRule.rules.lowSuccessRate.threshold }} (ratio)
               for async requests in namespace {{ "{{ $labels.namespace }}" }}.
         {{- end }}
-        {{- if .Values.ap.prometheusRule.rules.highSheddedRate.enabled }}
-        - alert: AsyncProcessorHighSheddedRate
+        {{- if .Values.ap.prometheusRule.rules.highShedRate.enabled }}
+        - alert: AsyncProcessorHighShedRate
           expr: |
             (
               sum(rate(llm_d_async_async_shedded_requests_total{namespace="{{ .Release.Namespace }}"}[5m]))
               /
-              clamp_min(sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m])), 1)
-            ) > {{ .Values.ap.prometheusRule.rules.highSheddedRate.threshold }}
-          for: {{ .Values.ap.prometheusRule.rules.highSheddedRate.for | quote }}
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
+            ) > {{ .Values.ap.prometheusRule.rules.highShedRate.threshold }}
+          for: {{ .Values.ap.prometheusRule.rules.highShedRate.for | quote }}
           labels:
             severity: warning
           annotations:
             summary: Async processor shed rate is high
             description: >-
-              Shed rate exceeds {{ .Values.ap.prometheusRule.rules.highSheddedRate.threshold }} (ratio)
+              Shed rate exceeds {{ .Values.ap.prometheusRule.rules.highShedRate.threshold }} (ratio)
               for async requests in namespace {{ "{{ $labels.namespace }}" }}.
         {{- end }}
 {{- end }}

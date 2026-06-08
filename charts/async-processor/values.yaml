@@ -115,7 +115,7 @@ ap:
         enabled: true
         threshold: 0.9
         for: "10m"
-      highSheddedRate:
+      highShedRate:
         enabled: true
         threshold: 0.1
         for: "10m"
