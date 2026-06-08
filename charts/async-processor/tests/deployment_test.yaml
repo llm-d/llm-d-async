@@ -114,6 +114,20 @@ tests:
             containerPort: 8080
             protocol: TCP
 
+  - it: should pass default metrics port to binary args
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-port=9090
+
+  - it: should pass custom metrics port to binary args
+    set:
+      ap.metrics.port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-port=8080
+
   - it: should configure redis-pubsub by default when redis enabled
     asserts:
       - contains:

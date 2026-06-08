@@ -28,7 +28,7 @@ spec:
             summary: Async processor retry rate is high
             description: >-
               Retry rate exceeds {{ .Values.ap.prometheusRule.rules.highRetryRate.threshold }} (ratio)
-              for async requests in namespace {{ "{{ $labels.namespace }}" }}.
+              for async requests in namespace {{ .Release.Namespace }}.
         {{- end }}
         {{- if .Values.ap.prometheusRule.rules.highDeadlineExceededRate.enabled }}
         - alert: AsyncProcessorHighDeadlineExceededRate
@@ -45,7 +45,7 @@ spec:
             summary: Async processor deadline exceeded rate is high
             description: >-
               Deadline exceeded rate exceeds {{ .Values.ap.prometheusRule.rules.highDeadlineExceededRate.threshold }} (ratio)
-              for async requests in namespace {{ "{{ $labels.namespace }}" }}.
+              for async requests in namespace {{ .Release.Namespace }}.
         {{- end }}
         {{- if .Values.ap.prometheusRule.rules.lowSuccessRate.enabled }}
         - alert: AsyncProcessorLowSuccessRate
@@ -62,7 +62,7 @@ spec:
             summary: Async processor success rate is low
             description: >-
               Success rate is below {{ .Values.ap.prometheusRule.rules.lowSuccessRate.threshold }} (ratio)
-              for async requests in namespace {{ "{{ $labels.namespace }}" }}.
+              for async requests in namespace {{ .Release.Namespace }}.
         {{- end }}
         {{- if .Values.ap.prometheusRule.rules.highShedRate.enabled }}
         - alert: AsyncProcessorHighShedRate
@@ -79,6 +79,6 @@ spec:
             summary: Async processor shed rate is high
             description: >-
               Shed rate exceeds {{ .Values.ap.prometheusRule.rules.highShedRate.threshold }} (ratio)
-              for async requests in namespace {{ "{{ $labels.namespace }}" }}.
+              for async requests in namespace {{ .Release.Namespace }}.
         {{- end }}
 {{- end }}

@@ -102,6 +102,27 @@ tests:
           path: metadata.labels.team
           value: inference
 
+  - it: should use release namespace in alert descriptions
+    templates:
+      - templates/prometheus-rule.yaml
+    release:
+      namespace: test-ns
+    set:
+      ap.prometheusRule.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.groups[0].rules[0].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[1].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[2].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[3].annotations.description
+          pattern: "namespace test-ns"
+
   # -- Grafana Dashboard ConfigMap --
   - it: should not render Grafana dashboard ConfigMap by default
     templates:
