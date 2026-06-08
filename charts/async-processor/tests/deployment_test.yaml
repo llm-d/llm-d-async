@@ -1,0 +1,199 @@
+suite: deployment
+templates:
+  - templates/ap-deployments.yaml
+set:
+  ap.redis.enabled: true
+tests:
+  - it: should render a Deployment
+    asserts:
+      - isKind:
+          of: Deployment
+
+  - it: should set pod-level security context
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: should set container-level security context defaults
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value:
+            - ALL
+
+  - it: should allow overriding container security context
+    set:
+      ap.securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: false
+        runAsUser: 1000
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 1000
+
+  - it: should set default resource requests and limits
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 256Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 500m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 512Mi
+
+  - it: should allow overriding resources
+    set:
+      ap.resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 200m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+
+  - it: should allow setting only requests without limits
+    set:
+      ap.resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 128Mi
+
+  - it: should expose metrics port
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9090
+            protocol: TCP
+
+  - it: should use custom metrics port
+    set:
+      ap.metrics.port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 8080
+            protocol: TCP
+
+  - it: should configure redis-pubsub by default when redis enabled
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=redis-pubsub
+
+  - it: should configure redis-sortedset when specified
+    set:
+      ap.messageQueueImpl: redis-sortedset
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=redis-sortedset
+
+  - it: should configure GCP Pub/Sub when enabled
+    set:
+      ap.redis.enabled: false
+      ap.gcpPubSub.enabled: true
+      ap.gcpPubSub.requestSubscriberId: "test-sub"
+      ap.gcpPubSub.resultTopicId: "test-topic"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=gcp-pubsub
+
+  - it: should inject OTel env vars when endpoint is set
+    set:
+      ap.otel.endpoint: "http://otel:4317"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: "http://otel:4317"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_SERVICE_NAME
+            value: "async-processor"
+          any: true
+
+  - it: should not inject OTel env vars when endpoint is empty
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+          any: true
+
+  - it: should mount TLS volume when secretName is set
+    set:
+      ap.tls.secretName: my-tls-secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tls-certs
+            mountPath: /etc/tls
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tls-certs
+            secret:
+              secretName: my-tls-secret
+
+  - it: should not mount TLS volume when secretName is empty
+    asserts:
+      - isNull:
+          path: spec.template.spec.containers[0].volumeMounts
+      - isNull:
+          path: spec.template.spec.volumes
+
+  - it: should fail when queuesConfig and gateType are both set
+    set:
+      ap.messageQueueImpl: redis-sortedset
+      ap.redis.gateType: prometheus-saturation
+      ap.redis.queuesConfig:
+        - queue_name: q1
+    asserts:
+      - failedTemplate:
+          errorMessage: "Cannot set both queuesConfig and gateType. Use queuesConfig with per-queue gate_type instead."

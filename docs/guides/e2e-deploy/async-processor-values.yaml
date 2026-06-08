@@ -1,7 +1,7 @@
 ap:
   image:
     repository: ghcr.io/llm-d-incubation/llm-d-async
-    tag: "4a1b0a4"
+    tag: "938cd44"
   imagePullPolicy: Always
   igwBaseURL: "http://llm-d-inference-gateway-istio:80"
   messageQueueImpl: "redis-sortedset"
@@ -26,6 +26,14 @@ ap:
           pool: "optimized-baseline"
           max_concurrency: "100"
           baseline: "0.05"
+  podMonitor:
+    enabled: true
+    interval: "15s"
+  prometheusRule:
+    enabled: true
+  grafana:
+    dashboards:
+      enabled: true
   modelServerMonitor:
     enabled: true
     selector:

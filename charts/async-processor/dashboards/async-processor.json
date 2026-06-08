@@ -1,0 +1,189 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_d_async_async_request_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Request Rate by Queue",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (queue_name) (rate(llm_d_async_async_request_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{ queue_name }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Request Outcome Breakdown",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_d_async_async_successful_requests_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "successful"
+        },
+        {
+          "expr": "sum(rate(llm_d_async_async_failed_requests_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "failed"
+        },
+        {
+          "expr": "sum(rate(llm_d_async_async_request_retries_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "retries"
+        },
+        {
+          "expr": "sum(rate(llm_d_async_async_exceeded_deadline_requests_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "deadline exceeded"
+        },
+        {
+          "expr": "sum(rate(llm_d_async_async_shedded_requests_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "shedded"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Success Rate",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_d_async_async_successful_requests_total{namespace=\"$namespace\"}[$__rate_interval])) / sum(rate(llm_d_async_async_request_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "success rate",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.9 },
+              { "color": "green", "value": 0.95 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Retry Rate",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_d_async_async_request_retries_total{namespace=\"$namespace\"}[$__rate_interval])) / sum(rate(llm_d_async_async_request_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "retry rate",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.3 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Message Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(llm_d_async_async_message_latency_time_millis_bucket{namespace=\"$namespace\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(llm_d_async_async_message_latency_time_millis_bucket{namespace=\"$namespace\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(llm_d_async_async_message_latency_time_millis_bucket{namespace=\"$namespace\"}[$__rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Message Latency by Queue (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, queue_name) (rate(llm_d_async_async_message_latency_time_millis_bucket{namespace=\"$namespace\"}[$__rate_interval])))",
+          "legendFormat": "{{ queue_name }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus" },
+        "query": "label_values(llm_d_async_async_request_total, namespace)",
+        "refresh": 2,
+        "includeAll": false,
+        "current": {}
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Async Processor",
+  "uid": "async-processor"
+}

@@ -124,6 +124,18 @@ spec:
                 key: {{ include "async-processor.redisSecretKey" . }}
           {{- end }}
         name: async-processor
+        ports:
+          - name: metrics
+            containerPort: {{ .Values.ap.metrics.port | default 9090 }}
+            protocol: TCP
+        {{- with .Values.ap.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.ap.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
         {{- with .Values.ap.tls.secretName }}
         volumeMounts:
           - name: tls-certs

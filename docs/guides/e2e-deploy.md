@@ -131,12 +131,18 @@ helm install async-processor ${ASYNC_REPO}/charts/async-processor/ \
 ```
 
 The values file (`docs/guides/e2e-deploy/async-processor-values.yaml`) configures:
-- Image: `ghcr.io/llm-d-incubation/llm-d-async:4a1b0a4`
+- Image: `ghcr.io/llm-d-incubation/llm-d-async:938cd44`
 - Queue: Redis sorted-set with `redis.url` set directly (chart creates the Secret), configured via `queuesConfig`
 - Gate: `prometheus-budget` with pool=`optimized-baseline`, max_concurrency=100, baseline=0.05 (per-queue)
 - Prometheus URL pointing to the cluster's `llmd-kube-prometheus-stack-prometheus` service
 - `modelServerMonitor.enabled: true` — creates a PodMonitor that relabels the `inference_pool`
   pod label into vLLM metrics (required for the dispatch budget gate fallback)
+- `podMonitor.enabled: true` — creates a PodMonitor that scrapes the async-processor's own
+  Prometheus metrics (retry rate, success rate, latency, etc.)
+- `prometheusRule.enabled: true` — installs alert rules for high retry rate, deadline exceeded
+  rate, low success rate, and high shed rate
+- `grafana.dashboards.enabled: true` — provisions a Grafana dashboard (via sidecar) with
+  request rate, outcome breakdown, success/retry gauges, and latency percentiles
 
 ## Verify
 
@@ -177,6 +183,27 @@ kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAM
     'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (inference_pool_ready_pods{name="optimized-baseline"} * 100))' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = 1
+```
+
+### Verify async-processor monitoring
+
+Once you have sent at least one async request (see next section), verify that the
+async-processor's own metrics are being scraped and that alerts/dashboards are available:
+
+```bash
+# Async-processor metrics in Prometheus (should show request counters)
+kubectl run --rm -i prom-ap --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
+    curl -s --data-urlencode 'query=llm_d_async_async_request_total' \
+    'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
+# Expected: one or more time series with queue_id/queue_name labels
+
+# Verify PrometheusRule is installed
+kubectl get prometheusrules -n ${NAMESPACE}
+# Expected: async-processor rule listed
+
+# Verify Grafana dashboard ConfigMap is present
+kubectl get configmap -n ${NAMESPACE} -l grafana_dashboard=1
+# Expected: async-processor-dashboards ConfigMap listed
 ```
 
 ### Test async request end-to-end

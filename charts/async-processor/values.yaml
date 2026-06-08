@@ -1,5 +1,19 @@
 ap:
   igwBaseURL: "http://infra-inference-scheduling-inference-gateway-istio.llm-d-inference-scheduler.svc.cluster.local:80"
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
   image:
     repository: ghcr.io/llm-d-incubation/async-processor
     tag: 0.6.0
@@ -80,6 +94,36 @@ ap:
     #       address: "redis:6379"
     #       limit: "5"
     queuesConfig: []
+  # PodMonitor for async-processor metrics scraping.
+  podMonitor:
+    enabled: false
+    interval: "30s"
+    labels: {}
+  prometheusRule:
+    enabled: false
+    labels: {}
+    rules:
+      highRetryRate:
+        enabled: true
+        threshold: 0.5
+        for: "15m"
+      highDeadlineExceededRate:
+        enabled: true
+        threshold: 0.1
+        for: "10m"
+      lowSuccessRate:
+        enabled: true
+        threshold: 0.9
+        for: "10m"
+      highSheddedRate:
+        enabled: true
+        threshold: 0.1
+        for: "10m"
+  grafana:
+    dashboards:
+      enabled: false
+      label: grafana_dashboard
+      labelValue: "1"
   # PodMonitor for model server metrics relabeling.
   # Creates a PodMonitor that scrapes vLLM metrics and relabels
   # the inference_pool pod label into scraped metrics.
