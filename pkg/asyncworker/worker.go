@@ -39,13 +39,29 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 			defer idle.Stop()
 			for {
 				select {
-				case msg := <-requestChannel:
+				case msg, ok := <-requestChannel:
+					if !ok {
+						return
+					}
 					if msg.InternalRequest == nil || msg.PublicRequest == nil {
 						continue
 					}
-					retryChannel <- pipeline.RetryMessage{
+					retryMsg := pipeline.RetryMessage{
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,
+					}
+					select {
+					case retryChannel <- retryMsg:
+					default:
+						select {
+						case retryChannel <- retryMsg:
+						case <-requestCtx.Done():
+							logger.V(logutil.DEFAULT).Error(nil, "drain timeout reached, dropping message", "id", msg.PublicRequest.ReqID())
+							return
+						}
+					}
+					if !idle.Stop() {
+						<-idle.C
 					}
 					idle.Reset(100 * time.Millisecond)
 				case <-idle.C:

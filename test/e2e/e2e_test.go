@@ -224,8 +224,8 @@ var _ = ginkgo.Describe("General Integration", func() {
 		gomega.Expect(resultCount).To(gomega.BeNumerically(">=", 1),
 			"expected at least one in-flight request to complete during drain phase")
 
-		// No messages lost: completed results + re-enqueued = total.
-		gomega.Expect(resultCount + requeueCount).To(gomega.BeNumerically(">=", int64(len(ids))),
+		// No messages lost or duplicated: completed results + re-enqueued = total.
+		gomega.Expect(resultCount+requeueCount).To(gomega.Equal(int64(len(ids))),
 			"expected no message loss: results + re-enqueued should equal total")
 	})
 
@@ -282,7 +282,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 		// The drain timeout (5s) expired before the Envoy delay (60s) completed,
 		// so in-flight messages should have been re-enqueued to the request queue.
 		count := rdb.ZCard(ctx, shortDrainRequestQueue).Val()
-		gomega.Expect(count).To(gomega.BeNumerically(">=", int64(len(ids))),
+		gomega.Expect(count).To(gomega.Equal(int64(len(ids))),
 			"expected all in-flight messages re-enqueued after drain timeout")
 	})
 

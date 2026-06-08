@@ -44,13 +44,14 @@ func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
 	retryChannel := make(chan pipeline.RetryMessage, 3)
 	resultChannel := make(chan asyncapi.ResultMessage, 3)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	consumeCtx, consumeCancel := context.WithCancel(context.Background())
+	requestCtx, requestCancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
+		asyncworker.Worker(consumeCtx, requestCtx, pipeline.Characteristics{HasExternalBackoff: false},
 			client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 	}()
 
@@ -73,7 +74,8 @@ func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
 	}
 
 	<-serverHit
-	cancel()
+	consumeCancel()
+	requestCancel()
 	wg.Wait()
 
 	got := make(map[string]bool)

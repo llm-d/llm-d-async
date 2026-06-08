@@ -748,14 +748,15 @@ func TestWorker_DrainsBufferedMessagesOnShutdown(t *testing.T) {
 			retryChannel := make(chan pipeline.RetryMessage, tt.messages)
 			resultChannel := make(chan asyncapi.ResultMessage, tt.messages)
 
-			ctx, cancel := context.WithCancel(context.Background())
+			consumeCtx, consumeCancel := context.WithCancel(context.Background())
+			requestCtx, requestCancel := context.WithCancel(context.Background())
 
 			var wg sync.WaitGroup
 			for w := 0; w < tt.concurrency; w++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+					Worker(consumeCtx, requestCtx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 				}()
 			}
 
@@ -773,7 +774,8 @@ func TestWorker_DrainsBufferedMessagesOnShutdown(t *testing.T) {
 			for range inFlightCount {
 				<-reqStarted
 			}
-			cancel()
+			consumeCancel()
+			requestCancel()
 
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()
