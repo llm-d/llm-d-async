@@ -54,6 +54,8 @@ type PubSubMQFlow struct {
 	resultChannel   chan api.ResultMessage
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
+	consumeCancel   context.CancelFunc
+	consumeWg       sync.WaitGroup
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 }
@@ -174,16 +176,31 @@ func (r *PubSubMQFlow) RequestChannels() []pipeline.RequestChannel {
 }
 
 func (r *PubSubMQFlow) Start(ctx context.Context) {
-	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), log.FromContext(ctx)))
+	logger := log.FromContext(ctx)
+	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	r.consumeCancel = consumeCancel
+
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
 	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
-		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.Channel, channelData.gate)
+		r.consumeWg.Add(1)
+		go func(cd RequestChannelData) {
+			defer r.consumeWg.Done()
+			r.requestWorker(consumeCtx, pubSubClient, cd.subscriberID, cd.requestChannel.Channel, cd.gate)
+		}(channelData)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	r.drainWg.Add(2)
 	go func() { defer r.drainWg.Done(); resultWorker(drainCtx, publisher, r.resultChannel) }()
 	go func() { defer r.drainWg.Done(); addMsgToRetryQueue(drainCtx, r.retryChannel) }()
+}
+
+func (r *PubSubMQFlow) StopConsuming() {
+	if r.consumeCancel != nil {
+		r.consumeCancel()
+	}
+	r.consumeWg.Wait()
 }
 
 func (r *PubSubMQFlow) Shutdown() {
@@ -235,27 +252,36 @@ func publishPubSub(ctx context.Context, publisher *pubsub.Publisher, msg []byte,
 func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMessage) {
 	logger := log.FromContext(ctx)
 
+	handleRetry := func(msg pipeline.RetryMessage) {
+		if msg.InternalRequest == nil {
+			return
+		}
+		value, ok := resultChannels.Load(msg.TransportCorrelationID)
+		if !ok {
+			logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", msg.TransportCorrelationID)
+			return
+		}
+		resultChannel := value.(chan bool)
+		logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", msg.TransportCorrelationID)
+		resultChannel <- false
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			for {
+				select {
+				case msg := <-retryChannel:
+					handleRetry(msg)
+				default:
+					return
+				}
+			}
 
 		case msg := <-retryChannel:
-			if msg.InternalRequest == nil {
-				continue
-			}
-			value, ok := resultChannels.Load(msg.TransportCorrelationID)
-			if !ok {
-				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", msg.TransportCorrelationID)
-				continue
-			}
-			resultChannel := value.(chan bool)
-			logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", msg.TransportCorrelationID)
-			resultChannel <- false
-
+			handleRetry(msg)
 		}
 	}
-
 }
 
 func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) {
@@ -263,7 +289,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 	sub := pubSubClient.Subscriber(subscriberID)
 
-	for {
+	for ctx.Err() == nil {
 		receiveCtx, cancel := context.WithCancel(ctx)
 		budget := gate.Budget(ctx)
 		go func() {

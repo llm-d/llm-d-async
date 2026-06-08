@@ -107,6 +107,8 @@ type RedisSortedSetFlow struct {
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 	configMap       map[string]queueConfig
+	consumeCancel   context.CancelFunc
+	consumeWg       sync.WaitGroup
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 	enableTracing   bool
@@ -255,15 +257,30 @@ func applyQueueConfigDefaults(cfg *queueConfig) {
 }
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {
-	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), log.FromContext(ctx)))
+	logger := log.FromContext(ctx)
+	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	r.consumeCancel = consumeCancel
+
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
 	r.drainCancel = drainCancel
 
 	for _, ch := range r.requestChannels {
-		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName, ch.queueID)
+		r.consumeWg.Add(1)
+		go func(ch requestChannelData) {
+			defer r.consumeWg.Done()
+			r.requestWorker(consumeCtx, ch.channel.Channel, ch.queueName, ch.queueID)
+		}(ch)
 	}
 	r.drainWg.Add(2)
 	go func() { defer r.drainWg.Done(); r.retryWorker(drainCtx) }()  // #nosec G118
 	go func() { defer r.drainWg.Done(); r.resultWorker(drainCtx) }() // #nosec G118
+}
+
+func (r *RedisSortedSetFlow) StopConsuming() {
+	if r.consumeCancel != nil {
+		r.consumeCancel()
+	}
+	r.consumeWg.Wait()
 }
 
 func (r *RedisSortedSetFlow) Shutdown() {

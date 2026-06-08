@@ -67,7 +67,7 @@ func TestWorkerDispatch_TraceparentInjected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -125,7 +125,7 @@ func TestWorkerDispatch_SpanHierarchy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -209,7 +209,7 @@ func TestWorkerDispatch_MetadataTraceContextPropagation(t *testing.T) {
 	otel.GetTextMapPropagator().Inject(producerCtx, propagation.MapCarrier(metadata))
 	producerSpan.End()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(

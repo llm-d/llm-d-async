@@ -75,6 +75,7 @@ spec:
           - --prometheus-cache-ttl={{ .Values.ap.prometheusCacheTTL }}
           {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 8 }}
+          - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}
           {{- if and .Values.ap.otel.redisTracing .Values.ap.otel.endpoint }}
           - --redis-tracing=true

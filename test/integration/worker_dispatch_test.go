@@ -50,7 +50,7 @@ func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+		asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 			client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 	}()
 
@@ -121,7 +121,7 @@ func TestWorkerDispatch_MockIGW(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -190,7 +190,7 @@ func TestWorkerDispatch_EndpointOverride(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -237,7 +237,7 @@ func TestWorkerDispatch_ServerErrorTriggersRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -286,7 +286,7 @@ func TestWorkerDispatch_ResultCallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	routing := asyncapi.InternalRouting{
@@ -346,7 +346,7 @@ func TestWorkerDispatch_RequeuesOnShutdown(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+		asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 			client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 	}()
 

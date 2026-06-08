@@ -1,0 +1,28 @@
+ap:
+  imagePullPolicy: Never
+  messageQueueImpl: "redis-sortedset"
+  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  concurrency: 1
+  drainTimeout: "5s"
+  otel:
+    endpoint: ""
+    insecure: true
+    sampler: "always_on"
+    samplerArg: "1.0"
+    redisTracing: false
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    enabled: true
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
+    resultQueueName: "short-drain-result-list"
+    pollIntervalMs: 500
+    batchSize: 10
+    queuesConfig:
+      - queue_name: "short-drain-request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  modelServerMonitor:
+    enabled: false

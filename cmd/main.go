@@ -46,6 +46,8 @@ func main() {
 
 	var redisTracing bool
 
+	var drainTimeout time.Duration
+
 	var tlsCACert string
 	var tlsCert string
 	var tlsKey string
@@ -58,6 +60,7 @@ func main() {
 
 	flag.IntVar(&concurrency, "concurrency", 8, "number of concurrent workers")
 	flag.DurationVar(&requestTimeout, "request-timeout", 5*time.Minute, "timeout for individual inference requests")
+	flag.DurationVar(&drainTimeout, "drain-timeout", 2*time.Minute, "maximum time to wait for in-flight requests to complete after SIGTERM")
 
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
@@ -149,13 +152,16 @@ func main() {
 
 	metrics.Register(metrics.GetAsyncProcessorCollectors(impl.Characteristics().SupportsMessageLatency)...)
 
-	ctx := ctrl.SetupSignalHandler()
+	signalCtx := ctrl.SetupSignalHandler()
 
 	// Register metrics handler.
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
+	drainCtx, drainCancel := context.WithCancel(logr.NewContext(context.Background(), setupLog))
+	defer drainCancel()
+
 	metricsServerOptions := metricsserver.Options{
 		BindAddress: fmt.Sprintf(":%d", metricsPort),
 		FilterProvider: func() func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
@@ -173,7 +179,7 @@ func main() {
 		setupLog.Error(err, "Failed to create metrics server")
 		os.Exit(1)
 	}
-	go msrv.Start(ctx) // nolint:errcheck
+	go msrv.Start(signalCtx) // nolint:errcheck
 
 	tlsConfig, err := buildTLSConfig(tlsCACert, tlsCert, tlsKey, tlsInsecureSkipVerify)
 	if err != nil {
@@ -201,13 +207,28 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			asyncworker.Worker(ctx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
+			asyncworker.Worker(signalCtx, drainCtx, impl.Characteristics(), inferenceClient, requestChannel, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
 		}()
 	}
 
-	impl.Start(ctx)
-	<-ctx.Done()
-	wg.Wait()
+	impl.Start(signalCtx)
+	<-signalCtx.Done()
+
+	setupLog.Info("Signal received, stopping message consumption")
+	impl.StopConsuming()
+
+	setupLog.Info("Draining in-flight requests", "timeout", drainTimeout)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		setupLog.Info("All workers drained successfully")
+	case <-time.After(drainTimeout):
+		setupLog.Info("Drain timeout reached, cancelling in-flight requests")
+		drainCancel()
+		wg.Wait()
+	}
+
 	impl.Shutdown()
 }
 

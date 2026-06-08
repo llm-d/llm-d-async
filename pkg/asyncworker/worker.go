@@ -27,32 +27,28 @@ const (
 	maxDelaySeconds  = 60
 )
 
-func Worker(ctx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
+func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
 	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration) {
 
-	logger := log.FromContext(ctx)
+	logger := log.FromContext(requestCtx)
 	for {
 		select {
-		case <-ctx.Done():
+		case <-consumeCtx.Done():
 			logger.V(logutil.DEFAULT).Info("Worker finishing, draining request channel.")
+			idle := time.NewTimer(100 * time.Millisecond)
+			defer idle.Stop()
 			for {
 				select {
-				case msg, ok := <-requestChannel:
-					if !ok {
-						return
-					}
+				case msg := <-requestChannel:
 					if msg.InternalRequest == nil || msg.PublicRequest == nil {
 						continue
 					}
-					select {
-					case retryChannel <- pipeline.RetryMessage{
+					retryChannel <- pipeline.RetryMessage{
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,
-					}:
-					default:
-						logger.V(logutil.DEFAULT).Error(nil, "retry channel full, dropping message on shutdown", "id", msg.PublicRequest.ReqID())
 					}
-				default:
+					idle.Reset(100 * time.Millisecond)
+				case <-idle.C:
 					return
 				}
 			}
@@ -63,18 +59,15 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 			queueID := msg.QueueID
 			queueName := msg.RequestQueueName
 			if msg.RetryCount == 0 {
-				// Only count first attempt as a new request.
 				metrics.RecordAsyncReq(queueID, queueName)
 			}
-			payloadBytes := validateAndMarshal(ctx, resultChannel, msg)
+			payloadBytes := validateAndMarshal(requestCtx, resultChannel, msg)
 			if payloadBytes == nil {
 				continue
 			}
 
-			// Using a function object for easy boundaries for 'return' and 'defer'!
 			sendInferenceRequest := func() {
-				// Restore parent trace context from request metadata (producer injects W3C trace context).
-				reqCtx := ctx
+				reqCtx := requestCtx
 				if md := msg.PublicRequest.ReqMetadata(); len(md) > 0 {
 					reqCtx = otel.GetTextMapPropagator().Extract(reqCtx, propagation.MapCarrier(md))
 				}
@@ -94,8 +87,6 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				)
 				defer span.End()
 
-				// Create a per-request context bounded by both the message deadline
-				// and the configured request timeout, whichever comes first.
 				reqDeadline := time.Now().Add(requestTimeout)
 				if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
 					if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
@@ -109,7 +100,6 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 				responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
 
 				if err == nil {
-					// Success - got a valid response
 					metrics.RecordSuccessfulReq(queueID, queueName)
 					select {
 					case resultChannel <- asyncapi.ResultMessage{
@@ -118,15 +108,12 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 						Routing:  msg.InternalRouting,
 						Metadata: msg.PublicRequest.ReqMetadata(),
 					}:
-					case <-ctx.Done():
+					case <-requestCtx.Done():
 					}
 					return
 				}
 
-				// Shutdown: parent context cancelled and the error is context-related
-				// (not a completed HTTP response like 4xx). Re-enqueue directly —
-				// retryMessage's select would take ctx.Done() immediately.
-				if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				if requestCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 					_, bgSpan := uotel.DetachedContext(reqCtx, "re-enqueue")
 					bgSpan.SetAttributes(attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()))
 					defer bgSpan.End()
@@ -137,33 +124,29 @@ func Worker(ctx context.Context, characteristics pipeline.Characteristics, clien
 					return
 				}
 
-				// Check if error implements InferenceError
 				var inferenceErr asyncapi.InferenceError
 				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
-					// Unknown error type or fatal error - fail immediately
 					span.RecordError(err)
 					span.SetStatus(codes.Error, "inference request failed")
 					span.SetAttributes(attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)))
 					metrics.RecordFailedReq(queueID, queueName)
 					select {
 					case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
-					case <-ctx.Done():
+					case <-requestCtx.Done():
 					}
 					return
 				}
 
-				// Retryable error - check if it's due to rate limiting
 				if inferenceErr.Category().Sheddable() {
 					metrics.RecordSheddedReq(queueID, queueName)
 				}
 				span.SetAttributes(attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())))
-				// Pass server-specified Retry-After duration if available.
 				var retryAfter time.Duration
 				var clientErr *asyncapi.ClientError
 				if errors.As(err, &clientErr) {
 					retryAfter = clientErr.RetryAfter
 				}
-				retryMessage(ctx, msg, retryChannel, resultChannel, retryAfter)
+				retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter)
 			}
 			sendInferenceRequest()
 		}

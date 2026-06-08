@@ -5,6 +5,7 @@ ap:
     tag: 0.6.0
   imagePullPolicy: Always
   concurrency: 8
+  drainTimeout: "2m"
   prometheusURL: ""
   prometheusCacheTTL: ""
   otel:
