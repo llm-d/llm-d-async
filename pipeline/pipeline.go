@@ -16,6 +16,12 @@ type Flow interface {
 	ResultChannel() chan api.ResultMessage
 }
 
+// HealthChecker is an optional interface that Flow implementations can
+// satisfy to report backend-specific health.
+type HealthChecker interface {
+	HealthCheck(ctx context.Context) error
+}
+
 type Characteristics struct {
 	HasExternalBackoff     bool
 	SupportsMessageLatency bool

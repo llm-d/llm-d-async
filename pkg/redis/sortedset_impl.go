@@ -94,7 +94,10 @@ type requestChannelData struct {
 	gate      pipeline.DispatchGate
 }
 
-var _ pipeline.Flow = (*RedisSortedSetFlow)(nil)
+var (
+	_ pipeline.Flow          = (*RedisSortedSetFlow)(nil)
+	_ pipeline.HealthChecker = (*RedisSortedSetFlow)(nil)
+)
 
 type RedisSortedSetFlow struct {
 	rdb             *redis.Client
@@ -304,6 +307,10 @@ func (r *RedisSortedSetFlow) RetryChannel() chan pipeline.RetryMessage {
 
 func (r *RedisSortedSetFlow) ResultChannel() chan api.ResultMessage {
 	return r.resultChannel
+}
+
+func (r *RedisSortedSetFlow) HealthCheck(ctx context.Context) error {
+	return r.rdb.Ping(ctx).Err()
 }
 
 func (r *RedisSortedSetFlow) Characteristics() pipeline.Characteristics {

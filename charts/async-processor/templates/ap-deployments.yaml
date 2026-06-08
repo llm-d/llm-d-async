@@ -76,6 +76,7 @@ spec:
           {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 8 }}
           - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
+          - --health-port={{ .Values.ap.health.port | default 8081 }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}
           - --metrics-port={{ .Values.ap.metrics.port | default 9090 }}
           {{- if and .Values.ap.otel.redisTracing .Values.ap.otel.endpoint }}
@@ -130,6 +131,33 @@ spec:
           - name: metrics
             containerPort: {{ .Values.ap.metrics.port | default 9090 }}
             protocol: TCP
+          - name: health
+            containerPort: {{ .Values.ap.health.port | default 8081 }}
+            protocol: TCP
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: {{ .Values.ap.health.startupProbe.initialDelaySeconds | default 0 }}
+          periodSeconds: {{ .Values.ap.health.startupProbe.periodSeconds | default 2 }}
+          timeoutSeconds: {{ .Values.ap.health.startupProbe.timeoutSeconds | default 3 }}
+          failureThreshold: {{ .Values.ap.health.startupProbe.failureThreshold | default 30 }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: {{ .Values.ap.health.livenessProbe.initialDelaySeconds | default 5 }}
+          periodSeconds: {{ .Values.ap.health.livenessProbe.periodSeconds | default 10 }}
+          timeoutSeconds: {{ .Values.ap.health.livenessProbe.timeoutSeconds | default 3 }}
+          failureThreshold: {{ .Values.ap.health.livenessProbe.failureThreshold | default 3 }}
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: {{ .Values.ap.health.readinessProbe.initialDelaySeconds | default 5 }}
+          periodSeconds: {{ .Values.ap.health.readinessProbe.periodSeconds | default 5 }}
+          timeoutSeconds: {{ .Values.ap.health.readinessProbe.timeoutSeconds | default 3 }}
+          failureThreshold: {{ .Values.ap.health.readinessProbe.failureThreshold | default 3 }}
         {{- with .Values.ap.securityContext }}
         securityContext:
           {{- toYaml . | nindent 12 }}
