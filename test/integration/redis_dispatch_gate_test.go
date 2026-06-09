@@ -5,6 +5,7 @@ package integration_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
@@ -16,7 +17,12 @@ import (
 func newMiniredisClient(t *testing.T) (*goredis.Client, *miniredis.Miniredis) {
 	t.Helper()
 	s := miniredis.RunT(t)
-	rdb := goredis.NewClient(&goredis.Options{Addr: s.Addr()})
+	rdb := goredis.NewClient(&goredis.Options{
+		Addr:         s.Addr(),
+		DialTimeout:  500 * time.Millisecond,
+		ReadTimeout:  500 * time.Millisecond,
+		WriteTimeout: 500 * time.Millisecond,
+	})
 	t.Cleanup(func() { rdb.Close() })
 	return rdb, s
 }
@@ -26,57 +32,57 @@ func TestRedisDispatchGate_KeyMissing(t *testing.T) {
 	gate := redis.NewRedisDispatchGate(rdb, "nonexistent-key")
 
 	budget := gate.Budget(context.Background())
-	assert.Equal(t, 1.0, budget, "missing key should default to full capacity")
+	assert.InDelta(t, 1.0, budget, 1e-9, "missing key should default to full capacity")
 }
 
 func TestRedisDispatchGate_ValidBudget(t *testing.T) {
 	rdb, s := newMiniredisClient(t)
-	s.Set("budget-key", "0.75")
+	require.NoError(t, s.Set("budget-key", "0.75"))
 
 	gate := redis.NewRedisDispatchGate(rdb, "budget-key")
 
 	budget := gate.Budget(context.Background())
-	assert.Equal(t, 0.75, budget)
+	assert.InDelta(t, 0.75, budget, 1e-9)
 }
 
 func TestRedisDispatchGate_ZeroBudget(t *testing.T) {
 	rdb, s := newMiniredisClient(t)
-	s.Set("budget-key", "0.0")
+	require.NoError(t, s.Set("budget-key", "0.0"))
 
 	gate := redis.NewRedisDispatchGate(rdb, "budget-key")
 
 	budget := gate.Budget(context.Background())
-	assert.Equal(t, 0.0, budget)
+	assert.InDelta(t, 0.0, budget, 1e-9)
 }
 
 func TestRedisDispatchGate_ClampAboveOne(t *testing.T) {
 	rdb, s := newMiniredisClient(t)
-	s.Set("budget-key", "5.0")
+	require.NoError(t, s.Set("budget-key", "5.0"))
 
 	gate := redis.NewRedisDispatchGate(rdb, "budget-key")
 
 	budget := gate.Budget(context.Background())
-	assert.Equal(t, 1.0, budget, "values above 1.0 should be clamped to 1.0")
+	assert.InDelta(t, 1.0, budget, 1e-9, "values above 1.0 should be clamped to 1.0")
 }
 
 func TestRedisDispatchGate_ClampBelowZero(t *testing.T) {
 	rdb, s := newMiniredisClient(t)
-	s.Set("budget-key", "-0.5")
+	require.NoError(t, s.Set("budget-key", "-0.5"))
 
 	gate := redis.NewRedisDispatchGate(rdb, "budget-key")
 
 	budget := gate.Budget(context.Background())
-	assert.Equal(t, 0.0, budget, "negative values should be clamped to 0.0")
+	assert.InDelta(t, 0.0, budget, 1e-9, "negative values should be clamped to 0.0")
 }
 
 func TestRedisDispatchGate_UnparsableValue(t *testing.T) {
 	rdb, s := newMiniredisClient(t)
-	s.Set("budget-key", "not-a-number")
+	require.NoError(t, s.Set("budget-key", "not-a-number"))
 
 	gate := redis.NewRedisDispatchGate(rdb, "budget-key")
 
 	budget := gate.Budget(context.Background())
-	assert.Equal(t, 1.0, budget, "unparsable values should default to 1.0")
+	assert.InDelta(t, 1.0, budget, 1e-9, "unparsable values should default to 1.0")
 }
 
 func TestRedisDispatchGate_RedisDown(t *testing.T) {
@@ -85,17 +91,20 @@ func TestRedisDispatchGate_RedisDown(t *testing.T) {
 
 	s.Close()
 
-	budget := gate.Budget(context.Background())
-	assert.Equal(t, 0.0, budget, "redis error should fail closed (0.0)")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	budget := gate.Budget(ctx)
+	assert.InDelta(t, 0.0, budget, 1e-9, "redis error should fail closed (0.0)")
 }
 
 func TestRedisDispatchGate_BudgetUpdated(t *testing.T) {
 	rdb, s := newMiniredisClient(t)
-	s.Set("budget-key", "0.5")
+	require.NoError(t, s.Set("budget-key", "0.5"))
 	gate := redis.NewRedisDispatchGate(rdb, "budget-key")
 
-	require.Equal(t, 0.5, gate.Budget(context.Background()))
+	require.InDelta(t, 0.5, gate.Budget(context.Background()), 1e-9)
 
-	s.Set("budget-key", "0.9")
-	assert.Equal(t, 0.9, gate.Budget(context.Background()), "budget should reflect updated Redis value")
+	require.NoError(t, s.Set("budget-key", "0.9"))
+	assert.InDelta(t, 0.9, gate.Budget(context.Background()), 1e-9, "budget should reflect updated Redis value")
 }
