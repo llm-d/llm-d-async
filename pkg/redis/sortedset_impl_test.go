@@ -1274,3 +1274,39 @@ func TestSortedSetFlow_ResultQueueFallsBackToMessageLevel(t *testing.T) {
 		t.Errorf("Expected 1 message in global default queue, got %d", globalLen)
 	}
 }
+
+func TestQueueBacklog(t *testing.T) {
+	_, rdb, ctx, cancel := setupTest(t)
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{
+			{queueName: "queue-a", queueID: "a"},
+			{queueName: "queue-b", queueID: "b"},
+		},
+	}
+
+	// queue-a gets 3 members, queue-b gets 1, an unrelated key is ignored.
+	for i, m := range []string{"m1", "m2", "m3"} {
+		rdb.ZAdd(ctx, "queue-a", redis.Z{Score: float64(i), Member: m})
+	}
+	rdb.ZAdd(ctx, "queue-b", redis.Z{Score: 0, Member: "only"})
+
+	stats, err := flow.QueueBacklog(ctx)
+	if err != nil {
+		t.Fatalf("QueueBacklog returned error: %v", err)
+	}
+
+	got := make(map[string]int64, len(stats))
+	for _, s := range stats {
+		got[s.QueueName] = s.Depth
+	}
+	if got["queue-a"] != 3 {
+		t.Errorf("queue-a backlog = %d, want 3", got["queue-a"])
+	}
+	if got["queue-b"] != 1 {
+		t.Errorf("queue-b backlog = %d, want 1", got["queue-b"])
+	}
+}

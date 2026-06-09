@@ -298,6 +298,29 @@ func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {
 	return channels
 }
 
+// QueueBacklog reports the number of pending members in each queue's sorted set.
+func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
+	stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
+	var firstErr error
+	for _, cd := range r.requestChannels {
+		depth, err := r.rdb.ZCard(ctx, cd.queueName).Result()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ZCard on queue %q: %w", cd.queueName, err)
+			}
+			continue
+		}
+		stats = append(stats, pipeline.QueueBacklogStat{
+			QueueID:   cd.queueID,
+			QueueName: cd.queueName,
+			Depth:     depth,
+		})
+	}
+	return stats, firstErr
+}
+
+var _ pipeline.BacklogReporter = (*RedisSortedSetFlow)(nil)
+
 func (r *RedisSortedSetFlow) RetryChannel() chan pipeline.RetryMessage {
 	return r.retryChannel
 }

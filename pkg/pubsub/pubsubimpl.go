@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -10,11 +11,15 @@ import (
 	"sync"
 	"time"
 
+	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
+	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
+	"google.golang.org/api/iterator"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -58,6 +63,8 @@ type PubSubMQFlow struct {
 	consumeWg       sync.WaitGroup
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
+	metricClient    *monitoring.MetricClient
+	projectID       string
 }
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
@@ -103,6 +110,16 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		requestChannels: make([]RequestChannelData, 0, len(configs)),
 		retryChannel:    make(chan pipeline.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage),
+		projectID:       *projectID,
+	}
+
+	// Cloud Monitoring client for broker-backlog metrics. Best-effort: if it
+	// can't be created (e.g. missing credentials), backlog reporting is
+	// skipped but the flow still operates normally.
+	if metricClient, mErr := monitoring.NewMetricClient(ctx); mErr != nil {
+		log.FromContext(ctx).V(logutil.DEFAULT).Error(mErr, "Failed to create Cloud Monitoring client; broker backlog metrics disabled")
+	} else {
+		p.metricClient = metricClient
 	}
 
 	// Apply functional options
@@ -208,7 +225,63 @@ func (r *PubSubMQFlow) Shutdown() {
 		r.drainCancel()
 	}
 	r.drainWg.Wait()
+	if r.metricClient != nil {
+		_ = r.metricClient.Close()
+	}
 }
+
+// QueueBacklog reports the number of undelivered messages per subscription,
+// sourced from the Cloud Monitoring metric
+// pubsub.googleapis.com/subscription/num_undelivered_messages. The value is
+// approximate and lags real time by the metric's sampling interval.
+func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
+	if r.metricClient == nil {
+		return nil, fmt.Errorf("cloud monitoring client unavailable")
+	}
+	now := time.Now()
+	interval := &monitoringpb.TimeInterval{
+		StartTime: timestamppb.New(now.Add(-5 * time.Minute)),
+		EndTime:   timestamppb.New(now),
+	}
+
+	stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
+	var firstErr error
+	for _, cd := range r.requestChannels {
+		subID := cd.subscriberID
+		req := &monitoringpb.ListTimeSeriesRequest{
+			Name: "projects/" + r.projectID,
+			Filter: fmt.Sprintf(
+				`metric.type="pubsub.googleapis.com/subscription/num_undelivered_messages" AND resource.labels.subscription_id="%s"`,
+				subID),
+			Interval: interval,
+			View:     monitoringpb.ListTimeSeriesRequest_FULL,
+		}
+		it := r.metricClient.ListTimeSeries(ctx, req)
+		ts, err := it.Next()
+		if err != nil {
+			if errors.Is(err, iterator.Done) {
+				// No data point in the window; treat as unknown, skip.
+				continue
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("list time series for subscription %q: %w", subID, err)
+			}
+			continue
+		}
+		points := ts.GetPoints()
+		if len(points) == 0 {
+			continue
+		}
+		// Points are returned newest-first; the first is the latest sample.
+		stats = append(stats, pipeline.QueueBacklogStat{
+			QueueName: subID,
+			Depth:     points[0].GetValue().GetInt64Value(),
+		})
+	}
+	return stats, firstErr
+}
+
+var _ pipeline.BacklogReporter = (*PubSubMQFlow)(nil)
 
 func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChannel chan api.ResultMessage) {
 	logger := log.FromContext(ctx)

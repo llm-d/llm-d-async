@@ -47,6 +47,7 @@ func main() {
 	var redisTracing bool
 
 	var drainTimeout time.Duration
+	var backlogPollInterval time.Duration
 
 	var tlsCACert string
 	var tlsCert string
@@ -61,6 +62,7 @@ func main() {
 	flag.IntVar(&concurrency, "concurrency", 8, "number of concurrent workers")
 	flag.DurationVar(&requestTimeout, "request-timeout", 5*time.Minute, "timeout for individual inference requests")
 	flag.DurationVar(&drainTimeout, "drain-timeout", 2*time.Minute, "maximum time to wait for in-flight requests to complete after SIGTERM")
+	flag.DurationVar(&backlogPollInterval, "metrics-backlog-poll-interval", 15*time.Second, "interval to poll the broker for queue backlog metrics (0 disables); only applies to flows that support it (redis-sortedset, gcp-pubsub)")
 
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
@@ -212,6 +214,13 @@ func main() {
 	}
 
 	impl.Start(signalCtx)
+
+	if reporter, ok := impl.(pipeline.BacklogReporter); ok && backlogPollInterval > 0 {
+		go pollBacklog(signalCtx, reporter, backlogPollInterval)
+	} else if !ok {
+		setupLog.Info("Selected flow does not support broker backlog metrics", "message-queue-impl", messageQueueImpl)
+	}
+
 	<-signalCtx.Done()
 
 	setupLog.Info("Signal received, stopping message consumption")
@@ -271,6 +280,34 @@ func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify boo
 	}
 
 	return tlsConfig, nil
+}
+
+// pollBacklog periodically queries the broker for queue backlog and publishes
+// it as the async_broker_backlog gauge until ctx is cancelled.
+func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interval time.Duration) {
+	logger := ctrl.Log.WithName("backlog-poller")
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	poll := func() {
+		stats, err := reporter.QueueBacklog(ctx)
+		if err != nil {
+			logger.V(logging.DEFAULT).Error(err, "Failed to poll broker backlog")
+		}
+		for _, s := range stats {
+			metrics.SetBrokerBacklog(s.QueueID, s.QueueName, float64(s.Depth))
+		}
+	}
+
+	poll()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			poll()
+		}
+	}
 }
 
 func printAllFlags(setupLog logr.Logger) {
