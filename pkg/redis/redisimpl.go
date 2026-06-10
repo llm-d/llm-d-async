@@ -143,7 +143,10 @@ type RequestChannelData struct {
 	queueName      string
 }
 
-var _ pipeline.Flow = (*RedisMQFlow)(nil)
+var (
+	_ pipeline.Flow          = (*RedisMQFlow)(nil)
+	_ pipeline.HealthChecker = (*RedisMQFlow)(nil)
+)
 
 type RedisMQFlow struct {
 	rdb             *redis.Client
@@ -372,6 +375,10 @@ func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan
 			msgChannel <- &ir
 		}
 	}
+}
+
+func (r *RedisMQFlow) HealthCheck(ctx context.Context) error {
+	return r.rdb.Ping(ctx).Err()
 }
 
 func (r *RedisMQFlow) Characteristics() pipeline.Characteristics {

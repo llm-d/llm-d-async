@@ -51,16 +51,9 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,
 					}
-					select {
-					case retryChannel <- retryMsg:
-					default:
-						select {
-						case retryChannel <- retryMsg:
-						case <-requestCtx.Done():
-							logger.V(logutil.DEFAULT).Error(nil, "drain timeout reached, dropping message", "id", msg.PublicRequest.ReqID())
-							return
-						}
-					}
+					// Safe to block: retryWorker is guaranteed to outlive Workers
+					// (impl.Shutdown runs after wg.Wait in cmd/main.go).
+					retryChannel <- retryMsg
 					if !idle.Stop() {
 						<-idle.C
 					}

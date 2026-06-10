@@ -42,6 +42,23 @@ ap:
     # Enable per-command Redis tracing spans. Can produce high span volume —
     # leave disabled unless actively debugging Redis.
     redisTracing: false
+  health:
+    port: 8081
+    livenessProbe:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readinessProbe:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+    startupProbe:
+      initialDelaySeconds: 0
+      periodSeconds: 2
+      timeoutSeconds: 3
+      failureThreshold: 30
   metrics:
     enabled: true
     port: 9090

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/llm-d-incubation/llm-d-async/internal/health"
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
 	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
@@ -36,6 +37,7 @@ func main() {
 
 	var loggerVerbosity int
 
+	var healthPort int
 	var metricsPort int
 	var metricsEndpointAuth bool
 
@@ -56,6 +58,7 @@ func main() {
 
 	flag.IntVar(&loggerVerbosity, "v", logging.DEFAULT, "number for the log level verbosity")
 
+	flag.IntVar(&healthPort, "health-port", 8081, "The health probe port")
 	flag.IntVar(&metricsPort, "metrics-port", 9090, "The metrics port")
 	flag.BoolVar(&metricsEndpointAuth, "metrics-endpoint-auth", true, "Enables authentication and authorization of the metrics endpoint")
 
@@ -154,6 +157,22 @@ func main() {
 
 	metrics.Register(metrics.GetAsyncProcessorCollectors(impl.Characteristics().SupportsMessageLatency)...)
 
+	var checker health.Checker
+	if hc, ok := impl.(pipeline.HealthChecker); ok {
+		checker = hc.HealthCheck
+	}
+	healthServer := health.NewServer(healthPort, checker, setupLog.WithName("health"))
+	healthLn, err := healthServer.ListenAndServe()
+	if err != nil {
+		setupLog.Error(err, "Failed to bind health server")
+		os.Exit(1)
+	}
+	go func() {
+		if err := healthServer.Serve(healthLn); err != nil {
+			setupLog.Error(err, "Health server failed")
+		}
+	}()
+
 	signalCtx := ctrl.SetupSignalHandler()
 
 	// Register metrics handler.
@@ -214,6 +233,7 @@ func main() {
 	}
 
 	impl.Start(signalCtx)
+	healthServer.SetReady()
 
 	if reporter, ok := impl.(pipeline.BacklogReporter); ok && backlogPollInterval > 0 {
 		go pollBacklog(signalCtx, reporter, backlogPollInterval)
@@ -222,6 +242,7 @@ func main() {
 	}
 
 	<-signalCtx.Done()
+	healthServer.SetNotReady()
 
 	setupLog.Info("Signal received, stopping message consumption")
 	impl.StopConsuming()
@@ -239,6 +260,12 @@ func main() {
 	}
 
 	impl.Shutdown()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := healthServer.Shutdown(shutdownCtx); err != nil {
+		setupLog.Error(err, "Health server shutdown error")
+	}
 }
 
 func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify bool) (*tls.Config, error) {
