@@ -271,6 +271,9 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 			if firstErr == nil {
 				firstErr = fmt.Errorf("list time series for subscription %q: %w", subID, err)
 			}
+			// Report 0 rather than skipping so the gauge does not retain a
+			// stale value for this subscription after a failed poll.
+			stats = append(stats, pipeline.QueueBacklogStat{QueueName: subID})
 			continue
 		}
 		points := ts.GetPoints()

@@ -1310,3 +1310,43 @@ func TestQueueBacklog(t *testing.T) {
 		t.Errorf("queue-b backlog = %d, want 1", got["queue-b"])
 	}
 }
+
+// TestQueueBacklogReportsZeroOnError verifies that a per-queue failure reports a
+// 0 sentinel for that queue (rather than skipping it) so the gauge does not
+// retain a stale value, while healthy queues still report their real depth.
+func TestQueueBacklogReportsZeroOnError(t *testing.T) {
+	_, rdb, ctx, cancel := setupTest(t)
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{
+			{queueName: "queue-ok", queueID: "ok"},
+			{queueName: "queue-bad", queueID: "bad"},
+		},
+	}
+
+	rdb.ZAdd(ctx, "queue-ok", redis.Z{Score: 0, Member: "m1"})
+	// Make queue-bad a string so ZCard fails with WRONGTYPE.
+	rdb.Set(ctx, "queue-bad", "not-a-sorted-set", 0)
+
+	stats, err := flow.QueueBacklog(ctx)
+	if err == nil {
+		t.Fatal("QueueBacklog expected an error for the WRONGTYPE queue, got nil")
+	}
+
+	got := make(map[string]int64, len(stats))
+	for _, s := range stats {
+		got[s.QueueName] = s.Depth
+	}
+	if _, ok := got["queue-bad"]; !ok {
+		t.Error("queue-bad missing from stats; want a 0 sentinel instead of being skipped")
+	}
+	if got["queue-bad"] != 0 {
+		t.Errorf("queue-bad backlog = %d, want 0", got["queue-bad"])
+	}
+	if got["queue-ok"] != 1 {
+		t.Errorf("queue-ok backlog = %d, want 1", got["queue-ok"])
+	}
+}

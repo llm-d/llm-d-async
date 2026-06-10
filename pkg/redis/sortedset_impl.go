@@ -308,6 +308,12 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 			if firstErr == nil {
 				firstErr = fmt.Errorf("ZCard on queue %q: %w", cd.queueName, err)
 			}
+			// Report 0 rather than skipping so the gauge does not retain a
+			// stale value for this queue after a failed poll.
+			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   cd.queueID,
+				QueueName: cd.queueName,
+			})
 			continue
 		}
 		stats = append(stats, pipeline.QueueBacklogStat{
