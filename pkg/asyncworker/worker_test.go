@@ -745,11 +745,21 @@ func TestWorker_DrainsBufferedMessagesOnShutdown(t *testing.T) {
 			})
 			inferenceClient := NewHTTPInferenceClient(httpclient)
 			requestChannel := make(chan pipeline.EmbelishedRequestMessage, tt.messages)
-			retryChannel := make(chan pipeline.RetryMessage, tt.messages)
+			retryChannel := make(chan pipeline.RetryMessage)
 			resultChannel := make(chan asyncapi.ResultMessage, tt.messages)
 
 			consumeCtx, consumeCancel := context.WithCancel(context.Background())
 			requestCtx, requestCancel := context.WithCancel(context.Background())
+
+			got := make(map[string]bool)
+			var retryWg sync.WaitGroup
+			retryWg.Add(1)
+			go func() {
+				defer retryWg.Done()
+				for msg := range retryChannel {
+					got[msg.PublicRequest.ReqID()] = true
+				}
+			}()
 
 			var wg sync.WaitGroup
 			for w := 0; w < tt.concurrency; w++ {
@@ -785,16 +795,9 @@ func TestWorker_DrainsBufferedMessagesOnShutdown(t *testing.T) {
 				t.Fatal("Workers did not exit within 5s")
 			}
 
-			got := make(map[string]bool)
-			timeout := time.After(5 * time.Second)
-			for range tt.messages {
-				select {
-				case msg := <-retryChannel:
-					got[msg.PublicRequest.ReqID()] = true
-				case <-timeout:
-					t.Fatal("timed out waiting for re-queued messages")
-				}
-			}
+			close(retryChannel)
+			retryWg.Wait()
+
 			for _, id := range ids {
 				if !got[id] {
 					t.Errorf("message %s was not re-queued on shutdown", id)
@@ -1434,11 +1437,22 @@ func TestWorker_DrainTimeoutCancelsInFlight(t *testing.T) {
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
-	retryChannel := make(chan pipeline.RetryMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 
 	consumeCtx, consumeCancel := context.WithCancel(context.Background())
 	requestCtx, requestCancel := context.WithCancel(context.Background())
+
+	var retryMsg pipeline.RetryMessage
+	var gotRetry bool
+	retryDone := make(chan struct{})
+	go func() {
+		defer close(retryDone)
+		for msg := range retryChannel {
+			retryMsg = msg
+			gotRetry = true
+		}
+	}()
 
 	done := make(chan struct{})
 	go func() {
@@ -1458,22 +1472,91 @@ func TestWorker_DrainTimeoutCancelsInFlight(t *testing.T) {
 	requestCancel()
 
 	select {
-	case msg := <-retryChannel:
-		if msg.PublicRequest.ReqID() != msgId {
-			t.Errorf("Expected retry message id %s, got %s", msgId, msg.PublicRequest.ReqID())
-		}
-		if msg.BackoffDurationSeconds != 0 {
-			t.Errorf("Expected zero backoff on shutdown re-enqueue, got %f", msg.BackoffDurationSeconds)
-		}
-	case r := <-resultChannel:
-		t.Errorf("Expected retry on drain timeout, got result: %s", r.Payload)
+	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Worker did not re-enqueue within 5s after drain timeout")
+		t.Fatal("Worker did not exit within 5s after drain timeout")
 	}
+
+	close(retryChannel)
+	<-retryDone
+
+	if !gotRetry {
+		t.Fatal("Worker did not re-enqueue the in-flight message")
+	}
+	if retryMsg.PublicRequest.ReqID() != msgId {
+		t.Errorf("Expected retry message id %s, got %s", msgId, retryMsg.PublicRequest.ReqID())
+	}
+	if retryMsg.BackoffDurationSeconds != 0 {
+		t.Errorf("Expected zero backoff on shutdown re-enqueue, got %f", retryMsg.BackoffDurationSeconds)
+	}
+}
+
+func TestWorker_DrainWithCancelledRequestCtx(t *testing.T) {
+	const totalMessages = 4
+	reqStarted := make(chan struct{})
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		select {
+		case reqStarted <- struct{}{}:
+		default:
+		}
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, totalMessages)
+	retryChannel := make(chan pipeline.RetryMessage)
+	resultChannel := make(chan asyncapi.ResultMessage, totalMessages)
+
+	consumeCtx, consumeCancel := context.WithCancel(context.Background())
+	requestCtx, requestCancel := context.WithCancel(context.Background())
+
+	got := make(map[string]bool)
+	var mu sync.Mutex
+	retryDone := make(chan struct{})
+	go func() {
+		defer close(retryDone)
+		for msg := range retryChannel {
+			mu.Lock()
+			got[msg.PublicRequest.ReqID()] = true
+			mu.Unlock()
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		Worker(consumeCtx, requestCtx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+		close(done)
+	}()
+
+	ids := make([]string, totalMessages)
+	for i := range totalMessages {
+		ids[i] = fmt.Sprintf("drain-ctx-%d", i)
+		requestChannel <- newEmb(asyncapi.RequestMessage{
+			ID:       ids[i],
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		}, "http://localhost:30800/v1/completions", map[string]string{})
+	}
+
+	<-reqStarted
+	consumeCancel()
+	requestCancel()
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Worker did not exit after drain timeout")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Worker did not exit within 5s")
+	}
+
+	close(retryChannel)
+	<-retryDone
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, id := range ids {
+		if !got[id] {
+			t.Errorf("message %s was not re-queued on shutdown", id)
+		}
 	}
 }
