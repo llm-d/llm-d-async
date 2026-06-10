@@ -50,6 +50,8 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,
 					}
+					// Safe to block: retryWorker is guaranteed to outlive Workers
+					// (impl.Shutdown runs after wg.Wait in cmd/main.go).
 					retryChannel <- retryMsg
 					if !idle.Stop() {
 						<-idle.C

@@ -1493,7 +1493,7 @@ func TestWorker_DrainTimeoutCancelsInFlight(t *testing.T) {
 
 func TestWorker_DrainWithCancelledRequestCtx(t *testing.T) {
 	const totalMessages = 4
-	reqStarted := make(chan struct{})
+	reqStarted := make(chan struct{}, 1)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
 		select {
 		case reqStarted <- struct{}{}:
