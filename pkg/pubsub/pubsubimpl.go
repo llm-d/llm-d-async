@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -10,11 +11,15 @@ import (
 	"sync"
 	"time"
 
+	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
+	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/llm-d-incubation/llm-d-async/pkg/util"
+	"google.golang.org/api/iterator"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -58,6 +63,8 @@ type PubSubMQFlow struct {
 	consumeWg       sync.WaitGroup
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
+	metricClient    *monitoring.MetricClient
+	projectID       string
 }
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
@@ -103,6 +110,16 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		requestChannels: make([]RequestChannelData, 0, len(configs)),
 		retryChannel:    make(chan pipeline.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage),
+		projectID:       *projectID,
+	}
+
+	// Cloud Monitoring client for broker-backlog metrics. Best-effort: if it
+	// can't be created (e.g. missing credentials), backlog reporting is
+	// skipped but the flow still operates normally.
+	if metricClient, mErr := monitoring.NewMetricClient(ctx); mErr != nil {
+		log.FromContext(ctx).V(logutil.DEFAULT).Error(mErr, "Failed to create Cloud Monitoring client; broker backlog metrics disabled")
+	} else {
+		p.metricClient = metricClient
 	}
 
 	// Apply functional options
@@ -208,7 +225,72 @@ func (r *PubSubMQFlow) Shutdown() {
 		r.drainCancel()
 	}
 	r.drainWg.Wait()
+	if r.metricClient != nil {
+		_ = r.metricClient.Close()
+	}
 }
+
+// QueueBacklog reports the number of undelivered messages per subscription,
+// sourced from the Cloud Monitoring metric
+// pubsub.googleapis.com/subscription/num_undelivered_messages. The value is
+// approximate and lags real time by the metric's sampling interval.
+func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
+	if r.metricClient == nil {
+		// Backlog reporting was disabled at startup (already logged when the
+		// client failed to initialize); no-op rather than erroring every poll.
+		return nil, nil
+	}
+	now := time.Now()
+	interval := &monitoringpb.TimeInterval{
+		StartTime: timestamppb.New(now.Add(-5 * time.Minute)),
+		EndTime:   timestamppb.New(now),
+	}
+
+	stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
+	var firstErr error
+	for _, cd := range r.requestChannels {
+		subID := cd.subscriberID
+		req := &monitoringpb.ListTimeSeriesRequest{
+			Name: "projects/" + r.projectID,
+			Filter: fmt.Sprintf(
+				`metric.type="pubsub.googleapis.com/subscription/num_undelivered_messages" AND resource.labels.subscription_id="%s"`,
+				subID),
+			Interval: interval,
+			View:     monitoringpb.ListTimeSeriesRequest_FULL,
+		}
+		it := r.metricClient.ListTimeSeries(ctx, req)
+		ts, err := it.Next()
+		if err != nil {
+			if errors.Is(err, iterator.Done) {
+				// No sample in the window: for a configured subscription this
+				// normally means it has drained. Report 0 so the gauge does not
+				// retain a stale (high) value after the queue empties.
+				stats = append(stats, pipeline.QueueBacklogStat{QueueName: subID})
+				continue
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("list time series for subscription %q: %w", subID, err)
+			}
+			// Report 0 rather than skipping so the gauge does not retain a
+			// stale value for this subscription after a failed poll.
+			stats = append(stats, pipeline.QueueBacklogStat{QueueName: subID})
+			continue
+		}
+		points := ts.GetPoints()
+		if len(points) == 0 {
+			stats = append(stats, pipeline.QueueBacklogStat{QueueName: subID})
+			continue
+		}
+		// Points are returned newest-first; the first is the latest sample.
+		stats = append(stats, pipeline.QueueBacklogStat{
+			QueueName: subID,
+			Depth:     points[0].GetValue().GetInt64Value(),
+		})
+	}
+	return stats, firstErr
+}
+
+var _ pipeline.BacklogReporter = (*PubSubMQFlow)(nil)
 
 func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChannel chan api.ResultMessage) {
 	logger := log.FromContext(ctx)
@@ -319,7 +401,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			continue
 		}
 
-		err := r.processMessages(receiveCtx, sub.Receive, ch, gate)
+		err := r.processMessages(receiveCtx, sub.Receive, subscriberID, ch, gate)
 
 		cancel()
 		// TODO
@@ -332,7 +414,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 type receiveFunc func(context.Context, func(context.Context, *pubsub.Message)) error
 
-func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, ch chan *api.InternalRequest, gate pipeline.DispatchGate) error {
+func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, subscriberID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) error {
 	logger := log.FromContext(ctx)
 	return receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 
@@ -344,7 +426,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			return
 		}
 
-		irout := api.InternalRouting{TransportCorrelationID: msg.ID}
+		// Carry the subscription as the request queue label so all per-queue
+		// metrics (throughput, depth, inflight, latency) align with the
+		// async_broker_backlog gauge, which is keyed by subscription ID.
+		irout := api.InternalRouting{TransportCorrelationID: msg.ID, RequestQueueName: subscriberID}
 		if msg.DeliveryAttempt != nil {
 			irout.RetryCount = *msg.DeliveryAttempt - 1
 		}

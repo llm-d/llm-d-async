@@ -78,6 +78,21 @@ type RequestMergePolicy interface {
 	MergeRequestChannels(channels []RequestChannel) EmbelishedRequestChannel
 }
 
+// QueueBacklogStat reports the broker-side backlog for a single queue.
+type QueueBacklogStat struct {
+	QueueID   string
+	QueueName string
+	Depth     int64
+}
+
+// BacklogReporter is an optional capability for flows backed by a broker that
+// exposes a queryable backlog (e.g. Redis sorted sets, GCP PubSub). Flows whose
+// transport has no persisted queue (e.g. Redis Pub/Sub) do not implement it.
+type BacklogReporter interface {
+	// QueueBacklog returns the current backlog for each configured queue.
+	QueueBacklog(ctx context.Context) ([]QueueBacklogStat, error)
+}
+
 type RequestChannel struct {
 	Channel            chan *api.InternalRequest
 	IGWBaseURL         string

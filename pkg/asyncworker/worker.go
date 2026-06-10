@@ -46,6 +46,7 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 					if msg.InternalRequest == nil || msg.PublicRequest == nil {
 						continue
 					}
+					metrics.DecQueueDepth(msg.QueueID, msg.RequestQueueName)
 					retryMsg := pipeline.RetryMessage{
 						EmbelishedRequestMessage: msg,
 						BackoffDurationSeconds:   0,
@@ -67,97 +68,105 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 			}
 			queueID := msg.QueueID
 			queueName := msg.RequestQueueName
-			if msg.RetryCount == 0 {
-				metrics.RecordAsyncReq(queueID, queueName)
-			}
-			payloadBytes := validateAndMarshal(requestCtx, resultChannel, msg)
-			if payloadBytes == nil {
-				continue
-			}
+			metrics.DecQueueDepth(queueID, queueName)
 
-			sendInferenceRequest := func() {
-				reqCtx := requestCtx
-				if md := msg.PublicRequest.ReqMetadata(); len(md) > 0 {
-					reqCtx = otel.GetTextMapPropagator().Extract(reqCtx, propagation.MapCarrier(md))
-				}
+			processMessage := func() {
+				metrics.IncInflight(queueID, queueName)
+				defer metrics.DecInflight(queueID, queueName)
 
-				spanAttrs := []attribute.KeyValue{
-					attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
-					attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
+				if msg.RetryCount == 0 {
+					metrics.RecordAsyncReq(queueID, queueName)
 				}
-				if queueID != "" {
-					spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueID, queueID))
-				}
-				if queueName != "" {
-					spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueName, queueName))
-				}
-				reqCtx, span := uotel.StartSpan(reqCtx, "process-request",
-					trace.WithAttributes(spanAttrs...),
-				)
-				defer span.End()
-
-				reqDeadline := time.Now().Add(requestTimeout)
-				if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
-					if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
-						reqDeadline = msgDeadline
-					}
-				}
-				reqCtx, cancel := context.WithDeadline(reqCtx, reqDeadline)
-				defer cancel()
-
-				logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
-				responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
-
-				if err == nil {
-					metrics.RecordSuccessfulReq(queueID, queueName)
-					select {
-					case resultChannel <- asyncapi.ResultMessage{
-						ID:       msg.PublicRequest.ReqID(),
-						Payload:  string(responseBody),
-						Routing:  msg.InternalRouting,
-						Metadata: msg.PublicRequest.ReqMetadata(),
-					}:
-					case <-requestCtx.Done():
-					}
+				payloadBytes := validateAndMarshal(requestCtx, resultChannel, msg)
+				if payloadBytes == nil {
 					return
 				}
 
-				if requestCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-					_, bgSpan := uotel.DetachedContext(reqCtx, "re-enqueue")
-					bgSpan.SetAttributes(attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()))
-					defer bgSpan.End()
-					retryChannel <- pipeline.RetryMessage{
-						EmbelishedRequestMessage: msg,
-						BackoffDurationSeconds:   0,
+				sendInferenceRequest := func() {
+					reqCtx := requestCtx
+					if md := msg.PublicRequest.ReqMetadata(); len(md) > 0 {
+						reqCtx = otel.GetTextMapPropagator().Extract(reqCtx, propagation.MapCarrier(md))
 					}
-					return
-				}
 
-				var inferenceErr asyncapi.InferenceError
-				if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
-					span.RecordError(err)
-					span.SetStatus(codes.Error, "inference request failed")
-					span.SetAttributes(attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)))
-					metrics.RecordFailedReq(queueID, queueName)
-					select {
-					case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
-					case <-requestCtx.Done():
+					spanAttrs := []attribute.KeyValue{
+						attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
+						attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
 					}
-					return
-				}
+					if queueID != "" {
+						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueID, queueID))
+					}
+					if queueName != "" {
+						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueName, queueName))
+					}
+					reqCtx, span := uotel.StartSpan(reqCtx, "process-request",
+						trace.WithAttributes(spanAttrs...),
+					)
+					defer span.End()
 
-				if inferenceErr.Category().Sheddable() {
-					metrics.RecordSheddedReq(queueID, queueName)
+					reqDeadline := time.Now().Add(requestTimeout)
+					if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
+						if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
+							reqDeadline = msgDeadline
+						}
+					}
+					reqCtx, cancel := context.WithDeadline(reqCtx, reqDeadline)
+					defer cancel()
+
+					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
+					responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, msg.HttpHeaders, payloadBytes)
+
+					if err == nil {
+						metrics.RecordSuccessfulReq(queueID, queueName)
+						select {
+						case resultChannel <- asyncapi.ResultMessage{
+							ID:       msg.PublicRequest.ReqID(),
+							Payload:  string(responseBody),
+							Routing:  msg.InternalRouting,
+							Metadata: msg.PublicRequest.ReqMetadata(),
+						}:
+						case <-requestCtx.Done():
+						}
+						return
+					}
+
+					if requestCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+						_, bgSpan := uotel.DetachedContext(reqCtx, "re-enqueue")
+						bgSpan.SetAttributes(attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()))
+						defer bgSpan.End()
+						retryChannel <- pipeline.RetryMessage{
+							EmbelishedRequestMessage: msg,
+							BackoffDurationSeconds:   0,
+						}
+						return
+					}
+
+					var inferenceErr asyncapi.InferenceError
+					if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
+						span.RecordError(err)
+						span.SetStatus(codes.Error, "inference request failed")
+						span.SetAttributes(attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)))
+						metrics.RecordFailedReq(queueID, queueName)
+						select {
+						case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
+						case <-requestCtx.Done():
+						}
+						return
+					}
+
+					if inferenceErr.Category().Sheddable() {
+						metrics.RecordSheddedReq(queueID, queueName)
+					}
+					span.SetAttributes(attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())))
+					var retryAfter time.Duration
+					var clientErr *asyncapi.ClientError
+					if errors.As(err, &clientErr) {
+						retryAfter = clientErr.RetryAfter
+					}
+					retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter)
 				}
-				span.SetAttributes(attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())))
-				var retryAfter time.Duration
-				var clientErr *asyncapi.ClientError
-				if errors.As(err, &clientErr) {
-					retryAfter = clientErr.RetryAfter
-				}
-				retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter)
+				sendInferenceRequest()
 			}
-			sendInferenceRequest()
+			processMessage()
 		}
 	}
 }

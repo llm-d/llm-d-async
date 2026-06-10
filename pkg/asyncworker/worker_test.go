@@ -815,6 +815,169 @@ func counterValue(cv *prometheus.CounterVec, queueID, queueName string) float64 
 	return testutil.ToFloat64(c)
 }
 
+func gaugeValue(gv *prometheus.GaugeVec, queueID, queueName string) float64 {
+	g, err := gv.GetMetricWithLabelValues(queueID, queueName)
+	if err != nil {
+		return 0
+	}
+	return testutil.ToFloat64(g)
+}
+
+// waitForGauge polls a gauge until it reaches want or the timeout elapses,
+// avoiding a race against the worker's deferred decrement.
+func waitForGauge(t *testing.T, gv *prometheus.GaugeVec, queueID, queueName string, want float64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := gaugeValue(gv, queueID, queueName)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("gauge for (%s,%s) = %f, want %f", queueID, queueName, got, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestMetrics_QueueDepthAndInflightBalance verifies the worker's gauge
+// bookkeeping: every message read decrements async_queue_depth (the merge
+// policy is responsible for the increment, simulated here), and
+// async_inflight_requests is bracketed around handling so it returns to zero on
+// every exit path (success, retry, and shutdown drain).
+func TestMetrics_QueueDepthAndInflightBalance(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		netErr     bool
+		drain      bool // cancel consumeCtx before the worker reads, exercising the drain path
+	}{
+		{name: "success decrements depth and clears inflight", statusCode: http.StatusOK},
+		{name: "retry decrements depth and clears inflight", statusCode: http.StatusTooManyRequests},
+		{name: "fatal error decrements depth and clears inflight", netErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queueID := "depth-" + tt.name
+			queueName := queueID
+
+			httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+				if tt.netErr {
+					return nil, fmt.Errorf("connection refused")
+				}
+				return &http.Response{StatusCode: tt.statusCode, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+			})
+			inferenceClient := NewHTTPInferenceClient(httpclient)
+			requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+			retryChannel := make(chan pipeline.RetryMessage, 1)
+			resultChannel := make(chan asyncapi.ResultMessage, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+
+			// Simulate the merge policy's increment for one buffered request.
+			metrics.IncQueueDepth(queueID, queueName)
+			if got := gaugeValue(metrics.QueueDepth, queueID, queueName); got != 1 {
+				t.Fatalf("queue depth before processing = %f, want 1", got)
+			}
+
+			requestChannel <- newEmbR(asyncapi.InternalRouting{
+				QueueID:          queueID,
+				RequestQueueName: queueName,
+			}, asyncapi.RequestMessage{
+				ID:       "depth-msg",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(100 * time.Second).Unix(),
+				Payload:  map[string]any{"model": "test", "prompt": "hi"},
+			}, "http://localhost:30800/v1/completions", nil)
+
+			// Wait for the terminal outcome so handling has completed.
+			select {
+			case <-resultChannel:
+			case <-retryChannel:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timeout waiting for worker to process message")
+			}
+
+			// Depth must return to 0 (decremented on read) and inflight to 0
+			// (deferred decrement on every exit path).
+			waitForGauge(t, metrics.QueueDepth, queueID, queueName, 0)
+			waitForGauge(t, metrics.InflightRequests, queueID, queueName, 0)
+		})
+	}
+}
+
+// TestMetrics_QueueDepthDecrementsOnDrain verifies the worker's drain path
+// (consumeCtx cancelled) also decrements async_queue_depth for each buffered
+// message it re-enqueues, and never marks them inflight.
+func TestMetrics_QueueDepthDecrementsOnDrain(t *testing.T) {
+	queueID := "depth-drain-qid"
+	queueName := "depth-drain-queue"
+
+	// A blocking client: any message that reaches the normal (in-flight) path
+	// stays there until requestCtx is cancelled, at which point it re-enqueues.
+	// Combined with cancelling consumeCtx, every message ends up on the retry
+	// channel regardless of which path the worker's select happens to take.
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	const n = 3
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, n)
+	retryChannel := make(chan pipeline.RetryMessage, n)
+	resultChannel := make(chan asyncapi.ResultMessage, n)
+
+	consumeCtx, consumeCancel := context.WithCancel(context.Background())
+	requestCtx, requestCancel := context.WithCancel(context.Background())
+
+	// Buffer n messages and account for them as the merge policy would, then
+	// cancel both contexts so the worker drains/re-enqueues every message.
+	for i := 0; i < n; i++ {
+		metrics.IncQueueDepth(queueID, queueName)
+		requestChannel <- newEmbR(asyncapi.InternalRouting{
+			QueueID:          queueID,
+			RequestQueueName: queueName,
+		}, asyncapi.RequestMessage{
+			ID:       fmt.Sprintf("drain-depth-%d", i),
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		}, "http://localhost:30800/v1/completions", nil)
+	}
+	consumeCancel()
+	requestCancel()
+
+	done := make(chan struct{})
+	go func() {
+		Worker(consumeCtx, requestCtx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
+		close(done)
+	}()
+
+	for i := 0; i < n; i++ {
+		select {
+		case <-retryChannel:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for re-enqueued message %d", i)
+		}
+	}
+
+	// Depth must drain to 0 on both the normal and drain read paths, and
+	// inflight must settle back to 0 (the decrement is deferred until after the
+	// re-enqueue send, so poll rather than read once).
+	waitForGauge(t, metrics.QueueDepth, queueID, queueName, 0)
+	waitForGauge(t, metrics.InflightRequests, queueID, queueName, 0)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not exit after drain")
+	}
+}
+
 func TestMetrics_SuccessfulRequest(t *testing.T) {
 	queueID := "metrics-success-qid"
 	queueName := "metrics-success-queue"

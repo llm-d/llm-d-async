@@ -60,7 +60,7 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg1)
 				return nil
 			}
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			_ = flow.processMessages(ctx, receive, "test-sub", ch, gate)
 		}()
 
 		// Verification: Request 1 should reach the channel
@@ -84,7 +84,7 @@ func TestGating_EndToEnd(t *testing.T) {
 				return nil
 			}
 			// We expect this to return without putting anything in 'ch'
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			_ = flow.processMessages(ctx, receive, "test-sub", ch, gate)
 			deniedChan <- true
 		}()
 
@@ -111,7 +111,7 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg3)
 				return nil
 			}
-			_ = flow.processMessages(ctx, receive, ch, gate)
+			_ = flow.processMessages(ctx, receive, "test-sub", ch, gate)
 		}()
 
 		select {
@@ -137,7 +137,7 @@ func TestGating_EndToEnd(t *testing.T) {
 					f(ctx, msg)
 					return nil
 				}
-				_ = flow.processMessages(context.Background(), receive, ch, gate)
+				_ = flow.processMessages(context.Background(), receive, "test-sub", ch, gate)
 			}()
 
 			select {
@@ -160,7 +160,7 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg3)
 				return nil
 			}
-			_ = flow.processMessages(context.Background(), receive, ch, gate)
+			_ = flow.processMessages(context.Background(), receive, "test-sub", ch, gate)
 			deniedChan <- true
 		}()
 
@@ -183,7 +183,7 @@ func TestGating_EndToEnd(t *testing.T) {
 				f(ctx, msg4)
 				return nil
 			}
-			_ = flow.processMessages(context.Background(), receive, ch, gate)
+			_ = flow.processMessages(context.Background(), receive, "test-sub", ch, gate)
 		}()
 
 		select {
