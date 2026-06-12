@@ -62,14 +62,17 @@ func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool stri
 	if maxConcurrency <= 0 {
 		return nil, fmt.Errorf("maxConcurrency must be positive, got %g", maxConcurrency)
 	}
-	label := strconv.Quote(inferencePool)
-	nsFilter := ""
+	queueLabels := map[string]string{"inference_pool": inferencePool}
+	podsLabels := map[string]string{"name": inferencePool}
 	if namespace != "" {
-		nsFilter = fmt.Sprintf(`,namespace=%s`, strconv.Quote(namespace))
+		queueLabels["namespace"] = namespace
+		podsLabels["namespace"] = namespace
 	}
 	query := fmt.Sprintf(
-		`1 - (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s%s}) / on() (inference_pool_ready_pods{name=%s%s} * %g))`,
-		label, nsFilter, label, nsFilter, maxConcurrency,
+		`1 - (sum by(inference_pool)(%s) / on() (%s * %g))`,
+		buildPromQL("inference_extension_flow_control_queue_size", queueLabels),
+		buildPromQL("inference_pool_ready_pods", podsLabels),
+		maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
 	if err != nil {
@@ -89,14 +92,17 @@ func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, ma
 	if maxConcurrency <= 0 {
 		return nil, fmt.Errorf("maxConcurrency must be positive, got %g", maxConcurrency)
 	}
-	label := strconv.Quote(inferencePool)
-	nsFilter := ""
+	vllmLabels := map[string]string{"inference_pool": inferencePool}
+	podsLabels := map[string]string{"name": inferencePool}
 	if namespace != "" {
-		nsFilter = fmt.Sprintf(`,namespace=%s`, strconv.Quote(namespace))
+		vllmLabels["namespace"] = namespace
+		podsLabels["namespace"] = namespace
 	}
 	query := fmt.Sprintf(
-		`1 - (sum(vllm:num_requests_running{inference_pool=%s%s}) / on() (inference_pool_ready_pods{name=%s%s} * %g))`,
-		label, nsFilter, label, nsFilter, maxConcurrency,
+		`1 - (sum(%s) / on() (%s * %g))`,
+		buildPromQL("vllm:num_requests_running", vllmLabels),
+		buildPromQL("inference_pool_ready_pods", podsLabels),
+		maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
 	if err != nil {

@@ -138,8 +138,9 @@ The values file (`docs/guides/e2e-deploy/async-processor-values.yaml`) configure
 
 > **Multi-namespace deployments:** If the cluster has multiple inference pools
 > with the same name in different namespaces, the `prometheus-budget` and
-> `prometheus-saturation` gate queries will return ambiguous results. Add
-> `namespace` to `gate_params` to scope the queries:
+> `prometheus-saturation` gate queries may match multiple time series and fail
+> with many-to-many matching errors. Add `namespace` to `gate_params` to scope
+> the queries:
 > ```yaml
 > gate_params:
 >   pool: "optimized-baseline"
