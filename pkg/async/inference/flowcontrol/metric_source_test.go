@@ -165,60 +165,80 @@ func TestNewPromQLMetricSource_InvalidAddress(t *testing.T) {
 
 // PromQL construction tests for budget and saturation source factories
 
-func TestFlowControlQueueSizePromQL_ContainsExpectedMetrics(t *testing.T) {
-	source, err := NewFlowControlQueueSizePromQL(
-		api.Config{Address: "http://localhost:9090"},
-		"my-pool", 100,
-	)
-	require.NoError(t, err)
-	require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool"}`)
-	require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
-	require.Contains(t, source.expr, "* 100")
+func TestFlowControlQueueSizePromQL(t *testing.T) {
+	promConfig := api.Config{Address: "http://localhost:9090"}
+
+	t.Run("ContainsExpectedMetrics", func(t *testing.T) {
+		source, err := NewFlowControlQueueSizePromQL(promConfig, "my-pool", 100, "")
+		require.NoError(t, err)
+		require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool"}`)
+		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
+		require.Contains(t, source.expr, "* 100")
+		require.NotContains(t, source.expr, "namespace")
+	})
+
+	t.Run("RequiresPool", func(t *testing.T) {
+		_, err := NewFlowControlQueueSizePromQL(promConfig, "", 100, "")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "inference pool name is required")
+	})
+
+	t.Run("WithNamespace", func(t *testing.T) {
+		source, err := NewFlowControlQueueSizePromQL(promConfig, "my-pool", 100, "prod")
+		require.NoError(t, err)
+		require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool",namespace="prod"}`)
+	})
 }
 
-func TestFlowControlQueueSizePromQL_RequiresPool(t *testing.T) {
-	_, err := NewFlowControlQueueSizePromQL(
-		api.Config{Address: "http://localhost:9090"},
-		"", 100,
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "inference pool name is required")
+func TestVLLMSaturationPromQL(t *testing.T) {
+	promConfig := api.Config{Address: "http://localhost:9090"}
+
+	t.Run("ContainsExpectedMetrics", func(t *testing.T) {
+		source, err := NewVLLMSaturationPromQL(promConfig, "my-pool", 100, "")
+		require.NoError(t, err)
+		require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool"}`)
+		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
+		require.Contains(t, source.expr, "* 100")
+		require.NotContains(t, source.expr, "namespace")
+	})
+
+	t.Run("RequiresPool", func(t *testing.T) {
+		_, err := NewVLLMSaturationPromQL(promConfig, "", 100, "")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "inference pool name is required")
+	})
+
+	t.Run("WithNamespace", func(t *testing.T) {
+		source, err := NewVLLMSaturationPromQL(promConfig, "my-pool", 100, "prod")
+		require.NoError(t, err)
+		require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool",namespace="prod"}`)
+	})
 }
 
-func TestVLLMSaturationPromQL_ContainsExpectedMetrics(t *testing.T) {
-	source, err := NewVLLMSaturationPromQL(
-		api.Config{Address: "http://localhost:9090"},
-		"my-pool", 100,
-	)
-	require.NoError(t, err)
-	require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool"}`)
-	require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
-	require.Contains(t, source.expr, "* 100")
-}
+func TestNewSaturationPromQLSourceFromConfig(t *testing.T) {
+	promConfig := api.Config{Address: "http://localhost:9090"}
 
-func TestVLLMSaturationPromQL_RequiresPool(t *testing.T) {
-	_, err := NewVLLMSaturationPromQL(
-		api.Config{Address: "http://localhost:9090"},
-		"", 100,
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "inference pool name is required")
-}
+	t.Run("DefaultQuery", func(t *testing.T) {
+		source, err := NewSaturationPromQLSourceFromConfig(promConfig,
+			map[string]string{"pool": "my-pool"})
+		require.NoError(t, err)
+		require.Contains(t, source.expr, `1 - inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
+		require.NotContains(t, source.expr, "namespace")
+	})
 
-func TestNewSaturationPromQLSourceFromConfig_DefaultQuery(t *testing.T) {
-	source, err := NewSaturationPromQLSourceFromConfig(
-		api.Config{Address: "http://localhost:9090"},
-		map[string]string{"pool": "my-pool"},
-	)
-	require.NoError(t, err)
-	require.Contains(t, source.expr, `1 - inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
-}
+	t.Run("RequiresPool", func(t *testing.T) {
+		_, err := NewSaturationPromQLSourceFromConfig(promConfig, map[string]string{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "inference pool name is required")
+	})
 
-func TestNewSaturationPromQLSourceFromConfig_RequiresPool(t *testing.T) {
-	_, err := NewSaturationPromQLSourceFromConfig(
-		api.Config{Address: "http://localhost:9090"},
-		map[string]string{},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "inference pool name is required")
+	t.Run("WithNamespace", func(t *testing.T) {
+		source, err := NewSaturationPromQLSourceFromConfig(promConfig,
+			map[string]string{"pool": "my-pool", "namespace": "prod"})
+		require.NoError(t, err)
+		require.Contains(t, source.expr, `inference_pool="my-pool"`)
+		require.Contains(t, source.expr, `namespace="prod"`)
+	})
 }

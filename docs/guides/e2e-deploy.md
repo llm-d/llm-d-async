@@ -135,6 +135,19 @@ The values file (`docs/guides/e2e-deploy/async-processor-values.yaml`) configure
 - Queue: Redis sorted-set with `redis.url` set directly (chart creates the Secret), configured via `queuesConfig`
 - Gate: `prometheus-budget` with pool=`optimized-baseline`, max_concurrency=100, baseline=0.05 (per-queue)
 - Prometheus URL pointing to the cluster's `llmd-kube-prometheus-stack-prometheus` service
+
+> **Multi-namespace deployments:** If the cluster has multiple inference pools
+> with the same name in different namespaces, the `prometheus-budget` and
+> `prometheus-saturation` gate queries may match multiple time series and fail
+> with many-to-many matching errors. Add `namespace` to `gate_params` to scope
+> the queries:
+> ```yaml
+> gate_params:
+>   pool: "optimized-baseline"
+>   namespace: "my-namespace"    # scope metrics to this namespace
+>   max_concurrency: "100"
+>   baseline: "0.05"
+> ```
 - `modelServerMonitor.enabled: true` — creates a PodMonitor that relabels the `inference_pool`
   pod label into vLLM metrics (required for the dispatch budget gate fallback)
 - `podMonitor.enabled: true` — creates a PodMonitor that scrapes the async-processor's own
