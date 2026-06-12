@@ -207,6 +207,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 
 - `prometheus-saturation`:
   - `pool` (**required**): The inference pool name to filter metrics by.
+  - `namespace` (optional): Kubernetes namespace to scope metric queries. Required when multiple namespaces share the same pool name with a shared Prometheus instance.
   - `threshold` (optional): Saturation threshold (0.0-1.0). When saturation >= threshold, budget is 0.0. Default is `0.8`.
   - `fallback` (optional): Fallback saturation value (0.0-1.0) used when the metric source returns an error or empty data. Default is `0.0`.
 
@@ -224,6 +225,7 @@ For more fine-grained control, configure gates per queue in your configuration f
   - `pool` (**required**): The InferencePool name. This must match both the `name` field in
     `inference_pool_ready_pods{name="<pool>"}` (EPP metric) and, for the vLLM fallback,
     the `inference_pool` label on scraped vLLM metrics (added via relabeling from pod labels).
+  - `namespace` (optional): Kubernetes namespace to scope metric queries. Required when multiple namespaces share the same pool name with a shared Prometheus instance.
   - `max_concurrency` (optional): Per-endpoint request capacity (`MaxConcurrency` in the [inference scheduler's saturation detector](https://github.com/llm-d/llm-d-inference-scheduler/blob/main/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go)). Default is `100` (matching the inference scheduler default).
   - `baseline` (optional): Reserved baseline B. The gate closes when D ≤ B. Default is `0.05`.
   - `fallback` (optional): Fallback budget value (0.0-1.0) returned when all metric sources are unavailable. Default is `0.0` (fail closed).
