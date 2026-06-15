@@ -22,6 +22,13 @@ ap:
   drainTimeout: "2m"
   prometheusURL: ""
   prometheusCacheTTL: ""
+  # Named worker pools configuration. When specified, overrides the global concurrency option.
+  # workerPools:
+  #   - id: "default"
+  #     workers: 8
+  #   - id: "premium"
+  #     workers: 16
+  workerPools: []
   otel:
     # OTLP gRPC endpoint for trace collection. Examples:
     #   Dev (Jaeger all-in-one):     "http://jaeger.default.svc.cluster.local:4317"
@@ -69,6 +76,20 @@ ap:
     requestSubscriberId: ""
     resultTopicId: ""
     requestPathURL: "/v1/completions"
+    # Full multi-topic configuration (overrides single-topic fields above).
+    # Each entry supports its own subscriber_id, worker_pool_id, inference_objective,
+    # request_path_url, igw_base_url, gate_type and gate_params.
+    # topicsConfig:
+    #   - subscriber_id: "projects/my-project/subscriptions/sub-1"
+    #     worker_pool_id: "default"
+    #     inference_objective: "latency"
+    #     request_path_url: "/v1/completions"
+    #     igw_base_url: "http://igw:80"
+    #     gate_type: "prometheus-saturation"
+    #     gate_params:
+    #       pool: "pool-1"
+    #       threshold: 0.7
+    topicsConfig: []
   tls:
     secretName: ""
     insecureSkipVerify: false

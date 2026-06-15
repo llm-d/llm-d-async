@@ -62,17 +62,24 @@ spec:
           {{- end }}
           {{- else if .Values.ap.gcpPubSub.enabled }}
           - --message-queue-impl=gcp-pubsub
+          - --pubsub.result-topic-id={{ .Values.ap.gcpPubSub.resultTopicId }}
+          {{- if .Values.ap.gcpPubSub.topicsConfig }}
+          - --pubsub.topics-config-file=/etc/async-processor/config/pubsub-topics.json
+          {{- else }}
           - --pubsub.igw-base-url={{ .Values.ap.igwBaseURL }}
           - --pubsub.request-subscriber-id={{ .Values.ap.gcpPubSub.requestSubscriberId }}
-          - --pubsub.result-topic-id={{ .Values.ap.gcpPubSub.resultTopicId }}
           - --pubsub.request-path-url
           - "{{ .Values.ap.gcpPubSub.requestPathURL }}"
+          {{- end }}
           {{- end }}
           {{- if .Values.ap.prometheusURL }}
           - --prometheus-url={{ .Values.ap.prometheusURL }}
           {{- end }}
           {{- if .Values.ap.prometheusCacheTTL }}
           - --prometheus-cache-ttl={{ .Values.ap.prometheusCacheTTL }}
+          {{- end }}
+          {{- if .Values.ap.workerPools }}
+          - --pool-config-file=/etc/async-processor/config/worker-pools.json
           {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 8 }}
           - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
@@ -166,17 +173,31 @@ spec:
         resources:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- with .Values.ap.tls.secretName }}
+        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.tls.secretName }}
         volumeMounts:
+          {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig }}
+          - name: ap-config
+            mountPath: /etc/async-processor/config
+            readOnly: true
+          {{- end }}
+          {{- if .Values.ap.tls.secretName }}
           - name: tls-certs
             mountPath: /etc/tls
             readOnly: true
+          {{- end }}
         {{- end }}
       serviceAccountName: {{ include "async-processor.fullname" . }}
       terminationGracePeriodSeconds: 130
-      {{- with .Values.ap.tls.secretName }}
+      {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.tls.secretName }}
       volumes:
+        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig }}
+        - name: ap-config
+          configMap:
+            name: {{ include "async-processor.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.ap.tls.secretName }}
         - name: tls-certs
           secret:
-            secretName: {{ . }}
+            secretName: {{ .Values.ap.tls.secretName }}
+        {{- end }}
       {{- end }}

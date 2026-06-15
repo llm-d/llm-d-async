@@ -211,3 +211,50 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: "Cannot set both queuesConfig and gateType. Use queuesConfig with per-queue gate_type instead."
+
+  - it: should mount config volume and pass pool-config-file when workerPools are set
+    set:
+      ap.workerPools:
+        - id: default
+          workers: 8
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pool-config-file=/etc/async-processor/config/worker-pools.json
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ap-config
+            mountPath: /etc/async-processor/config
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ap-config
+            configMap:
+              name: RELEASE-NAME-async-processor-config
+
+  - it: should mount config volume and pass pubsub.topics-config-file when GCP PubSub topicsConfig is set
+    set:
+      ap.redis.enabled: false
+      ap.gcpPubSub.enabled: true
+      ap.gcpPubSub.resultTopicId: "test-result-topic"
+      ap.gcpPubSub.topicsConfig:
+        - subscriber_id: "sub-1"
+          igw_base_url: "http://igw:80"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pubsub.topics-config-file=/etc/async-processor/config/pubsub-topics.json
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ap-config
+            mountPath: /etc/async-processor/config
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ap-config
+            configMap:
+              name: RELEASE-NAME-async-processor-config

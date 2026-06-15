@@ -122,8 +122,8 @@ type EmbelishedRequestChannel struct {
 // there is no separate Metadata field here to avoid ambiguity.
 type EmbelishedRequestMessage struct {
 	*api.InternalRequest
-	HttpHeaders map[string]string
-	RequestURL  string
+	HttpHeaders  map[string]string
+	RequestURL   string
 	WorkerPoolID string
 }
 

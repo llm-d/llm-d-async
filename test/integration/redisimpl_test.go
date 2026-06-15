@@ -50,7 +50,7 @@ func TestRedisImpl(t *testing.T) {
 					Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
 				},
 			),
-			RequestURL:  "http://localhost:30800/v1/completions",
+			RequestURL: "http://localhost:30800/v1/completions",
 		},
 		BackoffDurationSeconds: 2,
 	}

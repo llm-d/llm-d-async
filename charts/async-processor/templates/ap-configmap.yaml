@@ -1,0 +1,16 @@
+{{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "async-processor.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "async-processor.labels" . | nindent 4 }}
+data:
+  {{- if .Values.ap.workerPools }}
+  worker-pools.json: {{ .Values.ap.workerPools | toJson | quote }}
+  {{- end }}
+  {{- if .Values.ap.gcpPubSub.topicsConfig }}
+  pubsub-topics.json: {{ .Values.ap.gcpPubSub.topicsConfig | toJson | quote }}
+  {{- end }}
+{{- end }}
