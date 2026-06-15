@@ -68,14 +68,16 @@ func ConstOpenGate() DispatchGate {
 }
 
 type RequestMergePolicy interface {
-	MergeRequestChannels(channels []RequestChannel, pools map[string]PoolConfig) PoolDispatch
+	MergeRequestChannels(channels []RequestChannel, pools map[string]WorkerPoolConfig) PoolDispatch
 }
 
 type RequestChannel struct {
 	Channel            chan *api.InternalRequest
 	InferenceObjective string
 	Gate               DispatchGate
-	PoolID             string
+	WorkerPoolID       string
+	IGWBaseURL         string
+	RequestPathURL     string
 }
 
 // PoolDispatch is the merge policy's output: one buffered channel per
@@ -99,7 +101,7 @@ type EmbelishedRequestMessage struct {
 	*api.InternalRequest
 	HttpHeaders map[string]string
 	RequestURL  string
-	PoolID      string
+	WorkerPoolID string
 }
 
 // RetryMessage carries an embellished request and backoff for re-queueing.

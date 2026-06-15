@@ -22,8 +22,8 @@ import (
 )
 
 var (
-	_                    = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
-	_                    = flag.String("redis.ss.request-path-url", "/v1/completions", "Request path URL")
+	ssIgwBaseURL         = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
+	ssRequestPathURL     = flag.String("redis.ss.request-path-url", "/v1/completions", "Request path URL")
 	ssInferenceObjective = flag.String("redis.ss.inference-objective", "", "Inference objective header")
 	ssRequestQueueName   = flag.String("redis.ss.request-queue-name", "request-sortedset", "Request sorted set name")
 	ssResultQueueName    = flag.String("redis.ss.result-queue-name", "result-list", "Result list name")
@@ -79,10 +79,12 @@ type queueConfig struct {
 	ID                 string    `json:"id,omitempty"`
 	QueueName          string    `json:"queue_name,omitempty"`
 	ResultQueueName    string    `json:"result_queue_name,omitempty"`
-	PoolID             string    `json:"pool_id"`
+	WorkerPoolID       string    `json:"worker_pool_id"`
 	InferenceObjective string    `json:"inference_objective"`
 	GateType           string    `json:"gate_type"`
 	GateParams         StringMap `json:"gate_params,omitempty"`
+	IGWBaseURL         string    `json:"igw_base_url"`
+	RequestPathURL     string    `json:"request_path_url"`
 }
 
 type requestChannelData struct {
@@ -105,7 +107,7 @@ type RedisSortedSetFlow struct {
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
 	configMap       map[string]queueConfig
-	pools           []pipeline.PoolConfig
+	workerPools     []pipeline.WorkerPoolConfig
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 	enableTracing   bool
@@ -129,10 +131,10 @@ func WithSortedSetRedisTracing(enable bool) SortedSetOption {
 	}
 }
 
-// WithSortedSetPools sets the pool configurations to resolve named pools.
-func WithSortedSetPools(pools []pipeline.PoolConfig) SortedSetOption {
+// WithSortedSetWorkerPools sets the pool configurations to resolve named pools.
+func WithSortedSetWorkerPools(workerPools []pipeline.WorkerPoolConfig) SortedSetOption {
 	return func(r *RedisSortedSetFlow) {
-		r.pools = pools
+		r.workerPools = workerPools
 	}
 }
 
@@ -179,27 +181,43 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 			gate = pipeline.ConstOpenGate()
 		}
 
-		poolID := cfg.PoolID
-		if poolID == "" {
-			return nil, fmt.Errorf("queue config for queue %q: pool_id must be specified", cfg.QueueName)
+		workerPoolID := cfg.WorkerPoolID
+		if workerPoolID == "" {
+			workerPoolID = "default"
+		}
+
+		// If pool config was not specified, fallback to the single default pool.
+		if len(r.workerPools) == 1 && r.workerPools[0].ID == "default" {
+			workerPoolID = "default"
 		}
 
 		found := false
-		for _, pool := range r.pools {
-			if pool.ID == poolID {
+		for _, pool := range r.workerPools {
+			if pool.ID == workerPoolID {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("pool %q specified in queue config not found in pool configuration", poolID)
+			return nil, fmt.Errorf("worker pool %q specified in queue config not found in pool configuration", workerPoolID)
+		}
+
+		if cfg.IGWBaseURL == "" {
+			return nil, fmt.Errorf("queue config for queue %q: igw_base_url must be specified", cfg.QueueName)
+		}
+
+		reqPath := cfg.RequestPathURL
+		if reqPath == "" {
+			reqPath = "/v1/completions"
 		}
 
 		ch := pipeline.RequestChannel{
 			Channel:            make(chan *api.InternalRequest),
 			InferenceObjective: cfg.InferenceObjective,
 			Gate:               gate,
-			PoolID:             poolID,
+			WorkerPoolID:       workerPoolID,
+			IGWBaseURL:         cfg.IGWBaseURL,
+			RequestPathURL:     reqPath,
 		}
 
 		r.configMap[cfg.ID] = cfg
@@ -249,7 +267,9 @@ func loadQueueConfigs() ([]queueConfig, error) {
 			InferenceObjective: *ssInferenceObjective,
 			GateType:           *ssGateType,
 			GateParams:         parseGateParams(*ssGateParamsJSON),
-			PoolID:             "default",
+			WorkerPoolID:       "default",
+			IGWBaseURL:         *ssIgwBaseURL,
+			RequestPathURL:     *ssRequestPathURL,
 		}}
 	}
 	seenID := make(map[string]bool, len(configs))

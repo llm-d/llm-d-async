@@ -26,15 +26,16 @@ func TestRandomRobinPolicy_ConcurrentProducers(t *testing.T) {
 		channels[i] = pipeline.RequestChannel{
 			Channel:            make(chan *asyncapi.InternalRequest, msgsPerChannel),
 			InferenceObjective: "latency",
-			PoolID:             "test-pool",
+			WorkerPoolID:       "test-pool",
+			IGWBaseURL:         "http://localhost:8080",
+			RequestPathURL:     "/v1/completions",
 		}
 	}
 
-	pools := map[string]pipeline.PoolConfig{
+	pools := map[string]pipeline.WorkerPoolConfig{
 		"test-pool": {
-			ID:             "test-pool",
-			IGWBaseURL:     "http://localhost:8080",
-			RequestPathURL: "/v1/completions",
+			ID:      "test-pool",
+			Workers: 1,
 		},
 	}
 

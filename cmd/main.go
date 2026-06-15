@@ -108,42 +108,27 @@ func main() {
 	hasQueueConfig := isQueueConfigSet()
 	hasPoolConfig := (poolConfigFile != "")
 
-	if hasQueueConfig != hasPoolConfig {
-		setupLog.Error(fmt.Errorf("both pool-config-file and queues/topics config file must be specified together, or both must be omitted"), "Configuration error")
+	if hasPoolConfig && !hasQueueConfig {
+		setupLog.Error(fmt.Errorf("pool-config-file can only be specified when queues/topics config file is also specified"), "Configuration error")
 		os.Exit(1)
 	}
 
-	var pools []pipeline.PoolConfig
+	var workerPools []pipeline.WorkerPoolConfig
 	if hasPoolConfig {
 		var err error
-		pools, err = pipeline.LoadPools(poolConfigFile)
+		workerPools, err = pipeline.LoadWorkerPools(poolConfigFile)
 		if err != nil {
 			setupLog.Error(err, "Failed to load pool configuration file")
 			os.Exit(1)
 		}
-		setupLog.Info("Loaded named pools config", "count", len(pools))
+		setupLog.Info("Loaded named pools config", "count", len(workerPools))
 	} else {
 		// Both are unset. Create a "default" pool.
-		var igwURL, requestPath string
-		switch messageQueueImpl {
-		case "redis-pubsub":
-			igwURL = flag.Lookup("redis.igw-base-url").Value.String()
-			requestPath = flag.Lookup("redis.request-path-url").Value.String()
-		case "redis-sortedset":
-			igwURL = flag.Lookup("redis.ss.igw-base-url").Value.String()
-			requestPath = flag.Lookup("redis.ss.request-path-url").Value.String()
-		case "gcp-pubsub", "gcp-pubsub-gated":
-			igwURL = flag.Lookup("pubsub.igw-base-url").Value.String()
-			requestPath = flag.Lookup("pubsub.request-path-url").Value.String()
-		}
-
-		pools = []pipeline.PoolConfig{{
-			ID:             "default",
-			IGWBaseURL:     igwURL,
-			RequestPathURL: requestPath,
-			Workers:        concurrency,
+		workerPools = []pipeline.WorkerPoolConfig{{
+			ID:      "default",
+			Workers: concurrency,
 		}}
-		setupLog.Info("No queue/pool configs set. Created default pool", "igw_base_url", igwURL, "request_path_url", requestPath, "workers", concurrency)
+		setupLog.Info("No queue/pool configs set. Created default pool", "workers", concurrency)
 	}
 
 	// Create Gate Factory for per-queue gate instantiation
@@ -166,14 +151,14 @@ func main() {
 	var impl pipeline.Flow
 	switch messageQueueImpl {
 	case "redis-pubsub":
-		flow, err := redis.NewRedisMQFlow(redis.WithRedisTracing(redisTracing), redis.WithPools(pools))
+		flow, err := redis.NewRedisMQFlow(redis.WithRedisTracing(redisTracing), redis.WithWorkerPools(workerPools))
 		if err != nil {
 			setupLog.Error(err, "Failed to create Redis pub/sub flow")
 			os.Exit(1)
 		}
 		impl = flow
 	case "redis-sortedset":
-		flow, err := redis.NewRedisSortedSetFlow(redis.WithGateFactory(gateFactory), redis.WithSortedSetRedisTracing(redisTracing), redis.WithSortedSetPools(pools))
+		flow, err := redis.NewRedisSortedSetFlow(redis.WithGateFactory(gateFactory), redis.WithSortedSetRedisTracing(redisTracing), redis.WithSortedSetWorkerPools(workerPools))
 		if err != nil {
 			setupLog.Error(err, "Failed to create Redis sorted-set flow")
 			os.Exit(1)
@@ -181,9 +166,9 @@ func main() {
 		impl = flow
 		setupLog.Info("Using Redis sorted-set flow with per-queue gating")
 	case "gcp-pubsub":
-		impl = pubsub.NewGCPPubSubMQFlow(pubsub.WithPools(pools))
+		impl = pubsub.NewGCPPubSubMQFlow(pubsub.WithWorkerPools(workerPools))
 	case "gcp-pubsub-gated":
-		impl = pubsub.NewGCPPubSubMQFlow(pubsub.WithGateFactory(gateFactory), pubsub.WithPools(pools))
+		impl = pubsub.NewGCPPubSubMQFlow(pubsub.WithGateFactory(gateFactory), pubsub.WithWorkerPools(workerPools))
 		setupLog.Info("Using GCP PubSub flow with per-queue gating")
 	default:
 		setupLog.Error(fmt.Errorf("unknown message queue implementation: %s", messageQueueImpl), "Unknown message queue implementation",
@@ -226,8 +211,8 @@ func main() {
 	}
 
 	totalConcurrency := 0
-	poolsMap := make(map[string]pipeline.PoolConfig)
-	for _, p := range pools {
+	poolsMap := make(map[string]pipeline.WorkerPoolConfig)
+	for _, p := range workerPools {
 		if p.Workers <= 0 {
 			p.Workers = concurrency
 		}

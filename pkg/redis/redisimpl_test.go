@@ -750,24 +750,45 @@ func TestNewRedisMQFlow_PoolRequiredAndValidation(t *testing.T) {
 
 	*RedisURL = "redis://localhost:6379"
 
-	// Case 1: pool_id is missing from configuration
-	*queuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj"}]`
-	_, err := NewRedisMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	// Case 1: worker_pool_id is missing from configuration, and pool "default" does not exist
+	*queuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err := NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
 	if err == nil {
-		t.Error("Expected error when pool_id is missing in queue config, got nil")
+		t.Error("Expected error when worker_pool_id is missing and 'default' pool does not exist, got nil")
 	}
 
-	// Case 2: pool_id is specified but pool does not exist
-	*queuesConfig = `[{"queue_name":"test-queue","pool_id":"non-existent","inference_objective":"obj"}]`
-	_, err = NewRedisMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
-	if err == nil {
-		t.Error("Expected error when specified pool_id does not exist, got nil")
-	}
-
-	// Case 3: pool_id specified and pool exists
-	*queuesConfig = `[{"queue_name":"test-queue","pool_id":"test-pool","inference_objective":"obj"}]`
-	_, err = NewRedisMQFlow(WithPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	// Case 5: worker_pool_id is missing, but only a single 'default' pool is specified
+	*queuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
 	if err != nil {
-		t.Errorf("Unexpected error when pool_id exists: %v", err)
+		t.Errorf("Unexpected error when worker_pool_id is missing but default pool exists: %v", err)
+	}
+
+	// Case 6: worker_pool_id is specified as custom, but only a single 'default' pool is specified
+	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"custom-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
+	if err != nil {
+		t.Errorf("Unexpected error when worker_pool_id is custom but default pool exists: %v", err)
+	}
+
+	// Case 2: worker_pool_id is specified but pool does not exist
+	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"non-existent","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err == nil {
+		t.Error("Expected error when specified worker_pool_id does not exist, got nil")
+	}
+
+	// Case 3: worker_pool_id specified and pool exists, but igw_base_url is missing
+	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj"}]`
+	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err == nil {
+		t.Error("Expected error when igw_base_url is missing in queue config, got nil")
+	}
+
+	// Case 4: worker_pool_id and igw_base_url specified and pool exists
+	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err != nil {
+		t.Errorf("Unexpected error when worker_pool_id exists: %v", err)
 	}
 }

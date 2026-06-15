@@ -29,9 +29,9 @@ func irWithEndpoint(id, endpoint string) *api.InternalRequest {
 func TestProcessAllChannels(t *testing.T) {
 	msgsPerChannel := 5
 	channels := []pipeline.RequestChannel{
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel)},
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel)},
-		{Channel: make(chan *api.InternalRequest, msgsPerChannel)},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "http://gw", RequestPathURL: "/v1"},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "http://gw", RequestPathURL: "/v1"},
+		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "http://gw", RequestPathURL: "/v1"},
 	}
 	policy := NewRandomRobinPolicy()
 
@@ -41,8 +41,8 @@ func TestProcessAllChannels(t *testing.T) {
 			ch.Channel <- irID(string(rune('A' + i)))
 		}
 	}
-	pools := map[string]pipeline.PoolConfig{
-		"default": {ID: "default"},
+	pools := map[string]pipeline.WorkerPoolConfig{
+		"default": {ID: "default", Workers: 1},
 	}
 	dispatch := policy.MergeRequestChannels(channels, pools)
 	mergedChannel := dispatch.Channels["default"]
@@ -80,12 +80,12 @@ func TestEmptyChannelsReturnsClosed(t *testing.T) {
 func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 	// Three channels, each with distinct metadata.
 	channels := []pipeline.RequestChannel{
-		{Channel: make(chan *api.InternalRequest, 1), InferenceObjective: "obj-a", PoolID: "pool-a"},
-		{Channel: make(chan *api.InternalRequest, 1), InferenceObjective: "obj-b", PoolID: "pool-a"},
-		{Channel: make(chan *api.InternalRequest, 1), InferenceObjective: "obj-c", PoolID: "pool-a"},
+		{Channel: make(chan *api.InternalRequest, 1), InferenceObjective: "obj-a", WorkerPoolID: "pool-a", IGWBaseURL: "http://a", RequestPathURL: "/a"},
+		{Channel: make(chan *api.InternalRequest, 1), InferenceObjective: "obj-b", WorkerPoolID: "pool-a", IGWBaseURL: "http://a", RequestPathURL: "/a"},
+		{Channel: make(chan *api.InternalRequest, 1), InferenceObjective: "obj-c", WorkerPoolID: "pool-a", IGWBaseURL: "http://a", RequestPathURL: "/a"},
 	}
-	pools := map[string]pipeline.PoolConfig{
-		"pool-a": {ID: "pool-a", IGWBaseURL: "http://a", RequestPathURL: "/a"},
+	pools := map[string]pipeline.WorkerPoolConfig{
+		"pool-a": {ID: "pool-a", Workers: 1},
 	}
 	policy := NewRandomRobinPolicy()
 	merged := policy.MergeRequestChannels(channels, pools)
@@ -159,10 +159,12 @@ func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	ch := pipeline.RequestChannel{
 		Channel:            make(chan *api.InternalRequest, 2),
 		InferenceObjective: "obj",
-		PoolID:             "my-pool",
+		WorkerPoolID:       "my-pool",
+		IGWBaseURL:         "http://gateway",
+		RequestPathURL:     "/default/path",
 	}
-	pools := map[string]pipeline.PoolConfig{
-		"my-pool": {ID: "my-pool", IGWBaseURL: "http://gateway", RequestPathURL: "/default/path"},
+	pools := map[string]pipeline.WorkerPoolConfig{
+		"my-pool": {ID: "my-pool", Workers: 1},
 	}
 	policy := NewRandomRobinPolicy()
 
@@ -213,10 +215,12 @@ func TestURLJoinPathHandlesSlashes(t *testing.T) {
 			ch := pipeline.RequestChannel{
 				Channel:            make(chan *api.InternalRequest, 1),
 				InferenceObjective: "obj",
-				PoolID:             "test-pool",
+				WorkerPoolID:       "test-pool",
+				IGWBaseURL:         tt.base,
+				RequestPathURL:     tt.path,
 			}
-			pools := map[string]pipeline.PoolConfig{
-				"test-pool": {ID: "test-pool", IGWBaseURL: tt.base, RequestPathURL: tt.path},
+			pools := map[string]pipeline.WorkerPoolConfig{
+				"test-pool": {ID: "test-pool", Workers: 1},
 			}
 
 			if tt.endpoint != "" {
@@ -255,10 +259,12 @@ func TestPerRequestHeadersMerged(t *testing.T) {
 	ch := pipeline.RequestChannel{
 		Channel:            make(chan *api.InternalRequest, 3),
 		InferenceObjective: "obj",
-		PoolID:             "test-pool",
+		WorkerPoolID:       "test-pool",
+		IGWBaseURL:         "http://gw",
+		RequestPathURL:     "/v1/completions",
 	}
-	pools := map[string]pipeline.PoolConfig{
-		"test-pool": {ID: "test-pool", IGWBaseURL: "http://gw", RequestPathURL: "/v1/completions"},
+	pools := map[string]pipeline.WorkerPoolConfig{
+		"test-pool": {ID: "test-pool", Workers: 1},
 	}
 	policy := NewRandomRobinPolicy()
 
@@ -306,88 +312,15 @@ func TestPerRequestHeadersMerged(t *testing.T) {
 	}
 }
 
-func TestPoolHTTPHeadersMerged(t *testing.T) {
-	ch := pipeline.RequestChannel{
-		Channel:            make(chan *api.InternalRequest, 3),
-		InferenceObjective: "obj",
-		PoolID:             "test-pool",
-	}
-	pools := map[string]pipeline.PoolConfig{
-		"test-pool": {
-			ID:             "test-pool",
-			IGWBaseURL:     "http://gw",
-			RequestPathURL: "/v1/completions",
-			HTTPHeaders: map[string]string{
-				"Authorization":                 "Bearer pool-tok",
-				"X-Custom-Pool":                 "pool-val",
-				"Content-Type":                  "application/custom", // overrides default
-				"x-gateway-inference-objective": "pool-obj",           // should be overridden by channel objective
-			},
-		},
-	}
-	policy := NewRandomRobinPolicy()
-
-	ch.Channel <- irID("only-pool-headers")
-	ch.Channel <- irWithHeaders("request-override", map[string]string{
-		"Authorization": "Bearer req-tok", // overrides pool
-		"X-Custom-Req":  "req-val",
-	})
-	close(ch.Channel)
-
-	merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch}, pools)
-	mergedChannel := merged.Channels["test-pool"]
-
-	deadline := time.After(2 * time.Second)
-	results := map[string]map[string]string{}
-	for range 2 {
-		select {
-		case msg := <-mergedChannel:
-			results[msg.PublicRequest.ReqID()] = msg.HttpHeaders
-		case <-deadline:
-			t.Fatal("timed out")
-		}
-	}
-
-	// 1. Check message with only pool headers
-	h1 := results["only-pool-headers"]
-	if h1["Authorization"] != "Bearer pool-tok" {
-		t.Errorf("expected Bearer pool-tok, got %s", h1["Authorization"])
-	}
-	if h1["X-Custom-Pool"] != "pool-val" {
-		t.Errorf("expected pool-val, got %s", h1["X-Custom-Pool"])
-	}
-	if h1["Content-Type"] != "application/custom" {
-		t.Errorf("expected application/custom, got %s", h1["Content-Type"])
-	}
-	if h1["x-gateway-inference-objective"] != "obj" {
-		t.Errorf("expected obj, got %s", h1["x-gateway-inference-objective"])
-	}
-
-	// 2. Check message with request headers overriding pool headers
-	h2 := results["request-override"]
-	if h2["Authorization"] != "Bearer req-tok" {
-		t.Errorf("expected Bearer req-tok, got %s", h2["Authorization"])
-	}
-	if h2["X-Custom-Pool"] != "pool-val" {
-		t.Errorf("expected pool-val, got %s", h2["X-Custom-Pool"])
-	}
-	if h2["X-Custom-Req"] != "req-val" {
-		t.Errorf("expected req-val, got %s", h2["X-Custom-Req"])
-	}
-	if h2["Content-Type"] != "application/custom" {
-		t.Errorf("expected application/custom, got %s", h2["Content-Type"])
-	}
-}
-
 func TestMergedChannelIsBuffered(t *testing.T) {
 	numChannels := 3
 	channels := make([]pipeline.RequestChannel, numChannels)
 	for i := range numChannels {
-		channels[i] = pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 1)}
+		channels[i] = pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://gw", RequestPathURL: "/v1"}
 	}
 	policy := NewRandomRobinPolicy()
-	pools := map[string]pipeline.PoolConfig{
-		"default": {ID: "default"},
+	pools := map[string]pipeline.WorkerPoolConfig{
+		"default": {ID: "default", Workers: 1},
 	}
 	merged := policy.MergeRequestChannels(channels, pools)
 	mergedChannel := merged.Channels["default"]
@@ -415,7 +348,7 @@ func TestMergedChannelIsBuffered(t *testing.T) {
 
 func TestMergeRequestChannels_PanicOnMissingPool(t *testing.T) {
 	channels := []pipeline.RequestChannel{
-		{PoolID: "non-existent-pool"},
+		{WorkerPoolID: "non-existent-pool"},
 	}
 	policy := NewRandomRobinPolicy()
 
@@ -423,7 +356,7 @@ func TestMergeRequestChannels_PanicOnMissingPool(t *testing.T) {
 		if r := recover(); r == nil {
 			t.Error("Expected MergeRequestChannels to panic when pool ID is missing in pools map")
 		} else {
-			expectedMsg := `pool "non-existent-pool" not found in pools map`
+			expectedMsg := `worker pool "non-existent-pool" not found in pools map`
 			actualMsg := fmt.Sprintf("%v", r)
 			if actualMsg != expectedMsg {
 				t.Errorf("Expected panic message %q, got %q", expectedMsg, actualMsg)
@@ -431,5 +364,5 @@ func TestMergeRequestChannels_PanicOnMissingPool(t *testing.T) {
 		}
 	}()
 
-	policy.MergeRequestChannels(channels, map[string]pipeline.PoolConfig{})
+	policy.MergeRequestChannels(channels, map[string]pipeline.WorkerPoolConfig{})
 }

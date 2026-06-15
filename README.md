@@ -86,7 +86,7 @@ make deploy-ap-on-k8s
 - `concurrency`: The number of concurrent workers (per pool if unspecified), default is 8.
 - `request-merge-policy`: Currently only supporting <u>random-robin</u> policy.
 - `message-queue-impl`: Implementation of the queueing system. Options are <u>gcp-pubsub</u> for GCP PubSub, <u>gcp-pubsub-gated</u> for GCP PubSub with per-topic gating, <u>redis-sortedset</u> for Redis Sorted Set (persisted and sorted), and <u>redis-pubsub</u> for ephemeral Redis-based implementation.
-- `pool-config-file`: Path to the JSON configuration file containing the inference pool definitions. Required if a multiple queues/topics configuration file is specified.
+- `pool-config-file`: Path to the JSON configuration file containing the worker pool definitions. If omitted, a single `"default"` worker pool is created with concurrency determined by the global `concurrency` flag.
 
  - `prometheus-url`: Prometheus server URL for metric-based gates (e.g., http://localhost:9090). For Google Managed Prometheus (GMP), point this to a local proxy or GMP frontend that handles authentication — direct GMP URLs are not supported as the Async Processor does not perform GMP authentication.
    This flag is required when using metric-based per-queue gates (e.g., `prometheus-saturation`, `prometheus-budget`).
@@ -94,31 +94,23 @@ make deploy-ap-on-k8s
 
 <i>additional parameters may be specified for concrete message queue implementations</i>
 
-## Inference Pools Configuration
+## Worker Pools Configuration
 
-When using multiple queues or topics, the routing destinations, worker capacities, and pool-specific request headers are configured via a dedicated inference pools file.
+When using multiple queues or topics, the worker capacities for named pools can be configured via a dedicated worker pools file.
 
 **JSON Schema:**
 ```json
 [
   {
     "id": "qwen-pool",
-    "igw_base_url": "http://35.208.108.247:80/",
-    "request_path_url": "/v1/completions",
-    "workers": 4,
-    "http_headers": {
-      "Authorization": "Bearer pool-secret-token"
-    }
+    "workers": 4
   }
 ]
 ```
 
 **Fields:**
 - `id` (required): Unique pool identifier referenced by queue/topic configurations.
-- `igw_base_url` (required): Base URL of the inference gateway or target model server.
-- `request_path_url` (required): Request path URL (e.g. `/v1/chat/completions`).
-- `workers` (optional): Number of concurrent workers dedicated to this pool. Defaults to the global `concurrency` setting if omitted or <= 0.
-- `http_headers` (optional): Key-value map of custom headers to append to all requests sent to this pool. Overridden by request-level headers, but overrides default headers.
+- `workers` (required): Number of concurrent workers dedicated to this pool. Must be positive.
 
 ## Dispatch Gates
 
@@ -146,13 +138,15 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "critical_queue",
        "inference_objective": "critical-task",
-       "pool_id": "inference_pool_1",
+       "worker_pool_id": "inference_pool_1",
+       "igw_base_url": "http://localhost:80/",
        "gate_type": "constant"
     },
     {
        "queue_name": "batch_queue",
        "inference_objective": "batch-task",
-       "pool_id": "inference_pool_1",
+       "worker_pool_id": "inference_pool_1",
+       "igw_base_url": "http://localhost:80/",
        "gate_type": "prometheus-saturation",
        "gate_params": {
           "pool": "inference_pool_1",
@@ -162,7 +156,8 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "batch_budget_queue",
        "inference_objective": "batch-task",
-       "pool_id": "inference_pool_1",
+       "worker_pool_id": "inference_pool_1",
+       "igw_base_url": "http://localhost:80/",
        "gate_type": "prometheus-budget",
        "gate_params": {
           "pool": "inference_pool_1",
@@ -173,7 +168,8 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "redis_gated_queue",
        "inference_objective": "gated-task",
-       "pool_id": "inference_pool_2",
+       "worker_pool_id": "inference_pool_2",
+       "igw_base_url": "http://localhost:8000/",
        "gate_type": "redis",
        "gate_params": {
           "address": "localhost:6379",
@@ -183,7 +179,8 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "custom_metric_queue",
        "inference_objective": "custom-task",
-       "pool_id": "inference_pool_2",
+       "worker_pool_id": "inference_pool_2",
+       "igw_base_url": "http://localhost:8000/",
        "gate_type": "prometheus-query",
        "gate_params": {
           "query": "1 - (sum(rate(http_requests_total{job=\"inference\"}[5m])) / 100)",
@@ -193,7 +190,8 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "composite_gated_queue",
        "inference_objective": "composite-task",
-       "pool_id": "inference_pool_1",
+       "worker_pool_id": "inference_pool_1",
+       "igw_base_url": "http://localhost:80/",
        "gate_type": "composite",
        "gate_params": {
           "gates": "[{\"gate_type\":\"prometheus-saturation\",\"gate_params\":{\"pool\":\"inference_pool_1\"}},{\"gate_type\":\"redis-quota\",\"gate_params\":{\"address\":\"localhost:6379\",\"limit\":\"100\"}}]"
@@ -202,6 +200,7 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "scrape_gated_queue",
        "inference_objective": "batch-task",
+       "igw_base_url": "http://localhost:80/",
        "request_path_url": "/v1/completions",
        "gate_type": "endpoint-scrape",
        "gate_params": {
@@ -334,7 +333,7 @@ Producers handle wrapping these into the internal wire format used for persisten
 
 The Async Processor supports consuming from multiple request message queues concurrently. A `Request Merge Policy` merges messages from all active queues.
 
-Instead of performing a single global merge, the policy groups input channels by their configured `pool_id` and performs the merging per-pool. This returns a `PoolDispatch` mapping, where **each inference pool has its own independent merged channel**.
+Instead of performing a single global merge, the policy groups input channels by their configured `worker_pool_id` and performs the merging per-pool. This returns a `PoolDispatch` mapping, where **each worker pool has its own independent merged channel**.
 
 This per-pool topology provides complete backpressure and queue-level isolation: a slow or saturated pool will block only its own merged channel, leaving other pools completely unaffected and free to process requests.
 
@@ -535,13 +534,17 @@ The configuration file when using the `redis.queues-config-file` flag should hav
 [
     {
        "queue_name": "some_queue_name",
-       "pool_id": "qwen-pool",
-       "inference_objective": "some_inference_objective"
+       "worker_pool_id": "qwen-pool",
+       "inference_objective": "some_inference_objective",
+       "igw_base_url": "http://localhost:80/",
+       "request_path_url": "/v1/completions"
     },
     {
        "queue_name": "another_queue",
-       "pool_id": "llama-pool",
-       "inference_objective": "batch_task"
+       "worker_pool_id": "llama-pool",
+       "inference_objective": "batch_task",
+       "igw_base_url": "http://localhost:8000/",
+       "request_path_url": "/v1/chat/completions"
     }
 ]
 ```
@@ -551,8 +554,10 @@ The configuration file when using the `redis.queues-config-file` flag should hav
 **Configuration Fields:**
 
 - `queue_name`: The name of the Redis channel for this queue.
-- `pool_id`: The ID of the inference pool to route to (defined in the pools configuration file).
+- `worker_pool_id` (optional): The ID of the worker pool to route to (defined in the worker pools configuration file). Defaults to `"default"` if omitted.
 - `inference_objective`: The inference objective header value.
+- `igw_base_url` (required): Base URL of the inference gateway or target model server for this queue.
+- `request_path_url` (optional): Request path URL (e.g. `/v1/chat/completions`) for this queue.
 
 ### GCP Pub/Sub
 
@@ -586,16 +591,20 @@ The configuration file when using the `pubsub.topics-config-file` flag should ha
 ```json
 [
     {
-       "pool_id": "qwen-pool",
+       "worker_pool_id": "qwen-pool",
        "subscriber_id": "some_subscriber_id",
        "inference_objective": "some_inference_objective",
+       "igw_base_url": "http://localhost:80/",
+       "request_path_url": "/v1/completions",
        "gate_type": "constant",
        "gate_params": {}
     },
     {
        "subscriber_id": "another_subscriber",
-       "pool_id": "llama-pool",
+       "worker_pool_id": "llama-pool",
        "inference_objective": "batch_task",
+       "igw_base_url": "http://localhost:8000/",
+       "request_path_url": "/v1/chat/completions",
        "gate_type": "prometheus-saturation",
        "gate_params": {
            "pool": "pool_2",
@@ -608,8 +617,10 @@ The configuration file when using the `pubsub.topics-config-file` flag should ha
 **Configuration Fields:**
 
 - `subscriber_id`: The GCP PubSub subscriber ID for this topic.
-- `pool_id`: The ID of the inference pool to route to (defined in the pools configuration file).
+- `worker_pool_id` (optional): The ID of the worker pool to route to (defined in the worker pools configuration file). Defaults to `"default"` if omitted.
 - `inference_objective`: The inference objective header value.
+- `igw_base_url` (required): Base URL of the inference gateway or target model server for this topic.
+- `request_path_url` (required): Request path URL (e.g. `/v1/chat/completions`) for this topic.
 - `gate_type`: Required type of dispatch gate for this topic.
 - `gate_params` (optional): Parameters for the gate type (e.g., pool name, threshold for prometheus gates).
 

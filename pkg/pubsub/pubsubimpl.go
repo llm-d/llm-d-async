@@ -21,14 +21,14 @@ import (
 var pubSubClient *pubsub.Client
 
 var (
-	_                   = flag.String("pubsub.igw-base-url", "", "Base URL for IGW. Mutually exclusive with pubsub.topics-config-file flag.")
-	projectID           = flag.String("pubsub.project-id", "", "GCP project ID for PubSub")
-	_                   = flag.String("pubsub.request-path-url", "/v1/completions", "inference request path url. Mutually exclusive with pubsub.topics-config-file flag.")
-	inferenceObjective  = flag.String("pubsub.inference-objective", "", "inference objective to use in requests. Mutually exclusive with pubsub.topics-config-file flag.")
-	requestSubscriberID = flag.String("pubsub.request-subscriber-id", "", "GCP PubSub request topic subscriber ID. Mutually exclusive with pubsub.topics-config-file flag.")
-	resultTopicID       = flag.String("pubsub.result-topic-id", "", "GCP PubSub topic ID for results")
-	topicsConfigFile    = flag.String("pubsub.topics-config-file", "", "Topics Configuration file. Mutually exclusive with pubsub.igw-base-url, pubsub.request-subscriber-id, pubsub.request-path-url and pubsub.inference-objective flags. See documentation about syntax")
-	batchSize           = flag.Int("pubsub.batch-size", 10, "Number of inflight messages")
+	pubsubIgwBaseURL     = flag.String("pubsub.igw-base-url", "", "Base URL for IGW. Mutually exclusive with pubsub.topics-config-file flag.")
+	projectID            = flag.String("pubsub.project-id", "", "GCP project ID for PubSub")
+	pubsubRequestPathURL = flag.String("pubsub.request-path-url", "/v1/completions", "inference request path url. Mutually exclusive with pubsub.topics-config-file flag.")
+	inferenceObjective   = flag.String("pubsub.inference-objective", "", "inference objective to use in requests. Mutually exclusive with pubsub.topics-config-file flag.")
+	requestSubscriberID  = flag.String("pubsub.request-subscriber-id", "", "GCP PubSub request topic subscriber ID. Mutually exclusive with pubsub.topics-config-file flag.")
+	resultTopicID        = flag.String("pubsub.result-topic-id", "", "GCP PubSub topic ID for results")
+	topicsConfigFile     = flag.String("pubsub.topics-config-file", "", "Topics Configuration file. Mutually exclusive with pubsub.igw-base-url, pubsub.request-subscriber-id, pubsub.request-path-url and pubsub.inference-objective flags. See documentation about syntax")
+	batchSize            = flag.Int("pubsub.batch-size", 10, "Number of inflight messages")
 
 	resultChannels sync.Map
 )
@@ -37,10 +37,12 @@ const quotaExceededNackDelay = 10 * time.Second
 
 type TopicConfig struct {
 	SubscriberID       string            `json:"subscriber_id"`
-	PoolID             string            `json:"pool_id"`
+	WorkerPoolID       string            `json:"worker_pool_id"`
 	InferenceObjective string            `json:"inference_objective"`
 	GateType           string            `json:"gate_type"`
 	GateParams         map[string]string `json:"gate_params,omitempty"`
+	IGWBaseURL         string            `json:"igw_base_url"`
+	RequestPathURL     string            `json:"request_path_url"`
 }
 
 var _ pipeline.Flow = (*PubSubMQFlow)(nil)
@@ -52,7 +54,7 @@ type PubSubMQFlow struct {
 	resultChannel   chan api.ResultMessage
 	gate            pipeline.DispatchGate
 	gateFactory     pipeline.GateFactory
-	pools           []pipeline.PoolConfig
+	workerPools     []pipeline.WorkerPoolConfig
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 }
@@ -73,10 +75,10 @@ func WithGateFactory(factory pipeline.GateFactory) PubSubOption {
 	}
 }
 
-// WithPools sets the pool configurations to resolve named pools.
-func WithPools(pools []pipeline.PoolConfig) PubSubOption {
+// WithWorkerPools sets the pool configurations to resolve named pools.
+func WithWorkerPools(workerPools []pipeline.WorkerPoolConfig) PubSubOption {
 	return func(p *PubSubMQFlow) {
-		p.pools = pools
+		p.workerPools = workerPools
 	}
 }
 
@@ -100,7 +102,13 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			panic(fmt.Sprintf("failed to unmarshal topics config: %v", err))
 		}
 	} else {
-		configs = []TopicConfig{{SubscriberID: *requestSubscriberID, PoolID: "default", InferenceObjective: *inferenceObjective}}
+		configs = []TopicConfig{{
+			SubscriberID:       *requestSubscriberID,
+			WorkerPoolID:       "default",
+			InferenceObjective: *inferenceObjective,
+			IGWBaseURL:         *pubsubIgwBaseURL,
+			RequestPathURL:     *pubsubRequestPathURL,
+		}}
 	}
 	p := &PubSubMQFlow{
 		resultTopicID:   *resultTopicID,
@@ -116,20 +124,34 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 
 	// Create per-topic channels with gates
 	for _, cfg := range configs {
-		poolID := cfg.PoolID
-		if poolID == "" {
-			panic(fmt.Sprintf("topic config for subscriber %q: pool_id must be specified", cfg.SubscriberID))
+		workerPoolID := cfg.WorkerPoolID
+		if workerPoolID == "" {
+			workerPoolID = "default"
+		}
+
+		// If pool config was not specified, fallback to the single default pool.
+		if len(p.workerPools) == 1 && p.workerPools[0].ID == "default" {
+			workerPoolID = "default"
 		}
 
 		found := false
-		for _, pool := range p.pools {
-			if pool.ID == poolID {
+		for _, pool := range p.workerPools {
+			if pool.ID == workerPoolID {
 				found = true
 				break
 			}
 		}
 		if !found {
-			panic(fmt.Sprintf("pool %q specified in topic config not found in pool configuration", poolID))
+			panic(fmt.Sprintf("worker pool %q specified in topic config not found in pool configuration", workerPoolID))
+		}
+
+		if cfg.IGWBaseURL == "" {
+			panic(fmt.Sprintf("topic config for subscriber %q: igw_base_url must be specified", cfg.SubscriberID))
+		}
+
+		reqPath := cfg.RequestPathURL
+		if reqPath == "" {
+			reqPath = "/v1/completions"
 		}
 
 		// Determine gate for this topic
@@ -155,7 +177,9 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 				Channel:            ch,
 				InferenceObjective: cfg.InferenceObjective,
 				Gate:               gate,
-				PoolID:             poolID,
+				WorkerPoolID:       workerPoolID,
+				IGWBaseURL:         cfg.IGWBaseURL,
+				RequestPathURL:     reqPath,
 			},
 			subscriberID: cfg.SubscriberID,
 			gate:         gate,
@@ -199,7 +223,7 @@ func (r *PubSubMQFlow) Start(ctx context.Context) {
 	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
-		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.PoolID, channelData.requestChannel.Channel, channelData.gate)
+		go r.requestWorker(ctx, pubSubClient, channelData.subscriberID, channelData.requestChannel.WorkerPoolID, channelData.requestChannel.Channel, channelData.gate)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
 	r.drainWg.Add(2)

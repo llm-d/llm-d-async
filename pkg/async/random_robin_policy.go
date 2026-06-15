@@ -18,26 +18,26 @@ var _ pipeline.RequestMergePolicy = (*RandomRobinPolicy)(nil)
 type RandomRobinPolicy struct {
 }
 
-func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChannel, pools map[string]pipeline.PoolConfig) pipeline.PoolDispatch {
+func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChannel, pools map[string]pipeline.WorkerPoolConfig) pipeline.PoolDispatch {
 	channelsByPool := make(map[string][]pipeline.RequestChannel)
 	for _, ch := range channels {
-		poolID := ch.PoolID
-		if poolID == "" {
-			poolID = "default"
+		workerPoolID := ch.WorkerPoolID
+		if workerPoolID == "" {
+			workerPoolID = "default"
 		}
-		if _, ok := pools[poolID]; !ok {
-			panic(fmt.Sprintf("pool %q not found in pools map", poolID))
+		if _, ok := pools[workerPoolID]; !ok {
+			panic(fmt.Sprintf("worker pool %q not found in pools map", workerPoolID))
 		}
-		channelsByPool[poolID] = append(channelsByPool[poolID], ch)
+		channelsByPool[workerPoolID] = append(channelsByPool[workerPoolID], ch)
 	}
 
 	dispatch := pipeline.PoolDispatch{
 		Channels: make(map[string]chan pipeline.EmbelishedRequestMessage),
 	}
 
-	for poolID, poolChs := range channelsByPool {
+	for workerPoolID, poolChs := range channelsByPool {
 		mergedChannel := make(chan pipeline.EmbelishedRequestMessage, len(poolChs))
-		dispatch.Channels[poolID] = mergedChannel
+		dispatch.Channels[workerPoolID] = mergedChannel
 
 		if len(poolChs) == 0 {
 			close(mergedChannel)
@@ -51,7 +51,7 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChan
 			meta[i] = ch
 		}
 
-		go func(poolID string, cases []reflect.SelectCase, meta []pipeline.RequestChannel, mergedChannel chan pipeline.EmbelishedRequestMessage) {
+		go func(workerPoolID string, cases []reflect.SelectCase, meta []pipeline.RequestChannel, mergedChannel chan pipeline.EmbelishedRequestMessage) {
 			for {
 				i1, val, ok := reflect.Select(cases)
 				if !ok {
@@ -67,21 +67,18 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChan
 					if !ok || ir == nil {
 						continue
 					}
-					pool := pools[poolID]
+					chMeta := meta[i1]
 
-					requestPath := pool.RequestPathURL
+					requestPath := chMeta.RequestPathURL
 					if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
 						requestPath = ep
 					}
-					requestURL, _ := url.JoinPath(pool.IGWBaseURL, requestPath)
+					requestURL, _ := url.JoinPath(chMeta.IGWBaseURL, requestPath)
 					headers := map[string]string{
 						"Content-Type": "application/json",
 					}
-					for k, v := range pool.HTTPHeaders {
-						headers[k] = v
-					}
-					if meta[i1].InferenceObjective != "" {
-						headers["x-gateway-inference-objective"] = meta[i1].InferenceObjective
+					if chMeta.InferenceObjective != "" {
+						headers["x-gateway-inference-objective"] = chMeta.InferenceObjective
 					}
 					for k, v := range ir.PublicRequest.ReqHeaders() {
 						headers[k] = v
@@ -90,12 +87,12 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChan
 						InternalRequest: ir,
 						HttpHeaders:     headers,
 						RequestURL:      requestURL,
-						PoolID:          poolID,
+						WorkerPoolID:    workerPoolID,
 					}
 					mergedChannel <- erm
 				}
 			}
-		}(poolID, cases, meta, mergedChannel)
+		}(workerPoolID, cases, meta, mergedChannel)
 	}
 
 	return dispatch

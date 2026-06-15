@@ -28,8 +28,8 @@ const (
 )
 
 var (
-	_                  = flag.String("redis.igw-base-url", "", "Base URL for IGW. Mutually exclusive with redis.queues-config-file flag.")
-	_                  = flag.String("redis.request-path-url", "/v1/completions", "request path url. Mutually exclusive with redis.queues-config-file flag.")
+	igwBaseURL         = flag.String("redis.igw-base-url", "", "Base URL for IGW. Mutually exclusive with redis.queues-config-file flag.")
+	requestPathURL     = flag.String("redis.request-path-url", "/v1/completions", "request path url. Mutually exclusive with redis.queues-config-file flag.")
 	inferenceObjective = flag.String("redis.inference-objective", "", "inference objective to use in requests. Mutually exclusive with redis.queues-config-file flag.")
 	requestQueueName   = flag.String("redis.request-queue-name", "request-queue", "name of the Redis channel for request messages. Mutually exclusive with redis.queues-config-file flag.")
 
@@ -132,8 +132,10 @@ func drainBatch[T any](first T, channel <-chan T, maxBatchSize int) []T {
 
 type QueueConfig struct {
 	QueueName          string `json:"queue_name"`
-	PoolID             string `json:"pool_id"`
+	WorkerPoolID       string `json:"worker_pool_id"`
 	InferenceObjective string `json:"inference_objective"`
+	IGWBaseURL         string `json:"igw_base_url"`
+	RequestPathURL     string `json:"request_path_url"`
 }
 
 type RequestChannelData struct {
@@ -148,7 +150,7 @@ type RedisMQFlow struct {
 	requestChannels []RequestChannelData
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
-	pools           []pipeline.PoolConfig
+	workerPools     []pipeline.WorkerPoolConfig
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 	enableTracing   bool
@@ -164,10 +166,10 @@ func WithRedisTracing(enable bool) RedisOption {
 	}
 }
 
-// WithPools sets the pool configurations to resolve named pools.
-func WithPools(pools []pipeline.PoolConfig) RedisOption {
+// WithWorkerPools sets the pool configurations to resolve named pools.
+func WithWorkerPools(workerPools []pipeline.WorkerPoolConfig) RedisOption {
 	return func(r *RedisMQFlow) {
-		r.pools = pools
+		r.workerPools = workerPools
 	}
 }
 
@@ -191,7 +193,13 @@ func NewRedisMQFlow(opts ...RedisOption) (*RedisMQFlow, error) {
 			return nil, fmt.Errorf("failed to unmarshal queues config: %w", err)
 		}
 	} else {
-		configs = []QueueConfig{{QueueName: *requestQueueName, PoolID: "default", InferenceObjective: *inferenceObjective}}
+		configs = []QueueConfig{{
+			QueueName:          *requestQueueName,
+			WorkerPoolID:       "default",
+			InferenceObjective: *inferenceObjective,
+			IGWBaseURL:         *igwBaseURL,
+			RequestPathURL:     *requestPathURL,
+		}}
 	}
 
 	flow := &RedisMQFlow{
@@ -210,26 +218,42 @@ func NewRedisMQFlow(opts ...RedisOption) (*RedisMQFlow, error) {
 	for _, cfg := range configs {
 		ch := make(chan *api.InternalRequest)
 
-		poolID := cfg.PoolID
-		if poolID == "" {
-			return nil, fmt.Errorf("queue config for queue %q: pool_id must be specified", cfg.QueueName)
+		workerPoolID := cfg.WorkerPoolID
+		if workerPoolID == "" {
+			workerPoolID = "default"
+		}
+
+		// If pool config was not specified, fallback to the single default pool.
+		if len(flow.workerPools) == 1 && flow.workerPools[0].ID == "default" {
+			workerPoolID = "default"
 		}
 
 		found := false
-		for _, pool := range flow.pools {
-			if pool.ID == poolID {
+		for _, pool := range flow.workerPools {
+			if pool.ID == workerPoolID {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("pool %q specified in queue config not found in pool configuration", poolID)
+			return nil, fmt.Errorf("worker pool %q specified in queue config not found in pool configuration", workerPoolID)
+		}
+
+		if cfg.IGWBaseURL == "" {
+			return nil, fmt.Errorf("queue config for queue %q: igw_base_url must be specified", cfg.QueueName)
+		}
+
+		reqPath := cfg.RequestPathURL
+		if reqPath == "" {
+			reqPath = "/v1/completions"
 		}
 
 		channels = append(channels, RequestChannelData{pipeline.RequestChannel{
 			Channel:            ch,
 			InferenceObjective: cfg.InferenceObjective,
-			PoolID:             poolID,
+			WorkerPoolID:       workerPoolID,
+			IGWBaseURL:         cfg.IGWBaseURL,
+			RequestPathURL:     reqPath,
 		}, cfg.QueueName})
 	}
 	if flow.enableTracing {

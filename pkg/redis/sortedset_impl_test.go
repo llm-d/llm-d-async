@@ -47,7 +47,7 @@ func TestParseQueueConfigs(t *testing.T) {
 	}{
 		{
 			name:    "single queue with string gate params",
-			input:   `[{"queue_name":"q1","gate_type":"redis","gate_params":{"address":"localhost:6379"}}]`,
+			input:   `[{"queue_name":"q1","igw_base_url":"http://gw","gate_type":"redis","gate_params":{"address":"localhost:6379"}}]`,
 			wantLen: 1,
 			validate: func(t *testing.T, configs []queueConfig) {
 				if configs[0].QueueName != "q1" {
@@ -60,7 +60,7 @@ func TestParseQueueConfigs(t *testing.T) {
 		},
 		{
 			name:    "numeric gate params coerced to strings",
-			input:   `[{"queue_name":"q1","gate_type":"prometheus-saturation","gate_params":{"threshold":0.7,"pool":"p1"}}]`,
+			input:   `[{"queue_name":"q1","igw_base_url":"http://gw","gate_type":"prometheus-saturation","gate_params":{"threshold":0.7,"pool":"p1"}}]`,
 			wantLen: 1,
 			validate: func(t *testing.T, configs []queueConfig) {
 				if configs[0].GateParams["threshold"] != "0.7" {
@@ -73,7 +73,7 @@ func TestParseQueueConfigs(t *testing.T) {
 		},
 		{
 			name:    "multiple queues",
-			input:   `[{"queue_name":"q1","igw_base_url":"http://igw:80"},{"queue_name":"q2","gate_type":"redis","gate_params":{"address":"redis:6379"}}]`,
+			input:   `[{"queue_name":"q1","igw_base_url":"http://igw:80"},{"queue_name":"q2","igw_base_url":"http://gw","gate_type":"redis","gate_params":{"address":"redis:6379"}}]`,
 			wantLen: 2,
 			validate: func(t *testing.T, configs []queueConfig) {
 				if configs[0].QueueName != "q1" {
@@ -86,7 +86,7 @@ func TestParseQueueConfigs(t *testing.T) {
 		},
 		{
 			name:    "no gate params",
-			input:   `[{"queue_name":"q1","request_path_url":"/v1/completions"}]`,
+			input:   `[{"queue_name":"q1","igw_base_url":"http://gw","request_path_url":"/v1/completions"}]`,
 			wantLen: 1,
 			validate: func(t *testing.T, configs []queueConfig) {
 				if len(configs[0].GateParams) != 0 {
@@ -659,11 +659,15 @@ func TestSortedSetFlow_Integration(t *testing.T) {
 	*ssRequestQueueName = queue
 	defer func() { *ssRequestQueueName = origQueue }()
 
+	origIgwBaseURL := *ssIgwBaseURL
+	*ssIgwBaseURL = "http://gw"
+	defer func() { *ssIgwBaseURL = origIgwBaseURL }()
+
 	origURL := *RedisURL
 	*RedisURL = "redis://" + s.Addr()
 	defer func() { *RedisURL = origURL }()
 
-	flow, err := NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "default"}}))
+	flow, err := NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1285,24 +1289,45 @@ func TestNewRedisSortedSetFlow_PoolRequiredAndValidation(t *testing.T) {
 
 	*RedisURL = "redis://localhost:6379"
 
-	// Case 1: pool_id is missing from configuration
-	*ssQueuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj"}]`
-	_, err := NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	// Case 1: worker_pool_id is missing from configuration, and pool "default" does not exist
+	*ssQueuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err := NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
 	if err == nil {
-		t.Error("Expected error when pool_id is missing in queue config, got nil")
+		t.Error("Expected error when worker_pool_id is missing and 'default' pool does not exist, got nil")
 	}
 
-	// Case 2: pool_id is specified but pool does not exist
-	*ssQueuesConfig = `[{"queue_name":"test-queue","pool_id":"non-existent","inference_objective":"obj"}]`
-	_, err = NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
-	if err == nil {
-		t.Error("Expected error when specified pool_id does not exist, got nil")
-	}
-
-	// Case 3: pool_id specified and pool exists
-	*ssQueuesConfig = `[{"queue_name":"test-queue","pool_id":"test-pool","inference_objective":"obj"}]`
-	_, err = NewRedisSortedSetFlow(WithSortedSetPools([]pipeline.PoolConfig{{ID: "test-pool"}}))
+	// Case 5: worker_pool_id is missing, but only a single 'default' pool is specified
+	*ssQueuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
 	if err != nil {
-		t.Errorf("Unexpected error when pool_id exists: %v", err)
+		t.Errorf("Unexpected error when worker_pool_id is missing but default pool exists: %v", err)
+	}
+
+	// Case 6: worker_pool_id is specified as custom, but only a single 'default' pool is specified
+	*ssQueuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"custom-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
+	if err != nil {
+		t.Errorf("Unexpected error when worker_pool_id is custom but default pool exists: %v", err)
+	}
+
+	// Case 2: worker_pool_id is specified but pool does not exist
+	*ssQueuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"non-existent","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err == nil {
+		t.Error("Expected error when specified worker_pool_id does not exist, got nil")
+	}
+
+	// Case 3: worker_pool_id specified and pool exists, but igw_base_url is missing
+	*ssQueuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj"}]`
+	_, err = NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err == nil {
+		t.Error("Expected error when igw_base_url is missing in queue config, got nil")
+	}
+
+	// Case 4: worker_pool_id and igw_base_url specified and pool exists
+	*ssQueuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
+	_, err = NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err != nil {
+		t.Errorf("Unexpected error when worker_pool_id exists: %v", err)
 	}
 }
