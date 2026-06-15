@@ -311,7 +311,6 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 				// normally means it has drained. Report 0 so the gauge does not
 				// retain a stale (high) value after the queue empties.
 				stats = append(stats, pipeline.QueueBacklogStat{
-					QueueID:   cd.requestChannel.InferenceObjective,
 					QueueName: subID,
 					PoolName:  cd.requestChannel.WorkerPoolID,
 				})
@@ -323,7 +322,6 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 			// Report 0 rather than skipping so the gauge does not retain a
 			// stale value for this subscription after a failed poll.
 			stats = append(stats, pipeline.QueueBacklogStat{
-				QueueID:   cd.requestChannel.InferenceObjective,
 				QueueName: subID,
 				PoolName:  cd.requestChannel.WorkerPoolID,
 			})
@@ -332,7 +330,6 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		points := ts.GetPoints()
 		if len(points) == 0 {
 			stats = append(stats, pipeline.QueueBacklogStat{
-				QueueID:   cd.requestChannel.InferenceObjective,
 				QueueName: subID,
 				PoolName:  cd.requestChannel.WorkerPoolID,
 			})
@@ -340,7 +337,6 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		}
 		// Points are returned newest-first; the first is the latest sample.
 		stats = append(stats, pipeline.QueueBacklogStat{
-			QueueID:   cd.requestChannel.InferenceObjective,
 			QueueName: subID,
 			PoolName:  cd.requestChannel.WorkerPoolID,
 			Depth:     points[0].GetValue().GetInt64Value(),
