@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/llm-d-incubation/llm-d-async/internal/health"
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
 	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
@@ -36,6 +37,7 @@ func main() {
 
 	var loggerVerbosity int
 
+	var healthPort int
 	var metricsPort int
 	var metricsEndpointAuth bool
 
@@ -46,6 +48,9 @@ func main() {
 
 	var redisTracing bool
 
+	var drainTimeout time.Duration
+	var backlogPollInterval time.Duration
+
 	var tlsCACert string
 	var tlsCert string
 	var tlsKey string
@@ -54,11 +59,14 @@ func main() {
 
 	flag.IntVar(&loggerVerbosity, "v", logging.DEFAULT, "number for the log level verbosity")
 
+	flag.IntVar(&healthPort, "health-port", 8081, "The health probe port")
 	flag.IntVar(&metricsPort, "metrics-port", 9090, "The metrics port")
 	flag.BoolVar(&metricsEndpointAuth, "metrics-endpoint-auth", true, "Enables authentication and authorization of the metrics endpoint")
 
 	flag.IntVar(&concurrency, "concurrency", 8, "number of concurrent workers")
 	flag.DurationVar(&requestTimeout, "request-timeout", 5*time.Minute, "timeout for individual inference requests")
+	flag.DurationVar(&drainTimeout, "drain-timeout", 2*time.Minute, "maximum time to wait for in-flight requests to complete after SIGTERM")
+	flag.DurationVar(&backlogPollInterval, "metrics-backlog-poll-interval", 15*time.Second, "interval to poll the broker for queue backlog metrics (0 disables); only applies to flows that support it (redis-sortedset, gcp-pubsub)")
 
 	flag.StringVar(&requestMergePolicy, "request-merge-policy", "random-robin", "The request merge policy to use. Supported policies: random-robin")
 	flag.StringVar(&messageQueueImpl, "message-queue-impl", "redis-pubsub", "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
@@ -178,13 +186,32 @@ func main() {
 
 	metrics.Register(metrics.GetAsyncProcessorCollectors(impl.Characteristics().SupportsMessageLatency)...)
 
-	ctx := ctrl.SetupSignalHandler()
+	var checker health.Checker
+	if hc, ok := impl.(pipeline.HealthChecker); ok {
+		checker = hc.HealthCheck
+	}
+	healthServer := health.NewServer(healthPort, checker, setupLog.WithName("health"))
+	healthLn, err := healthServer.ListenAndServe()
+	if err != nil {
+		setupLog.Error(err, "Failed to bind health server")
+		os.Exit(1)
+	}
+	go func() {
+		if err := healthServer.Serve(healthLn); err != nil {
+			setupLog.Error(err, "Health server failed")
+		}
+	}()
+
+	signalCtx := ctrl.SetupSignalHandler()
 
 	// Register metrics handler.
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
+	drainCtx, drainCancel := context.WithCancel(logr.NewContext(context.Background(), setupLog))
+	defer drainCancel()
+
 	metricsServerOptions := metricsserver.Options{
 		BindAddress: fmt.Sprintf(":%d", metricsPort),
 		FilterProvider: func() func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
@@ -202,7 +229,7 @@ func main() {
 		setupLog.Error(err, "Failed to create metrics server")
 		os.Exit(1)
 	}
-	go msrv.Start(ctx) // nolint:errcheck
+	go msrv.Start(signalCtx) // nolint:errcheck
 
 	tlsConfig, err := buildTLSConfig(tlsCACert, tlsCert, tlsKey, tlsInsecureSkipVerify)
 	if err != nil {
@@ -250,15 +277,45 @@ func main() {
 			wg.Add(1)
 			go func(mergedChan chan pipeline.EmbelishedRequestMessage) {
 				defer wg.Done()
-				asyncworker.Worker(ctx, impl.Characteristics(), inferenceClient, mergedChan, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
+				asyncworker.Worker(signalCtx, drainCtx, impl.Characteristics(), inferenceClient, mergedChan, impl.RetryChannel(), impl.ResultChannel(), requestTimeout)
 			}(mergedChan)
 		}
 	}
 
-	impl.Start(ctx)
-	<-ctx.Done()
-	wg.Wait()
+	impl.Start(signalCtx)
+	healthServer.SetReady()
+
+	if reporter, ok := impl.(pipeline.BacklogReporter); ok && backlogPollInterval > 0 {
+		go pollBacklog(signalCtx, reporter, backlogPollInterval)
+	} else if !ok {
+		setupLog.Info("Selected flow does not support broker backlog metrics", "message-queue-impl", messageQueueImpl)
+	}
+
+	<-signalCtx.Done()
+	healthServer.SetNotReady()
+
+	setupLog.Info("Signal received, stopping message consumption")
+	impl.StopConsuming()
+
+	setupLog.Info("Draining in-flight requests", "timeout", drainTimeout)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		setupLog.Info("All workers drained successfully")
+	case <-time.After(drainTimeout):
+		setupLog.Info("Drain timeout reached, cancelling in-flight requests")
+		drainCancel()
+		wg.Wait()
+	}
+
 	impl.Shutdown()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := healthServer.Shutdown(shutdownCtx); err != nil {
+		setupLog.Error(err, "Health server shutdown error")
+	}
 }
 
 func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify bool) (*tls.Config, error) {
@@ -300,6 +357,34 @@ func buildTLSConfig(caCertPath, certPath, keyPath string, insecureSkipVerify boo
 	}
 
 	return tlsConfig, nil
+}
+
+// pollBacklog periodically queries the broker for queue backlog and publishes
+// it as the async_broker_backlog gauge until ctx is cancelled.
+func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interval time.Duration) {
+	logger := ctrl.Log.WithName("backlog-poller")
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	poll := func() {
+		stats, err := reporter.QueueBacklog(ctx)
+		if err != nil {
+			logger.V(logging.DEFAULT).Error(err, "Failed to poll broker backlog")
+		}
+		for _, s := range stats {
+			metrics.SetBrokerBacklog(s.QueueID, s.QueueName, s.PoolName, float64(s.Depth))
+		}
+	}
+
+	poll()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			poll()
+		}
+	}
 }
 
 func printAllFlags(setupLog logr.Logger) {

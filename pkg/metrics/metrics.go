@@ -49,6 +49,18 @@ var (
 		Help:    "Time from message publish to message being successfully processed.",
 		Buckets: []float64{100, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000},
 	}, queueLabels)
+	QueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_queue_depth",
+		Help: "Number of requests received from the broker and buffered in-process awaiting an available worker.",
+	}, queueLabels)
+	InflightRequests = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_inflight_requests",
+		Help: "Number of requests currently being processed by workers (dispatched to inference, awaiting a response).",
+	}, queueLabels)
+	BrokerBacklog = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_broker_backlog",
+		Help: "Number of undelivered/pending messages held by the broker queue.",
+	}, queueLabels)
 )
 
 func RecordRetry(queueID, queueName, poolName string) {
@@ -79,10 +91,36 @@ func RecordMessageLatency(millis float64, queueID, queueName, poolName string) {
 	MessageLatencyTime.WithLabelValues(queueID, queueName, poolName).Observe(millis)
 }
 
+// IncQueueDepth increments the count of in-process buffered requests.
+func IncQueueDepth(queueID, queueName, poolName string) {
+	QueueDepth.WithLabelValues(queueID, queueName, poolName).Inc()
+}
+
+// DecQueueDepth decrements the count of in-process buffered requests.
+func DecQueueDepth(queueID, queueName, poolName string) {
+	QueueDepth.WithLabelValues(queueID, queueName, poolName).Dec()
+}
+
+// IncInflight increments the count of requests actively processed by workers.
+func IncInflight(queueID, queueName, poolName string) {
+	InflightRequests.WithLabelValues(queueID, queueName, poolName).Inc()
+}
+
+// DecInflight decrements the count of requests actively processed by workers.
+func DecInflight(queueID, queueName, poolName string) {
+	InflightRequests.WithLabelValues(queueID, queueName, poolName).Dec()
+}
+
+// SetBrokerBacklog sets the broker-side backlog for a queue.
+func SetBrokerBacklog(queueID, queueName, poolName string, n float64) {
+	BrokerBacklog.WithLabelValues(queueID, queueName, poolName).Set(n)
+}
+
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
 		Retries, AsyncReqs, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests,
+		QueueDepth, InflightRequests, BrokerBacklog,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

@@ -19,6 +19,80 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestWorkerDispatch_DrainsBufferedOnShutdown verifies that when the parent
+// context is cancelled with multiple messages buffered in the request channel
+// (only one in-flight), all messages are re-queued via the retry channel.
+// This exercises the drain loop added to the Worker's ctx.Done() handler.
+func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
+	serverHit := make(chan struct{}, 1)
+	serverDone := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case serverHit <- struct{}{}:
+		default:
+		}
+		<-serverDone
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer func() {
+		close(serverDone)
+		server.Close()
+	}()
+
+	client := asyncworker.NewHTTPInferenceClient(server.Client())
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 3)
+	retryChannel := make(chan pipeline.RetryMessage, 3)
+	resultChannel := make(chan asyncapi.ResultMessage, 3)
+
+	consumeCtx, consumeCancel := context.WithCancel(context.Background())
+	requestCtx, requestCancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		asyncworker.Worker(consumeCtx, requestCtx, pipeline.Characteristics{HasExternalBackoff: false},
+			client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
+	}()
+
+	ids := []string{"drain-int-1", "drain-int-2", "drain-int-3"}
+	for _, id := range ids {
+		ir := asyncapi.NewInternalRequest(
+			asyncapi.InternalRouting{RequestQueueName: "test-queue"},
+			&asyncapi.RequestMessage{
+				ID:       id,
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(5 * time.Minute).Unix(),
+				Payload:  map[string]any{"model": "test", "prompt": "hello"},
+			},
+		)
+		requestChannel <- pipeline.EmbelishedRequestMessage{
+			InternalRequest: ir,
+			HttpHeaders:     map[string]string{"Content-Type": "application/json"},
+			RequestURL:      server.URL + "/v1/completions",
+		}
+	}
+
+	<-serverHit
+	consumeCancel()
+	requestCancel()
+	wg.Wait()
+
+	got := make(map[string]bool)
+	timeout := time.After(5 * time.Second)
+	for range ids {
+		select {
+		case msg := <-retryChannel:
+			got[msg.PublicRequest.ReqID()] = true
+		case <-timeout:
+			t.Fatal("timed out waiting for re-queued messages")
+		}
+	}
+	for _, id := range ids {
+		assert.True(t, got[id], "message %s should have been re-queued on shutdown", id)
+	}
+}
+
 // TestWorkerDispatch_MockIGW spawns an httptest.Server as a mock inference
 // gateway and verifies that the Worker correctly assembles the request URL,
 // forwards headers, sends the payload, and routes the result back.
@@ -49,7 +123,7 @@ func TestWorkerDispatch_MockIGW(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -118,7 +192,7 @@ func TestWorkerDispatch_EndpointOverride(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -165,7 +239,7 @@ func TestWorkerDispatch_ServerErrorTriggersRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	ir := asyncapi.NewInternalRequest(
@@ -214,7 +288,7 @@ func TestWorkerDispatch_ResultCallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 
 	routing := asyncapi.InternalRouting{
@@ -274,7 +348,7 @@ func TestWorkerDispatch_RequeuesOnShutdown(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+		asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 			client, requestChannel, retryChannel, resultChannel, 5*time.Minute)
 	}()
 
@@ -354,11 +428,11 @@ func TestWorkerDispatch_PoolIsolation(t *testing.T) {
 	defer cancel()
 
 	// Spawn 1 worker for pool-blocked
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		clientBlocked, reqChanBlocked, retryChanBlocked, resultChanBlocked, 5*time.Minute)
 
 	// Spawn 1 worker for pool-active
-	go asyncworker.Worker(ctx, pipeline.Characteristics{HasExternalBackoff: false},
+	go asyncworker.Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
 		clientActive, reqChanActive, retryChanActive, resultChanActive, 5*time.Minute)
 
 	// 3. Send message 1 (to pool-blocked)

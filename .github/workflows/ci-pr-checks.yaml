@@ -112,6 +112,12 @@ jobs:
       - name: Lint Helm chart
         run: helm lint charts/async-processor
 
+      - name: Install helm-unittest plugin
+        run: helm plugin install --version v1.0.3 --verify=false https://github.com/helm-unittest/helm-unittest.git
+
+      - name: Run Helm unit tests
+        run: helm unittest charts/async-processor
+
   # Container: build (no push) to validate Dockerfile
   container-build:
     runs-on: ubuntu-latest

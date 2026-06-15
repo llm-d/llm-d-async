@@ -34,8 +34,12 @@ func NewSaturationPromQLSourceFromConfig(promConfig promapi.Config, params map[s
 		return nil, fmt.Errorf("inference pool name is required for saturation PromQL")
 	}
 
-	queryExpr := "1 - " + buildPromQL("inference_extension_flow_control_pool_saturation",
-		map[string]string{"inference_pool": inferencePool})
+	labels := map[string]string{"inference_pool": inferencePool}
+	if ns := params["namespace"]; ns != "" {
+		labels["namespace"] = ns
+	}
+
+	queryExpr := "1 - " + buildPromQL("inference_extension_flow_control_pool_saturation", labels)
 	return NewPromQLMetricSource(promConfig, queryExpr)
 }
 
@@ -51,17 +55,24 @@ func NewPromQLMetricSourceFromLabels(promConfig promapi.Config, metricName strin
 // inference_extension_flow_control_queue_size and max_SYS = ready_pods × maxConcurrency is
 // computed dynamically from the inference_pool_ready_pods metric.
 // inferencePool and maxConcurrency are required.
-func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64) (*PromQLMetricSource, error) {
+func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64, namespace string) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
 		return nil, fmt.Errorf("inference pool name is required for flow control queue size PromQL")
 	}
 	if maxConcurrency <= 0 {
 		return nil, fmt.Errorf("maxConcurrency must be positive, got %g", maxConcurrency)
 	}
-	label := strconv.Quote(inferencePool)
+	queueLabels := map[string]string{"inference_pool": inferencePool}
+	podsLabels := map[string]string{"name": inferencePool}
+	if namespace != "" {
+		queueLabels["namespace"] = namespace
+		podsLabels["namespace"] = namespace
+	}
 	query := fmt.Sprintf(
-		`1 - (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool=%s}) / on() (inference_pool_ready_pods{name=%s} * %g))`,
-		label, label, maxConcurrency,
+		`1 - (sum by(inference_pool)(%s) / on() (%s * %g))`,
+		buildPromQL("inference_extension_flow_control_queue_size", queueLabels),
+		buildPromQL("inference_pool_ready_pods", podsLabels),
+		maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
 	if err != nil {
@@ -74,17 +85,24 @@ func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool stri
 // from vLLM and pool metrics, returning D = 1 − (running_requests / (ready_pods × maxConcurrency)).
 // This serves as a fallback when EPP flow control metrics are unavailable.
 // inferencePool and maxConcurrency are required.
-func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64) (*PromQLMetricSource, error) {
+func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64, namespace string) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
 		return nil, fmt.Errorf("inference pool name is required for vLLM saturation PromQL")
 	}
 	if maxConcurrency <= 0 {
 		return nil, fmt.Errorf("maxConcurrency must be positive, got %g", maxConcurrency)
 	}
-	label := strconv.Quote(inferencePool)
+	vllmLabels := map[string]string{"inference_pool": inferencePool}
+	podsLabels := map[string]string{"name": inferencePool}
+	if namespace != "" {
+		vllmLabels["namespace"] = namespace
+		podsLabels["namespace"] = namespace
+	}
 	query := fmt.Sprintf(
-		`1 - (sum(vllm:num_requests_running{inference_pool=%s}) / on() (inference_pool_ready_pods{name=%s} * %g))`,
-		label, label, maxConcurrency,
+		`1 - (sum(%s) / on() (%s * %g))`,
+		buildPromQL("vllm:num_requests_running", vllmLabels),
+		buildPromQL("inference_pool_ready_pods", podsLabels),
+		maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
 	if err != nil {

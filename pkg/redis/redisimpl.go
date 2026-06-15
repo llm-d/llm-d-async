@@ -134,8 +134,8 @@ type QueueConfig struct {
 	QueueName          string `json:"queue_name"`
 	WorkerPoolID       string `json:"worker_pool_id"`
 	InferenceObjective string `json:"inference_objective"`
-	IGWBaseURL         string `json:"igw_base_url"`
 	RequestPathURL     string `json:"request_path_url"`
+	IGWBaseURL         string `json:"igw_base_url"`
 }
 
 type RequestChannelData struct {
@@ -143,7 +143,10 @@ type RequestChannelData struct {
 	queueName      string
 }
 
-var _ pipeline.Flow = (*RedisMQFlow)(nil)
+var (
+	_ pipeline.Flow          = (*RedisMQFlow)(nil)
+	_ pipeline.HealthChecker = (*RedisMQFlow)(nil)
+)
 
 type RedisMQFlow struct {
 	rdb             *redis.Client
@@ -151,6 +154,8 @@ type RedisMQFlow struct {
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
 	workerPools     []pipeline.WorkerPoolConfig
+	consumeCancel   context.CancelFunc
+	consumeWg       sync.WaitGroup
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 	enableTracing   bool
@@ -251,9 +256,9 @@ func NewRedisMQFlow(opts ...RedisOption) (*RedisMQFlow, error) {
 		channels = append(channels, RequestChannelData{pipeline.RequestChannel{
 			Channel:            ch,
 			InferenceObjective: cfg.InferenceObjective,
-			WorkerPoolID:       workerPoolID,
-			IGWBaseURL:         cfg.IGWBaseURL,
 			RequestPathURL:     reqPath,
+			IGWBaseURL:         cfg.IGWBaseURL,
+			WorkerPoolID:       workerPoolID,
 		}, cfg.QueueName})
 	}
 	if flow.enableTracing {
@@ -268,17 +273,32 @@ func NewRedisMQFlow(opts ...RedisOption) (*RedisMQFlow, error) {
 }
 
 func (r *RedisMQFlow) Start(ctx context.Context) {
-	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), log.FromContext(ctx)))
+	logger := log.FromContext(ctx)
+	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	r.consumeCancel = consumeCancel
+
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
 	r.drainCancel = drainCancel
 
 	for _, channelData := range r.requestChannels {
-		go requestWorker(ctx, r.rdb, channelData.requestChannel.Channel, channelData.queueName)
+		r.consumeWg.Add(1)
+		go func(cd RequestChannelData) {
+			defer r.consumeWg.Done()
+			requestWorker(consumeCtx, r.rdb, cd.requestChannel.Channel, cd.queueName)
+		}(channelData)
 	}
 
 	r.drainWg.Add(3)
 	go func() { defer r.drainWg.Done(); addMsgToRetryWorker(drainCtx, r.rdb, r.retryChannel, *retryQueueName) }()
 	go func() { defer r.drainWg.Done(); r.retryWorker(drainCtx, r.rdb) }()
 	go func() { defer r.drainWg.Done(); r.resultWorker(drainCtx, *resultQueueName) }() // #nosec G118
+}
+
+func (r *RedisMQFlow) StopConsuming() {
+	if r.consumeCancel != nil {
+		r.consumeCancel()
+	}
+	r.consumeWg.Wait()
 }
 
 func (r *RedisMQFlow) Shutdown() {
@@ -406,6 +426,10 @@ func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan
 	}
 }
 
+func (r *RedisMQFlow) HealthCheck(ctx context.Context) error {
+	return r.rdb.Ping(ctx).Err()
+}
+
 func (r *RedisMQFlow) Characteristics() pipeline.Characteristics {
 	return pipeline.Characteristics{
 		HasExternalBackoff:     false,
@@ -416,30 +440,36 @@ func (r *RedisMQFlow) Characteristics() pipeline.Characteristics {
 // Puts msgs from the retry channel into a Redis sorted-set with a duration Score.
 func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel chan pipeline.RetryMessage, sortedSetName string) {
 	logger := log.FromContext(ctx)
+	addRetry := func(msg pipeline.RetryMessage) {
+		if msg.InternalRequest == nil {
+			return
+		}
+		score := float64(time.Now().Unix()) + msg.BackoffDurationSeconds
+		bytes, err := json.Marshal(msg.InternalRequest)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to marshal message for retry in Redis")
+			return
+		}
+		if err := retryRedisOp(ctx, func(opCtx context.Context) error {
+			return rdb.ZAdd(opCtx, sortedSetName, redis.Z{Score: score, Member: string(bytes)}).Err()
+		}); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to add message for retry in Redis")
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			for {
+				select {
+				case msg := <-retryChannel:
+					addRetry(msg)
+				default:
+					return
+				}
+			}
 
 		case msg := <-retryChannel:
-			if msg.InternalRequest == nil {
-				continue
-			}
-			score := float64(time.Now().Unix()) + msg.BackoffDurationSeconds
-			bytes, err := json.Marshal(msg.InternalRequest)
-			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to marshal message for retry in Redis")
-				continue // skip this message.
-			}
-			err = rdb.ZAdd(ctx, sortedSetName, redis.Z{
-				Score:  score,
-				Member: string(bytes),
-			}).Err()
-
-			if err != nil {
-				// skip this message. We're not going to retry a "preparing to retry" step.
-				logger.V(logutil.DEFAULT).Error(err, "Failed to add message for retry in Redis")
-			}
+			addRetry(msg)
 		}
 	}
 

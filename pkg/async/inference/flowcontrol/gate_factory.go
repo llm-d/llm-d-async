@@ -244,12 +244,13 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 		}
 
 		promConfig := promapi.Config{Address: f.prometheusURL}
+		namespace := params["namespace"]
 
-		primary, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxConcurrency)
+		primary, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxConcurrency, namespace)
 		if err != nil {
 			return nil, err
 		}
-		secondary, err := NewVLLMSaturationPromQL(promConfig, pool, maxConcurrency)
+		secondary, err := NewVLLMSaturationPromQL(promConfig, pool, maxConcurrency, namespace)
 		if err != nil {
 			return nil, err
 		}

@@ -9,10 +9,17 @@ import (
 type Flow interface {
 	Characteristics() Characteristics
 	Start(ctx context.Context)
+	StopConsuming()
 	Shutdown()
 	RequestChannels() []RequestChannel
 	RetryChannel() chan RetryMessage
 	ResultChannel() chan api.ResultMessage
+}
+
+// HealthChecker is an optional interface that Flow implementations can
+// satisfy to report backend-specific health.
+type HealthChecker interface {
+	HealthCheck(ctx context.Context) error
 }
 
 type Characteristics struct {
@@ -71,13 +78,29 @@ type RequestMergePolicy interface {
 	MergeRequestChannels(channels []RequestChannel, pools map[string]WorkerPoolConfig) PoolDispatch
 }
 
+// QueueBacklogStat reports the broker-side backlog for a single queue.
+type QueueBacklogStat struct {
+	QueueID   string
+	QueueName string
+	PoolName  string
+	Depth     int64
+}
+
+// BacklogReporter is an optional capability for flows backed by a broker that
+// exposes a queryable backlog (e.g. Redis sorted sets, GCP PubSub). Flows whose
+// transport has no persisted queue (e.g. Redis Pub/Sub) do not implement it.
+type BacklogReporter interface {
+	// QueueBacklog returns the current backlog for each configured queue.
+	QueueBacklog(ctx context.Context) ([]QueueBacklogStat, error)
+}
+
 type RequestChannel struct {
 	Channel            chan *api.InternalRequest
+	IGWBaseURL         string
 	InferenceObjective string
+	RequestPathURL     string
 	Gate               DispatchGate
 	WorkerPoolID       string
-	IGWBaseURL         string
-	RequestPathURL     string
 }
 
 // PoolDispatch is the merge policy's output: one buffered channel per

@@ -1,0 +1,181 @@
+suite: observability
+tests:
+  # -- PodMonitor --
+  - it: should not render PodMonitor by default
+    templates:
+      - templates/ap-podmonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render PodMonitor when enabled
+    templates:
+      - templates/ap-podmonitor.yaml
+    set:
+      ap.podMonitor.enabled: true
+    asserts:
+      - isKind:
+          of: PodMonitor
+      - equal:
+          path: spec.podMetricsEndpoints[0].port
+          value: metrics
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+      - equal:
+          path: spec.podMetricsEndpoints[0].interval
+          value: "30s"
+
+  - it: should set custom PodMonitor interval
+    templates:
+      - templates/ap-podmonitor.yaml
+    set:
+      ap.podMonitor.enabled: true
+      ap.podMonitor.interval: "15s"
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[0].interval
+          value: "15s"
+
+  - it: should add custom PodMonitor labels
+    templates:
+      - templates/ap-podmonitor.yaml
+    set:
+      ap.podMonitor.enabled: true
+      ap.podMonitor.labels:
+        monitoring.opendatahub.io/scrape: "true"
+    asserts:
+      - equal:
+          path: metadata.labels["monitoring.opendatahub.io/scrape"]
+          value: "true"
+
+  # -- PrometheusRule --
+  - it: should not render PrometheusRule by default
+    templates:
+      - templates/prometheus-rule.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render PrometheusRule when enabled
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+    asserts:
+      - isKind:
+          of: PrometheusRule
+      - isNotNull:
+          path: spec.groups[0].rules
+
+  - it: should render all four alerts by default
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 4
+
+  - it: should skip disabled alerts
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+      ap.prometheusRule.rules.highRetryRate.enabled: false
+      ap.prometheusRule.rules.highShedRate.enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 2
+
+  - it: should add custom PrometheusRule labels
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+      ap.prometheusRule.labels:
+        team: inference
+    asserts:
+      - equal:
+          path: metadata.labels.team
+          value: inference
+
+  - it: should use release namespace in alert descriptions
+    templates:
+      - templates/prometheus-rule.yaml
+    release:
+      namespace: test-ns
+    set:
+      ap.prometheusRule.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.groups[0].rules[0].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[1].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[2].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[3].annotations.description
+          pattern: "namespace test-ns"
+
+  # -- Grafana Dashboard ConfigMap --
+  - it: should not render Grafana dashboard ConfigMap by default
+    templates:
+      - templates/grafana-dashboards-configmap.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render Grafana dashboard ConfigMap when enabled
+    templates:
+      - templates/grafana-dashboards-configmap.yaml
+    set:
+      ap.grafana.dashboards.enabled: true
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.labels.grafana_dashboard
+          value: "1"
+      - isNotNull:
+          path: data["async-processor.json"]
+
+  - it: should use custom Grafana dashboard label
+    templates:
+      - templates/grafana-dashboards-configmap.yaml
+    set:
+      ap.grafana.dashboards.enabled: true
+      ap.grafana.dashboards.label: custom_label
+      ap.grafana.dashboards.labelValue: "custom"
+    asserts:
+      - equal:
+          path: metadata.labels.custom_label
+          value: "custom"
+
+  # -- ModelServer PodMonitor --
+  - it: should not render ModelServer PodMonitor by default
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render ModelServer PodMonitor when enabled
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+    asserts:
+      - isKind:
+          of: PodMonitor
+      - equal:
+          path: spec.podMetricsEndpoints[0].port
+          value: modelserver
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics

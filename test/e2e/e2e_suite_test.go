@@ -58,7 +58,7 @@ var (
 	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d-incubation/async-processor:e2e-test", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "registry.k8s.io/gateway-api-inference-extension/epp:v1.5.0", ginkgo.GinkgoLogr)
-	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.0.0-test", ginkgo.GinkgoLogr)
+	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.1", ginkgo.GinkgoLogr)
 	gaieRoot         = os.Getenv("GAIE_ROOT")
 	simRoot          = os.Getenv("SIM_ROOT")
 
@@ -331,6 +331,7 @@ func applyManifests() {
 		{"composite", helmValuesDir + "/composite.yaml"},
 		{"prometheus-query", helmValuesDir + "/prometheus-query.yaml"},
 		{"endpoint-scrape", helmValuesDir + "/endpoint-scrape.yaml"},
+		{"short-drain", helmValuesDir + "/short-drain.yaml"},
 	} {
 		helmInstall(r.name, r.values, map[string]string{
 			"ap.image.repository": imageRepo,
@@ -557,6 +558,7 @@ func doRedeployEPPWithFlowControl() {
 		"composite-async-processor",
 		"prometheus-query-async-processor",
 		"endpoint-scrape-async-processor",
+		"short-drain-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
@@ -573,6 +575,7 @@ func doRedeployEPPWithFlowControl() {
 		"composite-async-processor",
 		"prometheus-query-async-processor",
 		"endpoint-scrape-async-processor",
+		"short-drain-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")

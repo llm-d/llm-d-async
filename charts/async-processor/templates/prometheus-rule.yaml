@@ -1,0 +1,84 @@
+{{- if .Values.ap.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "async-processor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "async-processor.labels" . | nindent 4 }}
+    {{- with .Values.ap.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: async-processor.rules
+      rules:
+        {{- if .Values.ap.prometheusRule.rules.highRetryRate.enabled }}
+        - alert: AsyncProcessorHighRetryRate
+          expr: |
+            (
+              sum(rate(llm_d_async_async_request_retries_total{namespace="{{ .Release.Namespace }}"}[5m]))
+              /
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
+            ) > {{ .Values.ap.prometheusRule.rules.highRetryRate.threshold }}
+          for: {{ .Values.ap.prometheusRule.rules.highRetryRate.for | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: Async processor retry rate is high
+            description: >-
+              Retry rate exceeds {{ .Values.ap.prometheusRule.rules.highRetryRate.threshold }} (ratio)
+              for async requests in namespace {{ .Release.Namespace }}.
+        {{- end }}
+        {{- if .Values.ap.prometheusRule.rules.highDeadlineExceededRate.enabled }}
+        - alert: AsyncProcessorHighDeadlineExceededRate
+          expr: |
+            (
+              sum(rate(llm_d_async_async_exceeded_deadline_requests_total{namespace="{{ .Release.Namespace }}"}[5m]))
+              /
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
+            ) > {{ .Values.ap.prometheusRule.rules.highDeadlineExceededRate.threshold }}
+          for: {{ .Values.ap.prometheusRule.rules.highDeadlineExceededRate.for | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: Async processor deadline exceeded rate is high
+            description: >-
+              Deadline exceeded rate exceeds {{ .Values.ap.prometheusRule.rules.highDeadlineExceededRate.threshold }} (ratio)
+              for async requests in namespace {{ .Release.Namespace }}.
+        {{- end }}
+        {{- if .Values.ap.prometheusRule.rules.lowSuccessRate.enabled }}
+        - alert: AsyncProcessorLowSuccessRate
+          expr: |
+            (
+              sum(rate(llm_d_async_async_successful_requests_total{namespace="{{ .Release.Namespace }}"}[5m]))
+              /
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
+            ) < {{ .Values.ap.prometheusRule.rules.lowSuccessRate.threshold }}
+          for: {{ .Values.ap.prometheusRule.rules.lowSuccessRate.for | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: Async processor success rate is low
+            description: >-
+              Success rate is below {{ .Values.ap.prometheusRule.rules.lowSuccessRate.threshold }} (ratio)
+              for async requests in namespace {{ .Release.Namespace }}.
+        {{- end }}
+        {{- if .Values.ap.prometheusRule.rules.highShedRate.enabled }}
+        - alert: AsyncProcessorHighShedRate
+          expr: |
+            (
+              sum(rate(llm_d_async_async_shedded_requests_total{namespace="{{ .Release.Namespace }}"}[5m]))
+              /
+              sum(rate(llm_d_async_async_request_total{namespace="{{ .Release.Namespace }}"}[5m]))
+            ) > {{ .Values.ap.prometheusRule.rules.highShedRate.threshold }}
+          for: {{ .Values.ap.prometheusRule.rules.highShedRate.for | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: Async processor shed rate is high
+            description: >-
+              Shed rate exceeds {{ .Values.ap.prometheusRule.rules.highShedRate.threshold }} (ratio)
+              for async requests in namespace {{ .Release.Namespace }}.
+        {{- end }}
+{{- end }}

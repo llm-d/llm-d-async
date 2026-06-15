@@ -138,15 +138,17 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "critical_queue",
        "inference_objective": "critical-task",
-       "worker_pool_id": "inference_pool_1",
+       "request_path_url": "/v1/completions",
        "igw_base_url": "http://localhost:80/",
+       "worker_pool_id": "inference_pool_1",
        "gate_type": "constant"
     },
     {
        "queue_name": "batch_queue",
        "inference_objective": "batch-task",
-       "worker_pool_id": "inference_pool_1",
+       "request_path_url": "/v1/completions",
        "igw_base_url": "http://localhost:80/",
+       "worker_pool_id": "inference_pool_1",
        "gate_type": "prometheus-saturation",
        "gate_params": {
           "pool": "inference_pool_1",
@@ -156,8 +158,9 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "batch_budget_queue",
        "inference_objective": "batch-task",
-       "worker_pool_id": "inference_pool_1",
+       "request_path_url": "/v1/completions",
        "igw_base_url": "http://localhost:80/",
+       "worker_pool_id": "inference_pool_1",
        "gate_type": "prometheus-budget",
        "gate_params": {
           "pool": "inference_pool_1",
@@ -168,8 +171,9 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "redis_gated_queue",
        "inference_objective": "gated-task",
-       "worker_pool_id": "inference_pool_2",
+       "request_path_url": "/v1/completions",
        "igw_base_url": "http://localhost:8000/",
+       "worker_pool_id": "inference_pool_2",
        "gate_type": "redis",
        "gate_params": {
           "address": "localhost:6379",
@@ -179,8 +183,9 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "custom_metric_queue",
        "inference_objective": "custom-task",
-       "worker_pool_id": "inference_pool_2",
+       "request_path_url": "/v1/completions",
        "igw_base_url": "http://localhost:8000/",
+       "worker_pool_id": "inference_pool_2",
        "gate_type": "prometheus-query",
        "gate_params": {
           "query": "1 - (sum(rate(http_requests_total{job=\"inference\"}[5m])) / 100)",
@@ -190,8 +195,9 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "composite_gated_queue",
        "inference_objective": "composite-task",
-       "worker_pool_id": "inference_pool_1",
+       "request_path_url": "/v1/completions",
        "igw_base_url": "http://localhost:80/",
+       "worker_pool_id": "inference_pool_1",
        "gate_type": "composite",
        "gate_params": {
           "gates": "[{\"gate_type\":\"prometheus-saturation\",\"gate_params\":{\"pool\":\"inference_pool_1\"}},{\"gate_type\":\"redis-quota\",\"gate_params\":{\"address\":\"localhost:6379\",\"limit\":\"100\"}}]"
@@ -200,8 +206,8 @@ For more fine-grained control, configure gates per queue in your configuration f
     {
        "queue_name": "scrape_gated_queue",
        "inference_objective": "batch-task",
-       "igw_base_url": "http://localhost:80/",
        "request_path_url": "/v1/completions",
+       "igw_base_url": "http://localhost:80/",
        "gate_type": "endpoint-scrape",
        "gate_params": {
           "url": "http://vllm-sim:8000/metrics",
@@ -233,6 +239,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 
 - `prometheus-saturation`:
   - `pool` (**required**): The inference pool name to filter metrics by.
+  - `namespace` (optional): Kubernetes namespace to scope metric queries. Required when multiple namespaces share the same pool name with a shared Prometheus instance.
   - `threshold` (optional): Saturation threshold (0.0-1.0). When saturation >= threshold, budget is 0.0. Default is `0.8`.
   - `fallback` (optional): Fallback saturation value (0.0-1.0) used when the metric source returns an error or empty data. Default is `0.0`.
 
@@ -250,6 +257,7 @@ For more fine-grained control, configure gates per queue in your configuration f
   - `pool` (**required**): The InferencePool name. This must match both the `name` field in
     `inference_pool_ready_pods{name="<pool>"}` (EPP metric) and, for the vLLM fallback,
     the `inference_pool` label on scraped vLLM metrics (added via relabeling from pod labels).
+  - `namespace` (optional): Kubernetes namespace to scope metric queries. Required when multiple namespaces share the same pool name with a shared Prometheus instance.
   - `max_concurrency` (optional): Per-endpoint request capacity (`MaxConcurrency` in the [inference scheduler's saturation detector](https://github.com/llm-d/llm-d-inference-scheduler/blob/main/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go)). Default is `100` (matching the inference scheduler default).
   - `baseline` (optional): Reserved baseline B. The gate closes when D ≤ B. Default is `0.05`.
   - `fallback` (optional): Fallback budget value (0.0-1.0) returned when all metric sources are unavailable. Default is `0.0` (fail closed).
@@ -534,16 +542,16 @@ The configuration file when using the `redis.queues-config-file` flag should hav
 [
     {
        "queue_name": "some_queue_name",
+       "igw_base_url": "http://localhost:30800",
        "worker_pool_id": "qwen-pool",
        "inference_objective": "some_inference_objective",
-       "igw_base_url": "http://localhost:80/",
        "request_path_url": "/v1/completions"
     },
     {
        "queue_name": "another_queue",
+       "igw_base_url": "http://localhost:8000/",
        "worker_pool_id": "llama-pool",
        "inference_objective": "batch_task",
-       "igw_base_url": "http://localhost:8000/",
        "request_path_url": "/v1/chat/completions"
     }
 ]

@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	ssIgwBaseURL         = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
+	ssIGWBaseURL         = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
 	ssRequestPathURL     = flag.String("redis.ss.request-path-url", "/v1/completions", "Request path URL")
 	ssInferenceObjective = flag.String("redis.ss.inference-objective", "", "Inference objective header")
 	ssRequestQueueName   = flag.String("redis.ss.request-queue-name", "request-sortedset", "Request sorted set name")
@@ -81,10 +81,10 @@ type queueConfig struct {
 	ResultQueueName    string    `json:"result_queue_name,omitempty"`
 	WorkerPoolID       string    `json:"worker_pool_id"`
 	InferenceObjective string    `json:"inference_objective"`
+	RequestPathURL     string    `json:"request_path_url"`
+	IGWBaseURL         string    `json:"igw_base_url"`
 	GateType           string    `json:"gate_type"`
 	GateParams         StringMap `json:"gate_params,omitempty"`
-	IGWBaseURL         string    `json:"igw_base_url"`
-	RequestPathURL     string    `json:"request_path_url"`
 }
 
 type requestChannelData struct {
@@ -94,7 +94,10 @@ type requestChannelData struct {
 	gate      pipeline.DispatchGate
 }
 
-var _ pipeline.Flow = (*RedisSortedSetFlow)(nil)
+var (
+	_ pipeline.Flow          = (*RedisSortedSetFlow)(nil)
+	_ pipeline.HealthChecker = (*RedisSortedSetFlow)(nil)
+)
 
 type RedisSortedSetFlow struct {
 	rdb             *redis.Client
@@ -108,6 +111,8 @@ type RedisSortedSetFlow struct {
 	gateFactory     pipeline.GateFactory
 	configMap       map[string]queueConfig
 	workerPools     []pipeline.WorkerPoolConfig
+	consumeCancel   context.CancelFunc
+	consumeWg       sync.WaitGroup
 	drainCancel     context.CancelFunc
 	drainWg         sync.WaitGroup
 	enableTracing   bool
@@ -214,10 +219,10 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 		ch := pipeline.RequestChannel{
 			Channel:            make(chan *api.InternalRequest),
 			InferenceObjective: cfg.InferenceObjective,
+			RequestPathURL:     reqPath,
+			IGWBaseURL:         cfg.IGWBaseURL,
 			Gate:               gate,
 			WorkerPoolID:       workerPoolID,
-			IGWBaseURL:         cfg.IGWBaseURL,
-			RequestPathURL:     reqPath,
 		}
 
 		r.configMap[cfg.ID] = cfg
@@ -265,11 +270,11 @@ func loadQueueConfigs() ([]queueConfig, error) {
 		configs = []queueConfig{{
 			QueueName:          *ssRequestQueueName,
 			InferenceObjective: *ssInferenceObjective,
+			IGWBaseURL:         *ssIGWBaseURL,
+			RequestPathURL:     *ssRequestPathURL,
 			GateType:           *ssGateType,
 			GateParams:         parseGateParams(*ssGateParamsJSON),
 			WorkerPoolID:       "default",
-			IGWBaseURL:         *ssIgwBaseURL,
-			RequestPathURL:     *ssRequestPathURL,
 		}}
 	}
 	seenID := make(map[string]bool, len(configs))
@@ -295,15 +300,30 @@ func applyQueueConfigDefaults(cfg *queueConfig) {
 }
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {
-	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), log.FromContext(ctx)))
+	logger := log.FromContext(ctx)
+	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	r.consumeCancel = consumeCancel
+
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
 	r.drainCancel = drainCancel
 
 	for _, ch := range r.requestChannels {
-		go r.requestWorker(ctx, ch.channel.Channel, ch.queueName, ch.queueID)
+		r.consumeWg.Add(1)
+		go func(ch requestChannelData) {
+			defer r.consumeWg.Done()
+			r.requestWorker(consumeCtx, ch.channel.Channel, ch.queueName, ch.queueID)
+		}(ch)
 	}
 	r.drainWg.Add(2)
 	go func() { defer r.drainWg.Done(); r.retryWorker(drainCtx) }()  // #nosec G118
 	go func() { defer r.drainWg.Done(); r.resultWorker(drainCtx) }() // #nosec G118
+}
+
+func (r *RedisSortedSetFlow) StopConsuming() {
+	if r.consumeCancel != nil {
+		r.consumeCancel()
+	}
+	r.consumeWg.Wait()
 }
 
 func (r *RedisSortedSetFlow) Shutdown() {
@@ -321,12 +341,47 @@ func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {
 	return channels
 }
 
+// QueueBacklog reports the number of pending members in each queue's sorted set.
+func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
+	stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
+	var firstErr error
+	for _, cd := range r.requestChannels {
+		depth, err := r.rdb.ZCard(ctx, cd.queueName).Result()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ZCard on queue %q: %w", cd.queueName, err)
+			}
+			// Report 0 rather than skipping so the gauge does not retain a
+			// stale value for this queue after a failed poll.
+			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   cd.queueID,
+				QueueName: cd.queueName,
+				PoolName:  cd.channel.WorkerPoolID,
+			})
+			continue
+		}
+		stats = append(stats, pipeline.QueueBacklogStat{
+			QueueID:   cd.queueID,
+			QueueName: cd.queueName,
+			PoolName:  cd.channel.WorkerPoolID,
+			Depth:     depth,
+		})
+	}
+	return stats, firstErr
+}
+
+var _ pipeline.BacklogReporter = (*RedisSortedSetFlow)(nil)
+
 func (r *RedisSortedSetFlow) RetryChannel() chan pipeline.RetryMessage {
 	return r.retryChannel
 }
 
 func (r *RedisSortedSetFlow) ResultChannel() chan api.ResultMessage {
 	return r.resultChannel
+}
+
+func (r *RedisSortedSetFlow) HealthCheck(ctx context.Context) error {
+	return r.rdb.Ping(ctx).Err()
 }
 
 func (r *RedisSortedSetFlow) Characteristics() pipeline.Characteristics {

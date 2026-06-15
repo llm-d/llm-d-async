@@ -22,9 +22,13 @@ var _ = ginkgo.Describe("General Integration", func() {
 		// Delete, pause for in-flight results, delete again.
 		rdb.Del(ctx, integrationRequestQueue) //nolint:errcheck
 		rdb.Del(ctx, integrationResultQueue)  //nolint:errcheck
+		rdb.Del(ctx, shortDrainRequestQueue)  //nolint:errcheck
+		rdb.Del(ctx, shortDrainResultQueue)   //nolint:errcheck
 		gomega.Consistently(func() int64 {
 			return rdb.LLen(ctx, integrationResultQueue).Val() +
-				rdb.ZCard(ctx, integrationRequestQueue).Val()
+				rdb.ZCard(ctx, integrationRequestQueue).Val() +
+				rdb.LLen(ctx, shortDrainResultQueue).Val() +
+				rdb.ZCard(ctx, shortDrainRequestQueue).Val()
 		}, 3*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(0)))
 	})
 
@@ -152,11 +156,20 @@ var _ = ginkgo.Describe("General Integration", func() {
 		}
 	})
 
-	ginkgo.It("re-queues in-flight messages on pod termination", func() {
-		// Add a 60s delay to 100% of requests so they stay in-flight in the Worker.
+	ginkgo.It("completes in-flight requests during graceful shutdown", func() {
+		// Add a 60s delay to 100% of requests so they stay in-flight.
+		// The drain timeout (2m) is longer than the delay, so the Worker
+		// should finish in-flight requests and produce results rather than
+		// re-enqueuing them.
+		//
+		// With concurrency=1 and terminationGracePeriodSeconds=130, the
+		// worker processes requests sequentially. Each takes ~60s due to
+		// the Envoy delay, so at most 2 out of 3 complete before SIGKILL.
+		// The remaining message is re-enqueued. We verify:
+		//   1. At least one request completed (drain works).
+		//   2. No messages are lost (results + re-enqueued = total).
 		setEnvoyFaultDelay(envoyAdminURL, 100)
 
-		// Ensure the deployment is restored even if the test fails.
 		ginkgo.DeferCleanup(func() {
 			setEnvoyFaultDelay(envoyAdminURL, 0)
 			cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
@@ -185,9 +198,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 			return rdb.ZCard(ctx, integrationRequestQueue).Val()
 		}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(0)))
 
-		// Scale the deployment to 0 to trigger graceful shutdown. Using scale
-		// instead of pod delete prevents a replacement pod from consuming the
-		// re-queued messages before we can assert.
+		// Scale the deployment to 0 to trigger graceful shutdown.
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "scale", "deployment/integration-async-processor",
 			"--replicas=0", "--timeout=60s")
@@ -199,16 +210,80 @@ var _ = ginkgo.Describe("General Integration", func() {
 		cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "wait", "pod",
 			"-l", "app.kubernetes.io/instance=integration",
+			"--for=delete", "--timeout=120s")
+		session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
+
+		// Two-phase shutdown: in-flight requests should complete during
+		// drain instead of being immediately cancelled and re-enqueued.
+		resultCount := getResultCount(ctx, rdb, integrationResultQueue)
+		requeueCount := rdb.ZCard(ctx, integrationRequestQueue).Val()
+
+		// At least one request must have completed (proves drain works).
+		gomega.Expect(resultCount).To(gomega.BeNumerically(">=", 1),
+			"expected at least one in-flight request to complete during drain phase")
+
+		// No messages lost or duplicated: completed results + re-enqueued = total.
+		gomega.Expect(resultCount+requeueCount).To(gomega.Equal(int64(len(ids))),
+			"expected no message loss: results + re-enqueued should equal total")
+	})
+
+	ginkgo.It("re-enqueues in-flight messages when drain timeout is exceeded", func() {
+		// The short-drain processor has drain-timeout=5s. With Envoy injecting
+		// a 60s delay, requests cannot complete within the drain window and
+		// must be re-enqueued.
+		setEnvoyFaultDelay(envoyAdminURL, 100)
+
+		ginkgo.DeferCleanup(func() {
+			setEnvoyFaultDelay(envoyAdminURL, 0)
+			cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+				"-n", nsName, "scale", "deployment/short-drain-async-processor",
+				"--replicas=1", "--timeout=60s")
+			session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+
+			cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+				"-n", nsName, "rollout", "status",
+				"deployment/short-drain-async-processor", "--timeout=120s")
+			session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
+		})
+
+		ids := []string{"drain-timeout-1", "drain-timeout-2", "drain-timeout-3"}
+		for _, id := range ids {
+			enqueueMessage(ctx, rdb, shortDrainRequestQueue, makeRequestMessage(id, 5*time.Minute))
+		}
+
+		// Wait for messages to be popped (now in-flight, stuck in delay).
+		gomega.Eventually(func() int64 {
+			return rdb.ZCard(ctx, shortDrainRequestQueue).Val()
+		}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(0)))
+
+		// Scale to 0 to trigger graceful shutdown.
+		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "scale", "deployment/short-drain-async-processor",
+			"--replicas=0", "--timeout=60s")
+		session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+
+		// Wait for the pod to fully terminate.
+		cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "wait", "pod",
+			"-l", "app.kubernetes.io/instance=short-drain",
 			"--for=delete", "--timeout=60s")
 		session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(90 * time.Second).Should(gexec.Exit(0))
 
-		// The Worker should have re-queued the in-flight messages back to
-		// Redis on shutdown instead of treating them as fatal errors.
-		count := rdb.ZCard(ctx, integrationRequestQueue).Val()
-		gomega.Expect(count).To(gomega.BeNumerically(">=", int64(len(ids))),
-			"expected all in-flight messages re-queued after shutdown")
+		// The drain timeout (5s) expired before the Envoy delay (60s) completed,
+		// so in-flight messages should have been re-enqueued to the request queue.
+		count := rdb.ZCard(ctx, shortDrainRequestQueue).Val()
+		gomega.Expect(count).To(gomega.Equal(int64(len(ids))),
+			"expected all in-flight messages re-enqueued after drain timeout")
 	})
 
 	ginkgo.It("does not lose messages on pod termination", func() {

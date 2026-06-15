@@ -7,6 +7,7 @@ import (
 
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 )
 
 func NewRandomRobinPolicy() pipeline.RequestMergePolicy {
@@ -89,6 +90,7 @@ func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChan
 						RequestURL:      requestURL,
 						WorkerPoolID:    workerPoolID,
 					}
+					metrics.IncQueueDepth(ir.QueueID, ir.RequestQueueName, workerPoolID)
 					mergedChannel <- erm
 				}
 			}
