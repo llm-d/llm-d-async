@@ -517,6 +517,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		resultChannels.Store(msg.ID, resultsChannel)
 		defer resultChannels.Delete(msg.ID)
 
+		// Stamp ingestion time as the message enters the in-process buffer so the
+		// worker can record queue residence time when it pulls the message.
+		ir.IngestionTime = time.Now()
+
 		ch <- ir
 
 		result := <-resultsChannel

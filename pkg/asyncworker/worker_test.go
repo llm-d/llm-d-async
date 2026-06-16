@@ -1013,7 +1013,7 @@ func TestMetrics_SuccessfulRequest(t *testing.T) {
 
 	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout)
 
-	requestChannel <- newEmbR(asyncapi.InternalRouting{
+	emb := newEmbR(asyncapi.InternalRouting{
 		QueueID:          queueID,
 		RequestQueueName: queueName,
 	}, asyncapi.RequestMessage{
@@ -1022,6 +1022,10 @@ func TestMetrics_SuccessfulRequest(t *testing.T) {
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
 	}, "http://localhost:30800/v1/completions", nil)
+	// Stamp ingestion time so the worker records queue residence time, mirroring
+	// what the broker producers do when a message enters the in-process buffer.
+	emb.IngestionTime = time.Now()
+	requestChannel <- emb
 
 	select {
 	case <-resultChannel:
@@ -1037,6 +1041,9 @@ func TestMetrics_SuccessfulRequest(t *testing.T) {
 	}
 	if got := histogramSampleCount(metrics.InferenceLatencyTime, queueID, queueName); got < 1 {
 		t.Errorf("InferenceLatencyTime(%s,%s) sample count = %d, want >= 1", queueID, queueName, got)
+	}
+	if got := histogramSampleCount(metrics.QueueResidenceTime, queueID, queueName); got < 1 {
+		t.Errorf("QueueResidenceTime(%s,%s) sample count = %d, want >= 1", queueID, queueName, got)
 	}
 	if got := counterValue(metrics.FailedReqs, queueID, queueName); got != 0 {
 		t.Errorf("FailedReqs(%s,%s) = %f, want 0", queueID, queueName, got)

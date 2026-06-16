@@ -477,6 +477,10 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			r.activeReleases.Store(rview.ReqID(), release)
 		}
 
+		// Stamp ingestion time as the message enters the in-process buffer so the
+		// worker can record queue residence time when it pulls the message.
+		ir.IngestionTime = time.Now()
+
 		select {
 		case msgChannel <- ir:
 		case <-ctx.Done():

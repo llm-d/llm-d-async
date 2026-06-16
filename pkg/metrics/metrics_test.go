@@ -46,6 +46,17 @@ func TestGetAsyncProcessorCollectors_includesInferenceLatency(t *testing.T) {
 	}
 }
 
+func TestGetAsyncProcessorCollectors_includesQueueResidence(t *testing.T) {
+	// Queue residence time is measured in-process and is not gated on broker
+	// support for publish timestamps, so it is always registered.
+	for _, withLatency := range []bool{false, true} {
+		collectors := GetAsyncProcessorCollectors(withLatency)
+		if !containsCollector(collectors, QueueResidenceTime) {
+			t.Errorf("expected QueueResidenceTime to be present (supportsMessageLatency=%v)", withLatency)
+		}
+	}
+}
+
 func containsCollector(collectors []prometheus.Collector, target prometheus.Collector) bool {
 	for _, c := range collectors {
 		if c == target {

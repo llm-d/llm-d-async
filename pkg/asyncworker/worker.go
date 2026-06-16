@@ -69,6 +69,9 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 			queueID := msg.QueueID
 			queueName := msg.RequestQueueName
 			metrics.DecQueueDepth(queueID, queueName, msg.WorkerPoolID)
+			if !msg.IngestionTime.IsZero() {
+				metrics.RecordQueueResidenceTime(float64(time.Since(msg.IngestionTime).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
+			}
 
 			processMessage := func() {
 				metrics.IncInflight(queueID, queueName, msg.WorkerPoolID)

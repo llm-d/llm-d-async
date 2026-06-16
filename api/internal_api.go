@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type QuotaClassification string
@@ -34,6 +35,11 @@ type InternalRouting struct {
 type InternalRequest struct {
 	InternalRouting `json:"-"`
 	PublicRequest   Request
+	// IngestionTime records when the message was pulled from the broker into
+	// the in-process pipeline. It is in-process only: the custom JSON
+	// (un)marshaling does not persist it, so a re-enqueued (retried) message is
+	// re-stamped on its next delivery. Zero when not set (e.g. drained messages).
+	IngestionTime time.Time `json:"-"`
 }
 
 // NewInternalRequest returns an InternalRequest with a non-nil PublicRequest.
