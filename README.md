@@ -433,6 +433,7 @@ The processor exports the following Prometheus metrics on the metrics port (defa
 | `llm_d_async_async_exceeded_deadline_requests_total` | Counter | Requests that exceeded their deadline |
 | `llm_d_async_async_shedded_requests_total` | Counter | Rate-limited/shed requests (429) |
 | `llm_d_async_async_message_latency_time_millis` | Histogram | Message latency (Pub/Sub only) |
+| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time spent calling the inference gateway (IGW), isolating model time from queue time |
 
 **Labels:**
 
@@ -467,6 +468,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `llm_d_async_async_exceeded_deadline_requests_total` | Counter | Requests that exceeded their deadline before completion |
 | `llm_d_async_async_request_retries_total` | Counter | Retry attempts |
 | `llm_d_async_async_message_latency_time_millis` | Histogram | End-to-end message latency in milliseconds (publish to successful processing). Only registered when the transport supports message latency (e.g., GCP Pub/Sub). |
+| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time in milliseconds spent calling the inference gateway (IGW), measured around each request attempt. Isolates "model time" from "queue time" and is always registered. |
 
 **Labels:**
 
@@ -486,6 +488,9 @@ rate(llm_d_async_async_shedded_requests_total[5m])
 
 # Retry ratio by queue
 rate(llm_d_async_async_request_retries_total[5m]) / rate(llm_d_async_async_request_total[5m])
+
+# p95 inference gateway latency by queue (model time, excluding queue time)
+histogram_quantile(0.95, sum by (queue_name, le) (rate(llm_d_async_async_inference_latency_time_millis_bucket[5m])))
 ```
 
 ## Implementations

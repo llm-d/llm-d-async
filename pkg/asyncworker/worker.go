@@ -136,7 +136,9 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 					}
 
 					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
+					inferenceStart := time.Now()
 					responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, sendHeaders, sendPayload)
+					metrics.RecordInferenceLatency(float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
 
 					if err == nil {
 						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)

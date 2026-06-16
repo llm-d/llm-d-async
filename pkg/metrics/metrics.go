@@ -49,6 +49,11 @@ var (
 		Help:    "Time from message publish to message being successfully processed.",
 		Buckets: []float64{100, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000},
 	}, queueLabels)
+	InferenceLatencyTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_inference_latency_time_millis",
+		Help:    "Time spent calling the inference gateway (IGW), separating model time from queue time.",
+		Buckets: []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000},
+	}, queueLabels)
 	QueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_queue_depth",
 		Help: "Number of requests received from the broker and buffered in-process awaiting an available worker.",
@@ -91,6 +96,11 @@ func RecordMessageLatency(millis float64, queueID, queueName, poolName string) {
 	MessageLatencyTime.WithLabelValues(queueID, queueName, poolName).Observe(millis)
 }
 
+// RecordInferenceLatency observes the time spent calling the inference gateway.
+func RecordInferenceLatency(millis float64, queueID, queueName, poolName string) {
+	InferenceLatencyTime.WithLabelValues(queueID, queueName, poolName).Observe(millis)
+}
+
 // IncQueueDepth increments the count of in-process buffered requests.
 func IncQueueDepth(queueID, queueName, poolName string) {
 	QueueDepth.WithLabelValues(queueID, queueName, poolName).Inc()
@@ -120,7 +130,7 @@ func SetBrokerBacklog(queueID, queueName, poolName string, n float64) {
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
 		Retries, AsyncReqs, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests,
-		QueueDepth, InflightRequests, BrokerBacklog,
+		QueueDepth, InflightRequests, BrokerBacklog, InferenceLatencyTime,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

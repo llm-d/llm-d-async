@@ -18,6 +18,7 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -817,6 +818,18 @@ func counterValue(cv *prometheus.CounterVec, queueID, queueName string) float64 
 	return testutil.ToFloat64(c)
 }
 
+func histogramSampleCount(hv *prometheus.HistogramVec, queueID, queueName string) uint64 {
+	obs, err := hv.GetMetricWithLabelValues(queueID, queueName, "test-pool")
+	if err != nil {
+		return 0
+	}
+	m := &dto.Metric{}
+	if err := obs.(prometheus.Metric).Write(m); err != nil {
+		return 0
+	}
+	return m.GetHistogram().GetSampleCount()
+}
+
 func gaugeValue(gv *prometheus.GaugeVec, queueID, queueName string) float64 {
 	g, err := gv.GetMetricWithLabelValues(queueID, queueName, "test-pool")
 	if err != nil {
@@ -1021,6 +1034,9 @@ func TestMetrics_SuccessfulRequest(t *testing.T) {
 	}
 	if got := counterValue(metrics.SuccessfulReqs, queueID, queueName); got < 1 {
 		t.Errorf("SuccessfulReqs(%s,%s) = %f, want >= 1", queueID, queueName, got)
+	}
+	if got := histogramSampleCount(metrics.InferenceLatencyTime, queueID, queueName); got < 1 {
+		t.Errorf("InferenceLatencyTime(%s,%s) sample count = %d, want >= 1", queueID, queueName, got)
 	}
 	if got := counterValue(metrics.FailedReqs, queueID, queueName); got != 0 {
 		t.Errorf("FailedReqs(%s,%s) = %f, want 0", queueID, queueName, got)
