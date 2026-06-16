@@ -191,11 +191,6 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 			workerPoolID = "default"
 		}
 
-		// If pool config was not specified, fallback to the single default pool.
-		if len(r.workerPools) == 1 && r.workerPools[0].ID == "default" {
-			workerPoolID = "default"
-		}
-
 		found := false
 		for _, pool := range r.workerPools {
 			if pool.ID == workerPoolID {

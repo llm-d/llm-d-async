@@ -1306,8 +1306,8 @@ func TestNewRedisSortedSetFlow_PoolRequiredAndValidation(t *testing.T) {
 	// Case 6: worker_pool_id is specified as custom, but only a single 'default' pool is specified
 	*ssQueuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"custom-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
 	_, err = NewRedisSortedSetFlow(WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
-	if err != nil {
-		t.Errorf("Unexpected error when worker_pool_id is custom but default pool exists: %v", err)
+	if err == nil {
+		t.Error("Expected error when worker_pool_id is custom but only default pool exists, got nil")
 	}
 
 	// Case 2: worker_pool_id is specified but pool does not exist

@@ -148,11 +148,6 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 			workerPoolID = "default"
 		}
 
-		// If pool config was not specified, fallback to the single default pool.
-		if len(p.workerPools) == 1 && p.workerPools[0].ID == "default" {
-			workerPoolID = "default"
-		}
-
 		found := false
 		for _, pool := range p.workerPools {
 			if pool.ID == workerPoolID {

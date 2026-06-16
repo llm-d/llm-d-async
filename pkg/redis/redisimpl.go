@@ -228,11 +228,6 @@ func NewRedisMQFlow(opts ...RedisOption) (*RedisMQFlow, error) {
 			workerPoolID = "default"
 		}
 
-		// If pool config was not specified, fallback to the single default pool.
-		if len(flow.workerPools) == 1 && flow.workerPools[0].ID == "default" {
-			workerPoolID = "default"
-		}
-
 		found := false
 		for _, pool := range flow.workerPools {
 			if pool.ID == workerPoolID {

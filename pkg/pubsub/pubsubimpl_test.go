@@ -194,8 +194,8 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 
 	func() {
 		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("Unexpected panic when worker_pool_id is custom but default pool exists: %v", r)
+			if r := recover(); r == nil {
+				t.Error("Expected panic when worker_pool_id is custom but only default pool exists, got nil")
 			}
 		}()
 		NewGCPPubSubMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
