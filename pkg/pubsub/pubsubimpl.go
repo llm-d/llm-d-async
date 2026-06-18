@@ -13,10 +13,13 @@ import (
 	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -56,7 +59,26 @@ type PubSubMQFlow struct {
 	drainWg         sync.WaitGroup
 	metricClient    *monitoring.MetricClient
 	projectID       string
+	client          *pubsub.Client
+	// consumeHealth caches per-subscription connectivity observed by the
+	// consume loop (requestWorker), keyed by subscriber ID. It is populated once
+	// at construction; the map itself is never mutated afterwards, so concurrent
+	// reads in HealthCheck race-free against per-entry updates guarded by
+	// subHealth's own mutex.
+	consumeHealth map[string]*subHealth
 }
+
+// subHealth records the most recent broker interaction observed by the consume
+// loop for a single subscription. A successful Receive callback is authoritative
+// proof of connectivity; a Receive error (broker unreachable, subscription gone)
+// marks the subscription unhealthy until the next success.
+type subHealth struct {
+	mu        sync.Mutex
+	lastOK    time.Time
+	lastErr   error
+	lastErrAt time.Time
+}
+
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
 	subscriberID   string
@@ -116,6 +138,8 @@ func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) (*PubSubMQFlow,
 		resultChannel:   make(chan api.ResultMessage),
 		batchSize:       pubsubOpts.BatchSize,
 		projectID:       pubsubOpts.ProjectID,
+		client:          pubSubClient,
+		consumeHealth:   make(map[string]*subHealth, len(configs)),
 	}
 
 	if metricClient, mErr := monitoring.NewMetricClient(ctx); mErr != nil {
@@ -185,6 +209,7 @@ func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) (*PubSubMQFlow,
 			gate:         gate,
 			labels:       cfg.Labels,
 		})
+		p.consumeHealth[cfg.SubscriberID] = &subHealth{}
 	}
 
 	// Set default gate if not already set
@@ -207,6 +232,84 @@ func (r *PubSubMQFlow) Characteristics() pipeline.Characteristics {
 	return pipeline.Characteristics{
 		HasExternalBackoff:     true,
 		SupportsMessageLatency: true,
+	}
+}
+
+var _ pipeline.HealthChecker = (*PubSubMQFlow)(nil)
+
+// consumeHealthTTL bounds how long a successful Receive is trusted as proof of
+// connectivity before HealthCheck falls back to an active subscription probe.
+const consumeHealthTTL = 30 * time.Second
+
+// HealthCheck backs the /readyz probe by confirming each configured request
+// subscription is reachable. It prefers the passive signal from the consume loop
+// (requestWorker): a recent successful Receive proves the broker round-tripped
+// without any extra API call or IAM permission, and a recent Receive error marks
+// the pod not-ready. When the consume loop has no fresh signal (a quiet queue, or
+// before Start), it falls back to an active GetSubscription probe. An unreachable
+// Pub/Sub backend surfaces as a gRPC Unavailable error and marks the pod
+// not-ready, fixing the original bug where such pods reported ready.
+func (r *PubSubMQFlow) HealthCheck(ctx context.Context) error {
+	for _, cd := range r.requestChannels {
+		if h := r.consumeHealth[cd.subscriberID]; h != nil {
+			h.mu.Lock()
+			lastOK, lastErr, lastErrAt := h.lastOK, h.lastErr, h.lastErrAt
+			h.mu.Unlock()
+
+			// A consume error more recent than the last success is authoritative.
+			if lastErr != nil && lastErrAt.After(lastOK) {
+				return fmt.Errorf("pubsub subscription %q consume loop unhealthy: %w", cd.subscriberID, lastErr)
+			}
+			// A recent success proves connectivity; skip the admin call.
+			if !lastOK.IsZero() && time.Since(lastOK) < consumeHealthTTL {
+				continue
+			}
+		}
+		// No fresh consume signal: actively probe the subscription.
+		if err := r.probeSubscription(ctx, cd.subscriberID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// probeSubscription actively confirms a subscription is reachable via the admin
+// API. A PermissionDenied response still proves the broker is reachable: the
+// consume-only role (roles/pubsub.subscriber) lacks pubsub.subscriptions.get, so
+// we can confirm connectivity but not introspect the subscription. Treat it as
+// healthy rather than failing readiness for a correctly-configured consumer.
+func (r *PubSubMQFlow) probeSubscription(ctx context.Context, subscriberID string) error {
+	// Subscriber() normalizes both short IDs and full resource paths; reuse its
+	// result as the fully-qualified name for the admin lookup.
+	name := r.client.Subscriber(subscriberID).String()
+	_, err := r.client.SubscriptionAdminClient.GetSubscription(ctx,
+		&pubsubpb.GetSubscriptionRequest{Subscription: name})
+	if err == nil || status.Code(err) == codes.PermissionDenied {
+		return nil
+	}
+	return fmt.Errorf("pubsub subscription %q health check failed: %w", subscriberID, err)
+}
+
+// recordConsumeOK marks a subscription healthy after a successful broker
+// round-trip observed by the consume loop.
+func (r *PubSubMQFlow) recordConsumeOK(subscriberID string) {
+	if h := r.consumeHealth[subscriberID]; h != nil {
+		h.mu.Lock()
+		h.lastOK = time.Now()
+		h.lastErr = nil
+		h.mu.Unlock()
+	}
+}
+
+// recordConsumeErr records a consume-loop Receive failure so HealthCheck can
+// surface it. Intentional shutdown/restart cancellations are filtered by the
+// caller and must not be passed here.
+func (r *PubSubMQFlow) recordConsumeErr(subscriberID string, err error) {
+	if h := r.consumeHealth[subscriberID]; h != nil {
+		h.mu.Lock()
+		h.lastErr = err
+		h.lastErrAt = time.Now()
+		h.mu.Unlock()
 	}
 }
 
@@ -445,6 +548,12 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 		// TODO
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Fail to receive messages from request subscription")
+			// Record only genuine receive failures for readiness. A restart
+			// triggered by a budget change or shutdown cancels receiveCtx and
+			// surfaces as context.Canceled, which is not a connectivity problem.
+			if ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+				r.recordConsumeErr(subscriberID, err)
+			}
 		}
 	}
 
@@ -455,6 +564,9 @@ type receiveFunc func(context.Context, func(context.Context, *pubsub.Message)) e
 func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, subscriberID string, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate, labels map[string]string) error {
 	logger := log.FromContext(ctx)
 	return receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		// A delivered message is authoritative proof the broker round-tripped;
+		// refresh the passive health signal read by HealthCheck.
+		r.recordConsumeOK(subscriberID)
 
 		var body api.RequestMessage
 		err := json.Unmarshal(msg.Data, &body)
