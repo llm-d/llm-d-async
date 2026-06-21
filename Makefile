@@ -9,7 +9,7 @@ export
 # Image URL to use all building/pushing image targets
 IMAGE_TAG_BASE ?= ghcr.io/llm-d-incubation
 IMG_TAG ?= latest
-IMG ?= $(IMAGE_TAG_BASE)/async-processor:$(IMG_TAG)
+IMG ?= $(IMAGE_TAG_BASE)/llm-d-async:$(IMG_TAG)
 
 # Versioning information
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")

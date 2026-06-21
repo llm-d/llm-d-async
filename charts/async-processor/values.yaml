@@ -15,7 +15,7 @@ ap:
       cpu: 500m
       memory: 512Mi
   image:
-    repository: ghcr.io/llm-d-incubation/async-processor
+    repository: ghcr.io/llm-d-incubation/llm-d-async
     tag: 0.6.0
   imagePullPolicy: Always
   concurrency: 8
