@@ -308,3 +308,28 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --message-queue-impl=gcp-pubsub-gated
+
+  - it: should pass transform-config-file and mount the config when transformConfig is set
+    set:
+      ap.transformConfig:
+        requestTransforms:
+          - name: "gcs-whisper"
+            type: "gcs_uri_multipart"
+            parameters:
+              providers: ["whisper"]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transform-config-file=/etc/async-processor/config/transform-config.json
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ap-config
+            mountPath: /etc/async-processor/config
+            readOnly: true
+
+  - it: should not pass transform-config-file when transformConfig is empty
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --transform-config-file=/etc/async-processor/config/transform-config.json

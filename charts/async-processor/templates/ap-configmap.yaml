@@ -1,4 +1,4 @@
-{{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig }}
+{{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,5 +12,8 @@ data:
   {{- end }}
   {{- if .Values.ap.gcpPubSub.topicsConfig }}
   pubsub-topics.json: {{ .Values.ap.gcpPubSub.topicsConfig | toJson | quote }}
+  {{- end }}
+  {{- if .Values.ap.transformConfig }}
+  transform-config.json: {{ .Values.ap.transformConfig | toJson | quote }}
   {{- end }}
 {{- end }}
