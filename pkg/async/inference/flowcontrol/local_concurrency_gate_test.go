@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
@@ -129,5 +130,94 @@ func TestLocalConcurrencyGate_Concurrency(t *testing.T) {
 	wg.Wait()
 
 	// Budget should be fully recovered to 1.0
+	assert.Equal(t, 1.0, gate.Budget(ctx))
+}
+
+func TestLocalConcurrencyGate_BlockingMode(t *testing.T) {
+	gate := NewLocalConcurrencyGate(2).WithGatingMode(GatingModeBlocking)
+	ctx := context.Background()
+
+	// 1. Initial Budget is 1.0
+	assert.Equal(t, 1.0, gate.Budget(ctx))
+
+	// 2. Admit 2 requests
+	r1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
+	v1, err := gate.Apply(ctx, r1)
+	require.NoError(t, err)
+	assert.Equal(t, pipeline.ActionContinue, v1.Action)
+
+	r2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
+	v2, err := gate.Apply(ctx, r2)
+	require.NoError(t, err)
+	assert.Equal(t, pipeline.ActionContinue, v2.Action)
+
+	// Budget should now be 0.0
+	assert.Equal(t, 0.0, gate.Budget(ctx))
+
+	// 3. Attempt to admit 3rd request in a separate goroutine (should block)
+	r3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
+	blockedCh := make(chan struct{})
+	resultCh := make(chan pipeline.Verdict, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		close(blockedCh)
+		v, e := gate.Apply(ctx, r3)
+		resultCh <- v
+		errCh <- e
+	}()
+
+	<-blockedCh
+	// Sleep briefly to ensure the goroutine is indeed parked waiting on semaphore
+	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-resultCh:
+		t.Fatal("Apply should have blocked, but returned result immediately")
+	default:
+		// Passed: goroutine is blocked
+	}
+
+	// 4. Release request 1
+	r1.Release()
+
+	// 5. Goroutine should unblock and the request should be admitted
+	select {
+	case verdict := <-resultCh:
+		require.NoError(t, <-errCh)
+		assert.Equal(t, pipeline.ActionContinue, verdict.Action)
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for 3rd request to unblock")
+	}
+
+	// Budget should be back to 0.0
+	assert.Equal(t, 0.0, gate.Budget(ctx))
+
+	// Clean up
+	r2.Release()
+	r3.Release()
+	assert.Equal(t, 1.0, gate.Budget(ctx))
+}
+
+func TestLocalConcurrencyGate_BlockingModeCancel(t *testing.T) {
+	gate := NewLocalConcurrencyGate(1).WithGatingMode(GatingModeBlocking)
+	ctx := context.Background()
+
+	// Admit 1 request to exhaust capacity
+	r1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
+	v1, err := gate.Apply(ctx, r1)
+	require.NoError(t, err)
+	assert.Equal(t, pipeline.ActionContinue, v1.Action)
+
+	// Try to admit 2nd request with a cancelled context
+	r2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel() // cancel immediately
+
+	_, err = gate.Apply(cancelCtx, r2)
+	assert.ErrorIs(t, err, context.Canceled)
+
+	// Clean up
+	r1.Release()
 	assert.Equal(t, 1.0, gate.Budget(ctx))
 }

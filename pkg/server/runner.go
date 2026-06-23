@@ -220,6 +220,19 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	dispatch := policy.MergeRequestChannels(impl.RequestChannels(), poolsMap)
 
+	poolGates := make(map[string]pipeline.Gate)
+	for poolID, pool := range poolsMap {
+		if pool.GateType != "" {
+			gate, err := gateFactory.CreateGate(pool.GateType, pool.GateParams)
+			if err != nil {
+				setupLog.Error(err, "Failed to create pool gate", "poolID", poolID, "gateType", pool.GateType)
+				os.Exit(1)
+			}
+			poolGates[poolID] = gate
+			setupLog.Info("Created pool gate", "poolID", poolID, "gateType", pool.GateType, "gateParams", pool.GateParams)
+		}
+	}
+
 	var wg sync.WaitGroup
 	for poolID, mergedChan := range dispatch.Channels {
 		pool, ok := poolsMap[poolID]
@@ -227,14 +240,15 @@ func (r *Runner) Run(ctx context.Context) error {
 			return fmt.Errorf("pool %s not found", poolID)
 		}
 		workersCount := pool.Workers
+		poolGate := poolGates[poolID]
 
-		setupLog.Info("Spawning workers for pool", "poolID", poolID, "workers", workersCount)
+		setupLog.Info("Spawning workers for pool", "poolID", poolID, "workers", workersCount, "hasGate", poolGate != nil)
 		for w := 1; w <= workersCount; w++ {
 			wg.Add(1)
-			go func(mergedChan chan pipeline.EmbelishedRequestMessage) {
+			go func(mergedChan chan pipeline.EmbelishedRequestMessage, poolGate pipeline.Gate) {
 				defer wg.Done()
-				asyncworker.Worker(signalCtx, drainCtx, impl.Characteristics(), inferenceClient, mergedChan, impl.RetryChannel(), impl.ResultChannel(), opts.Worker.RequestTimeout, transforms)
-			}(mergedChan)
+				asyncworker.WorkerWithGate(signalCtx, drainCtx, impl.Characteristics(), inferenceClient, mergedChan, impl.RetryChannel(), impl.ResultChannel(), opts.Worker.RequestTimeout, transforms, poolGate)
+			}(mergedChan, poolGate)
 		}
 	}
 

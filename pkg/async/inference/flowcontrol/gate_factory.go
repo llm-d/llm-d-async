@@ -346,7 +346,15 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 		if limit <= 0 {
 			return nil, fmt.Errorf("local-max-concurrency limit must be greater than 0, got %d", limit)
 		}
-		return NewLocalConcurrencyGate(limit), nil
+		gate := NewLocalConcurrencyGate(limit)
+		gatingMode := params["gating_mode"]
+		if gatingMode != "" {
+			if gatingMode != string(GatingModeBlocking) && gatingMode != string(GatingModeClassifying) {
+				return nil, fmt.Errorf("local-max-concurrency gating_mode must be either 'blocking' or 'classifying', got %q", gatingMode)
+			}
+			gate.WithGatingMode(GatingMode(gatingMode))
+		}
+		return gate, nil
 
 	default:
 		// Unknown gate types default to open gate

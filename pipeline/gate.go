@@ -16,6 +16,8 @@ const (
 	ActionDrop
 	// ActionRefuse temporarily rejects the request and requests redelivery/re-enqueue.
 	ActionRefuse
+	// ActionWait temporarily parks the worker goroutine until capacity opens.
+	ActionWait
 )
 
 // Verdict carries the outcome of a gating decision.
@@ -37,6 +39,11 @@ func Drop(result *api.ResultMessage) Verdict {
 // Refuse returns a verdict to temporarily reject and redeliver/re-enqueue the request.
 func Refuse() Verdict {
 	return Verdict{Action: ActionRefuse}
+}
+
+// Wait returns a verdict to temporarily park the worker.
+func Wait() Verdict {
+	return Verdict{Action: ActionWait}
 }
 
 // Gate defines a unified interface for system capacity and request admission control.

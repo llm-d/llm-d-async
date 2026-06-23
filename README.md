@@ -98,14 +98,18 @@ make deploy-ap-on-k8s
 
 ## Worker Pools Configuration
 
-When using multiple queues or topics, the worker capacities for named pools can be configured via a dedicated worker pools file.
+When using multiple queues or topics, the worker capacities and pool-level gates for named pools can be configured via a dedicated worker pools file.
 
 **JSON Schema:**
 ```json
 [
   {
     "id": "qwen-pool",
-    "workers": 4
+    "workers": 4,
+    "gate_type": "local-max-concurrency",
+    "gate_params": {
+      "limit": "2"
+    }
   }
 ]
 ```
@@ -113,10 +117,19 @@ When using multiple queues or topics, the worker capacities for named pools can 
 **Fields:**
 - `id` (required): Unique pool identifier referenced by queue/topic configurations.
 - `workers` (required): Number of concurrent workers dedicated to this pool. Must be positive.
+- `gate_type` (optional): The type of dispatch gate to apply to the pool (e.g. `local-max-concurrency`, `prometheus-saturation`).
+- `gate_params` (optional): Key-value parameters configuring the gate.
 
 ## Dispatch Gates
 
-The Async Processor supports dispatch gates to control batch processing based on system capacity. Gates can be configured per-queue (via configuration files).
+The Async Processor supports dispatch gates to control batch processing based on system capacity. Gates can be configured at two levels:
+1. **Per-Queue Gates** (configured in the queue/topic config file).
+2. **Per-Pool Gates** (configured in the worker pools config file).
+
+### Difference between Queue and Pool Gates
+
+* **Queue-level gates** run at the admission phase for a specific queue. When a queue-level gate denies admission (returning `ActionRefuse`), the request is immediately returned to the broker to be retried/re-delivered, freeing the worker to process other queues.
+* **Pool-level gates** run directly inside the worker loop to regulate capacity constraints shared by all queues routing to that worker pool. When a pool-level gate returns `ActionWait`, the worker parks in-memory and polls until capacity is available, avoiding broker nack/retry overhead. If the pool-level gate returns `ActionRefuse`, the request is immediately returned to the broker.
 
 ### Per-Queue Dispatch Gates
 
