@@ -47,7 +47,7 @@ func (m *mockGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipelin
 	if m.classification != "" {
 		msg.Classification = m.classification
 	}
-	if m.verdict.Terminate || m.verdict.Redeliver {
+	if m.verdict.Action != pipeline.ActionContinue {
 		return m.verdict, nil
 	}
 	msg.AttachRelease(func() {
@@ -85,8 +85,7 @@ func TestCompositeGate_Apply(t *testing.T) {
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
 		res, err := gate.Apply(context.Background(), msg)
 		assert.NoError(t, err)
-		assert.False(t, res.Terminate)
-		assert.False(t, res.Redeliver)
+		assert.Equal(t, pipeline.ActionContinue, res.Action)
 	})
 
 	t.Run("All continue", func(t *testing.T) {
@@ -97,8 +96,7 @@ func TestCompositeGate_Apply(t *testing.T) {
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
 		res, err := gate.Apply(context.Background(), msg)
 		assert.NoError(t, err)
-		assert.False(t, res.Terminate)
-		assert.False(t, res.Redeliver)
+		assert.Equal(t, pipeline.ActionContinue, res.Action)
 
 		msg.Release()
 		assert.Equal(t, 1, gate1.releaseCounter)
@@ -114,7 +112,7 @@ func TestCompositeGate_Apply(t *testing.T) {
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
 		res, err := gate.Apply(context.Background(), msg)
 		assert.NoError(t, err)
-		assert.True(t, res.Redeliver)
+		assert.Equal(t, pipeline.ActionRefuse, res.Action)
 
 		assert.Equal(t, 1, gate1.calls)
 		assert.Equal(t, 1, gate2.calls)

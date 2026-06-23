@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,20 +22,17 @@ func TestLocalConcurrencyGate_ApplyAndRelease(t *testing.T) {
 	r1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
 	verdict, err := gate.Apply(ctx, r1)
 	require.NoError(t, err)
-	assert.False(t, verdict.Terminate)
-	assert.False(t, verdict.Redeliver)
+	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
 	r2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
 	verdict, err = gate.Apply(ctx, r2)
 	require.NoError(t, err)
-	assert.False(t, verdict.Terminate)
-	assert.False(t, verdict.Redeliver)
+	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
 	r3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
 	verdict, err = gate.Apply(ctx, r3)
 	require.NoError(t, err)
-	assert.False(t, verdict.Terminate)
-	assert.False(t, verdict.Redeliver)
+	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
 	// Budget should now be 0.0
 	assert.Equal(t, 0.0, gate.Budget(ctx))
@@ -43,7 +41,7 @@ func TestLocalConcurrencyGate_ApplyAndRelease(t *testing.T) {
 	r4 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
 	verdict, err = gate.Apply(ctx, r4)
 	require.NoError(t, err)
-	assert.True(t, verdict.Redeliver)
+	assert.Equal(t, pipeline.ActionRefuse, verdict.Action)
 
 	// 4. Release request 1
 	r1.Release()
@@ -54,8 +52,7 @@ func TestLocalConcurrencyGate_ApplyAndRelease(t *testing.T) {
 	// Now fourth request can be admitted
 	verdict, err = gate.Apply(ctx, r4)
 	require.NoError(t, err)
-	assert.False(t, verdict.Terminate)
-	assert.False(t, verdict.Redeliver)
+	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
 	// Budget is back to 0.0
 	assert.Equal(t, 0.0, gate.Budget(ctx))
@@ -78,14 +75,14 @@ func TestLocalConcurrencyGate_InvalidLimits(t *testing.T) {
 	r := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
 	verdict, err := gate0.Apply(ctx, r)
 	require.NoError(t, err)
-	assert.True(t, verdict.Redeliver)
+	assert.Equal(t, pipeline.ActionRefuse, verdict.Action)
 
 	// Negative limit
 	gateNeg := NewLocalConcurrencyGate(-5)
 	assert.Equal(t, 0.0, gateNeg.Budget(ctx))
 	verdict, err = gateNeg.Apply(ctx, r)
 	require.NoError(t, err)
-	assert.True(t, verdict.Redeliver)
+	assert.Equal(t, pipeline.ActionRefuse, verdict.Action)
 }
 
 func TestLocalConcurrencyGate_Concurrency(t *testing.T) {
@@ -103,7 +100,7 @@ func TestLocalConcurrencyGate_Concurrency(t *testing.T) {
 			defer wg.Done()
 			req := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
 			verdict, err := gate.Apply(ctx, req)
-			if err == nil && !verdict.Redeliver {
+			if err == nil && verdict.Action == pipeline.ActionContinue {
 				requests[idx] = req
 			}
 		}(i)

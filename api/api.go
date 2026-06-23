@@ -66,8 +66,3 @@ type ResultMessage struct {
 	Routing  InternalRouting   `json:"-"`
 	Metadata map[string]string `json:"-"`
 }
-
-// ResultMessageExpand is an extended ResultMessage that carries additional context.
-type ResultMessageExpand struct {
-	ResultMessage
-}

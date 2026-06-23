@@ -6,26 +6,37 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/api"
 )
 
+// VerdictAction represents the action to take after evaluating admission gates.
+type VerdictAction int
+
+const (
+	// ActionContinue allows the request to be dispatched.
+	ActionContinue VerdictAction = iota
+	// ActionDrop permanently discards the request and optionally returns a result.
+	ActionDrop
+	// ActionRefuse temporarily rejects the request and requests redelivery/re-enqueue.
+	ActionRefuse
+)
+
 // Verdict carries the outcome of a gating decision.
 type Verdict struct {
-	Terminate bool
-	Redeliver bool
-	Result    *api.ResultMessageExpand
+	Action VerdictAction
+	Result *api.ResultMessage
 }
 
 // Continue returns a verdict to proceed.
 func Continue() Verdict {
-	return Verdict{}
+	return Verdict{Action: ActionContinue}
 }
 
 // Drop returns a verdict to terminate the request permanently.
-func Drop(result *api.ResultMessageExpand) Verdict {
-	return Verdict{Terminate: true, Result: result}
+func Drop(result *api.ResultMessage) Verdict {
+	return Verdict{Action: ActionDrop, Result: result}
 }
 
 // Refuse returns a verdict to temporarily reject and redeliver/re-enqueue the request.
 func Refuse() Verdict {
-	return Verdict{Redeliver: true}
+	return Verdict{Action: ActionRefuse}
 }
 
 // Gate defines a unified interface for system capacity and request admission control.
@@ -46,7 +57,7 @@ func ApplyChain(ctx context.Context, msg *api.InternalRequest, gates []Gate) (Ve
 	snapshot := len(msg.Releases())
 	for _, gate := range gates {
 		verdict, err := gate.Apply(ctx, msg)
-		if err != nil || verdict.Terminate || verdict.Redeliver {
+		if err != nil || verdict.Action != ActionContinue {
 			msg.RollbackReleases(snapshot)
 			return verdict, err
 		}

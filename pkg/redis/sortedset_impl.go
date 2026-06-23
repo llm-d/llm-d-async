@@ -460,16 +460,16 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			continue
 		}
 
-		if verdict.Redeliver {
+		if verdict.Action == pipeline.ActionRefuse {
 			// Re-enqueue the message (wait for capacity or quota)
 			member, _ := json.Marshal(ir)
 			r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
 			continue
 		}
 
-		if verdict.Terminate {
+		if verdict.Action == pipeline.ActionDrop {
 			if verdict.Result != nil {
-				r.resultChannel <- verdict.Result.ResultMessage
+				r.resultChannel <- *verdict.Result
 			} else {
 				r.resultChannel <- api.ResultMessage{
 					ID:      rview.ReqID(),

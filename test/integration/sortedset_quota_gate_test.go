@@ -10,6 +10,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	redisgate "github.com/llm-d-incubation/llm-d-async/pkg/redis"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -60,7 +61,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 
 	verdict1, err := gate.Apply(ctx, &ir1)
 	require.NoError(t, err)
-	assert.False(t, verdict1.Redeliver, "First request should be allowed")
+	assert.Equal(t, pipeline.ActionContinue, verdict1.Action, "First request should be allowed")
 	assert.NotEmpty(t, ir1.Releases())
 
 	// Pop second message — Apply should be denied (concurrency limit reached).
@@ -73,7 +74,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 
 	verdict2, err := gate.Apply(ctx, &ir2)
 	require.NoError(t, err)
-	assert.True(t, verdict2.Redeliver, "Second request should be denied while first is in-flight")
+	assert.Equal(t, pipeline.ActionRefuse, verdict2.Action, "Second request should be denied while first is in-flight")
 
 	// Re-enqueue denied message (as sortedset_impl does).
 	err = rdb.ZAdd(ctx, queueName, goredis.Z{
@@ -95,7 +96,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 
 	verdict3, err := gate.Apply(ctx, &ir3)
 	require.NoError(t, err)
-	assert.False(t, verdict3.Redeliver, "Second request should be allowed after first was released")
+	assert.Equal(t, pipeline.ActionContinue, verdict3.Action, "Second request should be allowed after first was released")
 	ir3.Release()
 }
 
@@ -125,7 +126,7 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 	// First Apply — allowed.
 	verdict1, err := gate.Apply(ctx, ir)
 	require.NoError(t, err)
-	assert.False(t, verdict1.Redeliver)
+	assert.Equal(t, pipeline.ActionContinue, verdict1.Action)
 
 	// Second Apply — denied (rate limit hit).
 	ir2 := api.NewInternalRequest(
@@ -139,7 +140,7 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 	)
 	verdict2, err := gate.Apply(ctx, ir2)
 	require.NoError(t, err)
-	assert.True(t, verdict2.Redeliver, "Should be rate limited")
+	assert.Equal(t, pipeline.ActionRefuse, verdict2.Action, "Should be rate limited")
 
 	// Wait for window to reset.
 	time.Sleep(2100 * time.Millisecond)
@@ -147,5 +148,5 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 	// Third Apply — allowed again.
 	verdict3, err := gate.Apply(ctx, ir2)
 	require.NoError(t, err)
-	assert.False(t, verdict3.Redeliver, "Should be allowed after rate limit window resets")
+	assert.Equal(t, pipeline.ActionContinue, verdict3.Action, "Should be allowed after rate limit window resets")
 }

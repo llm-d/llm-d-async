@@ -505,7 +505,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			return
 		}
 
-		if verdict.Redeliver {
+		if verdict.Action == pipeline.ActionRefuse {
 			logger.V(logutil.DEBUG).Info("Quota exceeded or capacity full, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)
 			go func() {
 				select {
@@ -518,10 +518,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			return
 		}
 
-		if verdict.Terminate {
+		if verdict.Action == pipeline.ActionDrop {
 			var resultMsg api.ResultMessage
 			if verdict.Result != nil {
-				resultMsg = verdict.Result.ResultMessage
+				resultMsg = *verdict.Result
 			} else {
 				resultMsg = api.ResultMessage{
 					ID:      body.ID,
