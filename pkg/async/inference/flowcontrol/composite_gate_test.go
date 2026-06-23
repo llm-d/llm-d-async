@@ -26,40 +26,34 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type mockDispatchGate struct {
-	budget float64
+type mockGate struct {
+	budget         float64
+	verdict        pipeline.Verdict
+	err            error
+	calls          int
+	releaseCounter int
+	classification api.QuotaClassification
 }
 
-func (m *mockDispatchGate) Budget(ctx context.Context) float64 {
+func (m *mockGate) Budget(ctx context.Context) float64 {
 	return m.budget
 }
 
-type mockAttributeGate struct {
-	mockDispatchGate
-	allowed        bool
-	classification api.QuotaClassification
-	err            error
-	calls          int
-	release        bool
-}
-
-func (m *mockAttributeGate) Acquire(ctx context.Context, attributes map[string]string) (pipeline.AcquireResult, error) {
+func (m *mockGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
 	m.calls++
 	if m.err != nil {
-		return pipeline.AcquireResult{}, m.err
+		return pipeline.Verdict{}, m.err
 	}
-	if !m.allowed {
-		return pipeline.AcquireResult{Allowed: false, Classification: api.ClassificationOverflow}, nil
+	if m.classification != "" {
+		msg.Classification = m.classification
 	}
-	class := m.classification
-	if class == "" {
-		class = api.ClassificationReserved
+	if m.verdict.Terminate || m.verdict.Redeliver {
+		return m.verdict, nil
 	}
-	return pipeline.AcquireResult{
-		Allowed:        true,
-		Classification: class,
-		Release:        func() { m.release = true },
-	}, nil
+	msg.AttachRelease(func() {
+		m.releaseCounter++
+	})
+	return m.verdict, nil
 }
 
 func TestCompositeGate_Budget(t *testing.T) {
@@ -70,99 +64,75 @@ func TestCompositeGate_Budget(t *testing.T) {
 
 	t.Run("Minimum budget", func(t *testing.T) {
 		gate := NewCompositeGate(
-			&mockDispatchGate{budget: 0.8},
-			&mockDispatchGate{budget: 0.3},
-			&mockDispatchGate{budget: 0.9},
+			&mockGate{budget: 0.8},
+			&mockGate{budget: 0.3},
+			&mockGate{budget: 0.9},
 		)
 		assert.Equal(t, 0.3, gate.Budget(context.Background()))
 	})
 
 	t.Run("Single gate", func(t *testing.T) {
 		gate := NewCompositeGate(
-			&mockDispatchGate{budget: 0.5},
+			&mockGate{budget: 0.5},
 		)
 		assert.Equal(t, 0.5, gate.Budget(context.Background()))
 	})
 }
 
-func TestCompositeGate_Acquire(t *testing.T) {
-	t.Run("No attribute gates", func(t *testing.T) {
-		gate := NewCompositeGate(
-			&mockDispatchGate{budget: 0.5},
-		)
-		res, err := gate.Acquire(context.Background(), nil)
-		assert.True(t, res.Allowed)
+func TestCompositeGate_Apply(t *testing.T) {
+	t.Run("No inner gates", func(t *testing.T) {
+		gate := NewCompositeGate()
+		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
+		res, err := gate.Apply(context.Background(), msg)
 		assert.NoError(t, err)
-		assert.NotNil(t, res.Release)
-		res.Release()
+		assert.False(t, res.Terminate)
+		assert.False(t, res.Redeliver)
 	})
 
-	t.Run("All allowed", func(t *testing.T) {
-		gate1 := &mockAttributeGate{allowed: true}
-		gate2 := &mockAttributeGate{allowed: true}
+	t.Run("All continue", func(t *testing.T) {
+		gate1 := &mockGate{verdict: pipeline.Continue()}
+		gate2 := &mockGate{verdict: pipeline.Continue()}
 		gate := NewCompositeGate(gate1, gate2)
 
-		res, err := gate.Acquire(context.Background(), nil)
-		assert.True(t, res.Allowed)
+		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
+		res, err := gate.Apply(context.Background(), msg)
 		assert.NoError(t, err)
-		assert.NotNil(t, res.Release)
+		assert.False(t, res.Terminate)
+		assert.False(t, res.Redeliver)
 
-		res.Release()
-		assert.True(t, gate1.release)
-		assert.True(t, gate2.release)
+		msg.Release()
+		assert.Equal(t, 1, gate1.releaseCounter)
+		assert.Equal(t, 1, gate2.releaseCounter)
 	})
 
-	t.Run("One denied", func(t *testing.T) {
-		gate1 := &mockAttributeGate{allowed: true}
-		gate2 := &mockAttributeGate{allowed: false}
-		gate3 := &mockAttributeGate{allowed: true}
+	t.Run("One redeliver", func(t *testing.T) {
+		gate1 := &mockGate{verdict: pipeline.Continue()}
+		gate2 := &mockGate{verdict: pipeline.Refuse()}
+		gate3 := &mockGate{verdict: pipeline.Continue()}
 		gate := NewCompositeGate(gate1, gate2, gate3)
 
-		res, err := gate.Acquire(context.Background(), nil)
-		assert.False(t, res.Allowed)
+		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
+		res, err := gate.Apply(context.Background(), msg)
 		assert.NoError(t, err)
-		assert.Nil(t, res.Release)
+		assert.True(t, res.Redeliver)
 
 		assert.Equal(t, 1, gate1.calls)
 		assert.Equal(t, 1, gate2.calls)
-		assert.Equal(t, 0, gate3.calls) // Short circuits
-		assert.True(t, gate1.release)   // gate1 was released because gate2 denied
+		assert.Equal(t, 0, gate3.calls)          // Short circuit
+		assert.Equal(t, 1, gate1.releaseCounter) // Rollback called for gate1
 	})
 
 	t.Run("Error in gate", func(t *testing.T) {
-		gate1 := &mockAttributeGate{allowed: true}
-		gate2 := &mockAttributeGate{err: errors.New("test error")}
+		gate1 := &mockGate{verdict: pipeline.Continue()}
+		gate2 := &mockGate{err: errors.New("test error")}
 		gate := NewCompositeGate(gate1, gate2)
 
-		res, err := gate.Acquire(context.Background(), nil)
-		assert.False(t, res.Allowed)
+		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
+		_, err := gate.Apply(context.Background(), msg)
 		assert.Error(t, err)
-		assert.Nil(t, res.Release)
 
 		assert.Equal(t, 1, gate1.calls)
 		assert.Equal(t, 1, gate2.calls)
-		assert.True(t, gate1.release) // gate1 was released because gate2 errored
-	})
-}
-
-func TestCompositeGate_Classification(t *testing.T) {
-	t.Run("Reserved aggregation", func(t *testing.T) {
-		gate1 := &mockAttributeGate{allowed: true, classification: api.ClassificationReserved}
-		gate2 := &mockAttributeGate{allowed: true, classification: api.ClassificationNone}
-		gate := NewCompositeGate(gate1, gate2)
-
-		res, err := gate.Acquire(context.Background(), nil)
-		assert.NoError(t, err)
-		assert.Equal(t, api.ClassificationReserved, res.Classification)
-	})
-
-	t.Run("Overflow aggregation", func(t *testing.T) {
-		gate1 := &mockAttributeGate{allowed: true, classification: api.ClassificationReserved}
-		gate2 := &mockAttributeGate{allowed: true, classification: api.ClassificationOverflow}
-		gate := NewCompositeGate(gate1, gate2)
-
-		res, err := gate.Acquire(context.Background(), nil)
-		assert.NoError(t, err)
-		assert.Equal(t, api.ClassificationOverflow, res.Classification)
+		assert.Equal(t, 1, gate1.releaseCounter) // Rollback called for gate1
 	})
 }

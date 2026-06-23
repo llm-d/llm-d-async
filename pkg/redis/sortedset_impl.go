@@ -91,7 +91,7 @@ type requestChannelData struct {
 	channel   pipeline.RequestChannel
 	queueName string
 	queueID   string
-	gate      pipeline.DispatchGate
+	gate      pipeline.Gate
 }
 
 var (
@@ -107,7 +107,7 @@ type RedisSortedSetFlow struct {
 	pollInterval    time.Duration
 	batchSize       int
 	activeReleases  sync.Map
-	gate            pipeline.DispatchGate
+	gate            pipeline.Gate
 	gateFactory     pipeline.GateFactory
 	configMap       map[string]queueConfig
 	workerPools     []pipeline.WorkerPoolConfig
@@ -174,7 +174,7 @@ func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error)
 
 	r.configMap = make(map[string]queueConfig, len(configs))
 	for _, cfg := range configs {
-		var gate pipeline.DispatchGate
+		var gate pipeline.Gate
 		if r.gateFactory != nil && cfg.GateType != "" {
 			gate, err = r.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
 			if err != nil {
@@ -390,7 +390,7 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 	defer ticker.Stop()
 
 	// Find the gate for this queue
-	var gate pipeline.DispatchGate
+	var gate pipeline.Gate
 	for _, ch := range r.requestChannels {
 		if ch.queueName == queueName {
 			gate = ch.gate
@@ -411,7 +411,7 @@ func (r *RedisSortedSetFlow) requestWorker(ctx context.Context, msgChannel chan 
 	}
 }
 
-func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string, gate pipeline.DispatchGate, logger logr.Logger) {
+func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel chan *api.InternalRequest, queueName string, queueID string, gate pipeline.Gate, logger logr.Logger) {
 	currentTime := float64(time.Now().Unix())
 
 	budget := gate.Budget(ctx)
@@ -450,31 +450,37 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			ir.QueueID = queueID
 		}
 
-		// Per-attribute gating
-		var release func()
-		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			res, err := attrGate.Acquire(ctx, rview.ReqMetadata())
-			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to acquire attribute quota")
-				// Re-enqueue the message if acquisition fails
-				member, _ := json.Marshal(ir)
-				r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
-				continue
-			}
-			if !res.Allowed {
-				// Re-enqueue the message (wait for quota)
-				member, _ := json.Marshal(ir)
-				r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
-				continue
-			}
-			release = res.Release
-			ir.Classification = res.Classification
-		} else {
-			release = func() {}
+		// Apply gate
+		verdict, err := gate.Apply(ctx, ir)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
+			// Re-enqueue the message on gating failure
+			member, _ := json.Marshal(ir)
+			r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
+			continue
 		}
 
-		if release != nil {
-			r.activeReleases.Store(rview.ReqID(), release)
+		if verdict.Redeliver {
+			// Re-enqueue the message (wait for capacity or quota)
+			member, _ := json.Marshal(ir)
+			r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
+			continue
+		}
+
+		if verdict.Terminate {
+			if verdict.Result != nil {
+				r.resultChannel <- verdict.Result.ResultMessage
+			} else {
+				r.resultChannel <- api.ResultMessage{
+					ID:      rview.ReqID(),
+					Payload: `{"status": "dropped"}`,
+				}
+			}
+			continue
+		}
+
+		if len(ir.Releases()) > 0 {
+			r.activeReleases.Store(rview.ReqID(), ir)
 		}
 
 		// Stamp ingestion time as the message enters the in-process buffer so the
@@ -493,9 +499,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			}); err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to re-queue message on shutdown", "id", rview.ReqID())
 			}
-			if release != nil {
-				release()
-			}
+			ir.Release()
 			return
 		}
 	}
@@ -598,8 +602,10 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 		batch := drainBatch(msg, r.resultChannel, maxBatchSize)
 		// Release quota for all messages in the batch
 		for _, m := range batch {
-			if rel, ok := r.activeReleases.LoadAndDelete(m.ID); ok {
-				rel.(func())()
+			if val, ok := r.activeReleases.LoadAndDelete(m.ID); ok {
+				if ir, ok := val.(*api.InternalRequest); ok {
+					ir.Release()
+				}
 			}
 		}
 		r.flushResultBatch(flushCtx, batch)

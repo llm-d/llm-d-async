@@ -40,6 +40,40 @@ type InternalRequest struct {
 	// (un)marshaling does not persist it, so a re-enqueued (retried) message is
 	// re-stamped on its next delivery. Zero when not set (e.g. drained messages).
 	IngestionTime time.Time `json:"-"`
+
+	// releases holds cleanup and release functions registered by stateful gates
+	// (e.g., reservation counters or quota allocations) during the request's
+	// lifecycle. These are executed in reverse order on Release() or discarded
+	// if RollbackReleases() is invoked.
+	releases []func()
+}
+
+func (r *InternalRequest) AttachRelease(f func()) {
+	if f != nil {
+		r.releases = append(r.releases, f)
+	}
+}
+
+func (r *InternalRequest) Release() {
+	for i := len(r.releases) - 1; i >= 0; i-- {
+		if r.releases[i] != nil {
+			r.releases[i]()
+		}
+	}
+	r.releases = nil
+}
+
+func (r *InternalRequest) Releases() []func() {
+	return r.releases
+}
+
+func (r *InternalRequest) RollbackReleases(snapshot int) {
+	for i := len(r.releases) - 1; i >= snapshot; i-- {
+		if r.releases[i] != nil {
+			r.releases[i]()
+		}
+	}
+	r.releases = r.releases[:snapshot]
 }
 
 // NewInternalRequest returns an InternalRequest with a non-nil PublicRequest.

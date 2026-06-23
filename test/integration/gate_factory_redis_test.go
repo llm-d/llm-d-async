@@ -7,15 +7,14 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestGateFactory_RedisQuota_ConcurrencyParsing validates that GateFactory
-// correctly parses "redis-quota" params and produces a working AttributeGate.
-// Packages exercised: flowcontrol (GateFactory) -> pkg/redis (RedisQuotaGate).
+// correctly parses "redis-quota" params and produces a working Gate.
 func TestGateFactory_RedisQuota_ConcurrencyParsing(t *testing.T) {
 	s := miniredis.RunT(t)
 	factory := flowcontrol.NewGateFactory("")
@@ -34,37 +33,35 @@ func TestGateFactory_RedisQuota_ConcurrencyParsing(t *testing.T) {
 	// Budget always returns 1.0 for quota gates.
 	assert.Equal(t, 1.0, gate.Budget(context.Background()))
 
-	attrGate, ok := gate.(pipeline.AttributeGate)
-	require.True(t, ok, "redis-quota gate should implement AttributeGate")
-
 	ctx := context.Background()
-	attrs := map[string]string{"model": "gpt-4"}
 
-	// Acquire twice (limit=2) — both should succeed.
-	res1, err := attrGate.Acquire(ctx, attrs)
+	// Apply twice (limit=2) — both should succeed.
+	req1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{Metadata: map[string]string{"model": "gpt-4"}})
+	verdict1, err := gate.Apply(ctx, req1)
 	require.NoError(t, err)
-	assert.True(t, res1.Allowed)
+	assert.False(t, verdict1.Redeliver)
 
-	res2, err := attrGate.Acquire(ctx, attrs)
+	req2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{Metadata: map[string]string{"model": "gpt-4"}})
+	verdict2, err := gate.Apply(ctx, req2)
 	require.NoError(t, err)
-	assert.True(t, res2.Allowed)
+	assert.False(t, verdict2.Redeliver)
 
-	// Third acquire — should fail.
-	res3, err := attrGate.Acquire(ctx, attrs)
+	// Third apply — should block/refuse.
+	req3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{Metadata: map[string]string{"model": "gpt-4"}})
+	verdict3, err := gate.Apply(ctx, req3)
 	require.NoError(t, err)
-	assert.False(t, res3.Allowed, "Third acquire should be denied (limit=2)")
+	assert.True(t, verdict3.Redeliver, "Third request should be denied (limit=2)")
 
 	// Release one and retry.
-	res1.Release()
-	res4, err := attrGate.Acquire(ctx, attrs)
+	req1.Release()
+
+	verdict4, err := gate.Apply(ctx, req3)
 	require.NoError(t, err)
-	assert.True(t, res4.Allowed, "Should succeed after release")
+	assert.False(t, verdict4.Redeliver, "Should succeed after release")
 
 	// Cleanup.
-	res2.Release()
-	if res4.Release != nil {
-		res4.Release()
-	}
+	req2.Release()
+	req3.Release()
 }
 
 // TestGateFactory_RedisQuota_RateLimitParsing validates rate-limit mode parsing.
@@ -81,22 +78,20 @@ func TestGateFactory_RedisQuota_RateLimitParsing(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, gate)
 
-	attrGate, ok := gate.(pipeline.AttributeGate)
-	require.True(t, ok)
-
 	ctx := context.Background()
-	attrs := map[string]string{"userid": "alice"}
 
 	for i := 0; i < 3; i++ {
-		res, err := attrGate.Acquire(ctx, attrs)
+		req := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{Metadata: map[string]string{"userid": "alice"}})
+		verdict, err := gate.Apply(ctx, req)
 		require.NoError(t, err)
-		assert.True(t, res.Allowed, "Request %d should be allowed", i+1)
+		assert.False(t, verdict.Redeliver, "Request %d should be allowed", i+1)
 	}
 
 	// Fourth should be rate limited.
-	res4, err := attrGate.Acquire(ctx, attrs)
+	req4 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{Metadata: map[string]string{"userid": "alice"}})
+	verdict4, err := gate.Apply(ctx, req4)
 	require.NoError(t, err)
-	assert.False(t, res4.Allowed, "Fourth request should be rate limited")
+	assert.True(t, verdict4.Redeliver, "Fourth request should be rate limited")
 }
 
 // TestGateFactory_RedisQuota_MissingParams validates error handling for missing
@@ -128,16 +123,15 @@ func TestGateFactory_RedisQuota_DefaultParams(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	attrGate, ok := gate.(pipeline.AttributeGate)
-	require.True(t, ok)
-
 	// Default attribute is "userid", default mode is "rate-limit".
 	ctx := context.Background()
-	res1, err := attrGate.Acquire(ctx, map[string]string{"userid": "bob"})
+	req1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{Metadata: map[string]string{"userid": "bob"}})
+	verdict1, err := gate.Apply(ctx, req1)
 	require.NoError(t, err)
-	assert.True(t, res1.Allowed)
+	assert.False(t, verdict1.Redeliver)
 
-	res2, err := attrGate.Acquire(ctx, map[string]string{"userid": "bob"})
+	req2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{Metadata: map[string]string{"userid": "bob"}})
+	verdict2, err := gate.Apply(ctx, req2)
 	require.NoError(t, err)
-	assert.False(t, res2.Allowed, "Second acquire should be rate limited with default params")
+	assert.True(t, verdict2.Redeliver, "Second apply should be rate limited with default params")
 }

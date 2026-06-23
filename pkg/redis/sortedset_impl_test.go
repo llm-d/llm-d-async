@@ -18,7 +18,7 @@ import (
 )
 
 // noopGate returns a gate that always returns full budget (1.0)
-func noopGate() pipeline.DispatchGate {
+func noopGate() pipeline.Gate {
 	return pipeline.ConstOpenGate()
 }
 

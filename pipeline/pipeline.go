@@ -27,7 +27,6 @@ type Characteristics struct {
 	SupportsMessageLatency bool
 }
 
-
 type RequestMergePolicy interface {
 	MergeRequestChannels(channels []RequestChannel, pools map[string]WorkerPoolConfig) PoolDispatch
 }
@@ -53,7 +52,7 @@ type RequestChannel struct {
 	IGWBaseURL         string
 	InferenceObjective string
 	RequestPathURL     string
-	Gate               DispatchGate
+	Gate               Gate
 	WorkerPoolID       string
 }
 

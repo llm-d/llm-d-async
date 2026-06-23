@@ -11,8 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-var _ pipeline.DispatchGate = (*RedisQuotaGate)(nil)
-var _ pipeline.AttributeGate = (*RedisQuotaGate)(nil)
+var _ pipeline.Gate = (*RedisQuotaGate)(nil)
 
 type QuotaMode string
 
@@ -61,12 +60,12 @@ func (g *RedisQuotaGate) Budget(ctx context.Context) float64 {
 	return 1.0
 }
 
-// Acquire implements api.AttributeGate.
-func (g *RedisQuotaGate) Acquire(ctx context.Context, attributes map[string]string) (pipeline.AcquireResult, error) {
-	val, ok := attributes[g.attribute]
+// Apply implements pipeline.Gate.
+func (g *RedisQuotaGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+	val, ok := msg.PublicRequest.ReqMetadata()[g.attribute]
 	if !ok {
-		// If the attribute is missing, we allow it by default (or we could reject it).
-		return pipeline.AcquireResult{Allowed: true, Classification: api.ClassificationNone}, nil
+		// If the attribute is missing, we allow it by default.
+		return pipeline.Continue(), nil
 	}
 
 	key := fmt.Sprintf("%s%s:%s", g.prefix, g.attribute, val)
@@ -81,23 +80,26 @@ func (g *RedisQuotaGate) Acquire(ctx context.Context, attributes map[string]stri
 	case QuotaModeRateLimit:
 		classification, release, err = g.acquireRateLimit(ctx, key)
 	default:
-		return pipeline.AcquireResult{Allowed: true, Classification: api.ClassificationNone}, nil
+		return pipeline.Continue(), nil
 	}
 
 	if err != nil {
-		return pipeline.AcquireResult{}, err
+		return pipeline.Verdict{}, err
 	}
 
-	allowed := true
 	if g.gatingMode == GatingModeBlocking {
-		allowed = (classification == api.ClassificationReserved)
+		if classification != api.ClassificationReserved {
+			msg.Classification = classification
+			return pipeline.Refuse(), nil
+		}
 	}
 
-	return pipeline.AcquireResult{
-		Allowed:        allowed,
-		Classification: classification,
-		Release:        release,
-	}, nil
+	msg.Classification = classification
+	if release != nil {
+		msg.AttachRelease(release)
+	}
+
+	return pipeline.Continue(), nil
 }
 
 func (g *RedisQuotaGate) acquireConcurrency(ctx context.Context, key string) (api.QuotaClassification, func(), error) {

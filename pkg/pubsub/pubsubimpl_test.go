@@ -20,13 +20,13 @@ type mockAttributeGate struct {
 }
 
 func (m *mockAttributeGate) Budget(ctx context.Context) float64 { return 1.0 }
-func (m *mockAttributeGate) Acquire(ctx context.Context, attrs map[string]string) (pipeline.AcquireResult, error) {
+func (m *mockAttributeGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
 	m.acquireCalled = true
-	return pipeline.AcquireResult{
-		Allowed:        m.allowed,
-		Classification: api.ClassificationReserved,
-		Release:        func() { m.releaseCalled = true },
-	}, nil
+	if !m.allowed {
+		return pipeline.Refuse(), nil
+	}
+	msg.AttachRelease(func() { m.releaseCalled = true })
+	return pipeline.Continue(), nil
 }
 
 func TestProcessMessages_QuotaGating(t *testing.T) {

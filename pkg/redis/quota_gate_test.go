@@ -22,33 +22,37 @@ func TestRedisQuotaGate_Concurrency(t *testing.T) {
 	attrs := map[string]string{"userid": "user1"}
 
 	// 1st acquisition - Allowed
-	res, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res.Allowed || res.Classification != api.ClassificationReserved {
-		t.Fatalf("Expected allowed=true reserved, got %v %v, err: %v", res.Allowed, res.Classification, err)
+	msg1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req1", Metadata: attrs})
+	verdict1, err := gate.Apply(ctx, msg1)
+	if err != nil || verdict1.Redeliver || verdict1.Terminate || msg1.Classification != api.ClassificationReserved {
+		t.Fatalf("Expected continue reserved, got %v classification %v, err: %v", verdict1, msg1.Classification, err)
 	}
 
 	// 2nd acquisition - Allowed
-	res2, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res2.Allowed || res2.Classification != api.ClassificationReserved {
-		t.Fatalf("Expected allowed=true reserved, got %v %v, err: %v", res2.Allowed, res2.Classification, err)
+	msg2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req2", Metadata: attrs})
+	verdict2, err := gate.Apply(ctx, msg2)
+	if err != nil || verdict2.Redeliver || verdict2.Terminate || msg2.Classification != api.ClassificationReserved {
+		t.Fatalf("Expected continue reserved, got %v classification %v, err: %v", verdict2, msg2.Classification, err)
 	}
 
-	// 3rd acquisition - Denied
-	res3, err := gate.Acquire(ctx, attrs)
-	if err != nil || res3.Allowed || res3.Classification != api.ClassificationOverflow {
-		t.Fatalf("Expected allowed=false overflow, got %v %v, err: %v", res3.Allowed, res3.Classification, err)
+	// 3rd acquisition - Denied (Redeliver)
+	msg3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req3", Metadata: attrs})
+	verdict3, err := gate.Apply(ctx, msg3)
+	if err != nil || !verdict3.Redeliver || msg3.Classification != api.ClassificationOverflow {
+		t.Fatalf("Expected redeliver overflow, got %v classification %v, err: %v", verdict3, msg3.Classification, err)
 	}
 
 	// Release one
-	res.Release()
+	msg1.Release()
 
 	// 4th acquisition - Allowed again
-	res4, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res4.Allowed || res4.Classification != api.ClassificationReserved {
-		t.Fatalf("Expected allowed=true reserved after release, got %v %v, err: %v", res4.Allowed, res4.Classification, err)
+	msg4 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req4", Metadata: attrs})
+	verdict4, err := gate.Apply(ctx, msg4)
+	if err != nil || verdict4.Redeliver || verdict4.Terminate || msg4.Classification != api.ClassificationReserved {
+		t.Fatalf("Expected continue reserved after release, got %v classification %v, err: %v", verdict4, msg4.Classification, err)
 	}
 
-	res2.Release()
+	msg2.Release()
 }
 
 func TestRedisQuotaGate_RateLimit(t *testing.T) {
@@ -64,30 +68,34 @@ func TestRedisQuotaGate_RateLimit(t *testing.T) {
 	attrs := map[string]string{"userid": "user1"}
 
 	// 1st acquisition - Allowed
-	res, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res.Allowed || res.Classification != api.ClassificationReserved {
-		t.Fatalf("Expected allowed=true reserved, got %v %v, err: %v", res.Allowed, res.Classification, err)
+	msg1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req1", Metadata: attrs})
+	verdict1, err := gate.Apply(ctx, msg1)
+	if err != nil || verdict1.Redeliver || verdict1.Terminate || msg1.Classification != api.ClassificationReserved {
+		t.Fatalf("Expected continue reserved, got %v classification %v, err: %v", verdict1, msg1.Classification, err)
 	}
 
 	// 2nd acquisition - Allowed
-	res2, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res2.Allowed || res2.Classification != api.ClassificationReserved {
-		t.Fatalf("Expected allowed=true reserved, got %v %v, err: %v", res2.Allowed, res2.Classification, err)
+	msg2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req2", Metadata: attrs})
+	verdict2, err := gate.Apply(ctx, msg2)
+	if err != nil || verdict2.Redeliver || verdict2.Terminate || msg2.Classification != api.ClassificationReserved {
+		t.Fatalf("Expected continue reserved, got %v classification %v, err: %v", verdict2, msg2.Classification, err)
 	}
 
 	// 3rd acquisition - Denied
-	res3, err := gate.Acquire(ctx, attrs)
-	if err != nil || res3.Allowed || res3.Classification != api.ClassificationOverflow {
-		t.Fatalf("Expected allowed=false overflow, got %v %v, err: %v", res3.Allowed, res3.Classification, err)
+	msg3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req3", Metadata: attrs})
+	verdict3, err := gate.Apply(ctx, msg3)
+	if err != nil || !verdict3.Redeliver || msg3.Classification != api.ClassificationOverflow {
+		t.Fatalf("Expected redeliver overflow, got %v classification %v, err: %v", verdict3, msg3.Classification, err)
 	}
 
 	// Wait for window to pass
 	time.Sleep(1100 * time.Millisecond)
 
 	// 4th acquisition - Allowed again
-	res4, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res4.Allowed || res4.Classification != api.ClassificationReserved {
-		t.Fatalf("Expected allowed=true reserved after window, got %v %v, err: %v", res4.Allowed, res4.Classification, err)
+	msg4 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req4", Metadata: attrs})
+	verdict4, err := gate.Apply(ctx, msg4)
+	if err != nil || verdict4.Redeliver || verdict4.Terminate || msg4.Classification != api.ClassificationReserved {
+		t.Fatalf("Expected continue reserved after window, got %v classification %v, err: %v", verdict4, msg4.Classification, err)
 	}
 }
 
@@ -105,15 +113,17 @@ func TestRedisQuotaGate_Classifying(t *testing.T) {
 	attrs := map[string]string{"userid": "user1"}
 
 	// 1st acquisition - Allowed and Reserved
-	res, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res.Allowed || res.Classification != api.ClassificationReserved {
-		t.Fatalf("Expected allowed=true reserved, got %v %v, err: %v", res.Allowed, res.Classification, err)
+	msg1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req1", Metadata: attrs})
+	verdict1, err := gate.Apply(ctx, msg1)
+	if err != nil || verdict1.Redeliver || verdict1.Terminate || msg1.Classification != api.ClassificationReserved {
+		t.Fatalf("Expected continue reserved, got %v classification %v, err: %v", verdict1, msg1.Classification, err)
 	}
 
 	// 2nd acquisition - Allowed but Overflow
-	res2, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res2.Allowed || res2.Classification != api.ClassificationOverflow {
-		t.Fatalf("Expected allowed=true overflow, got %v %v, err: %v", res2.Allowed, res2.Classification, err)
+	msg2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req2", Metadata: attrs})
+	verdict2, err := gate.Apply(ctx, msg2)
+	if err != nil || verdict2.Redeliver || verdict2.Terminate || msg2.Classification != api.ClassificationOverflow {
+		t.Fatalf("Expected continue overflow in classifying mode, got %v classification %v, err: %v", verdict2, msg2.Classification, err)
 	}
 }
 
@@ -128,8 +138,9 @@ func TestRedisQuotaGate_MissingAttribute(t *testing.T) {
 	ctx := context.Background()
 	attrs := map[string]string{"teamid": "team1"} // missing 'userid'
 
-	res, err := gate.Acquire(ctx, attrs)
-	if err != nil || !res.Allowed || res.Classification != api.ClassificationNone {
-		t.Fatalf("Expected allowed=true none for missing attribute, got %v %v, err: %v", res.Allowed, res.Classification, err)
+	msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req1", Metadata: attrs})
+	verdict, err := gate.Apply(ctx, msg)
+	if err != nil || verdict.Redeliver || verdict.Terminate || msg.Classification != api.ClassificationNone {
+		t.Fatalf("Expected continue none for missing attribute, got %v classification %v, err: %v", verdict, msg.Classification, err)
 	}
 }

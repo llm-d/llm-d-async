@@ -23,22 +23,21 @@ import (
 	pipeline "github.com/llm-d-incubation/llm-d-async/pipeline"
 )
 
-var _ pipeline.DispatchGate = (*CompositeGate)(nil)
-var _ pipeline.AttributeGate = (*CompositeGate)(nil)
+var _ pipeline.Gate = (*CompositeGate)(nil)
 
-// CompositeGate combines multiple DispatchGates and/or AttributeGates.
-// It returns the minimum budget across all inner DispatchGates.
-// It acquires quota across all inner AttributeGates (all or nothing).
+// CompositeGate combines multiple pipeline.Gates.
+// It returns the minimum budget across all inner Gates.
+// It applies all inner gates (all or nothing) to incoming requests.
 type CompositeGate struct {
-	gates []pipeline.DispatchGate
+	gates []pipeline.Gate
 }
 
 // NewCompositeGate creates a CompositeGate with the given inner gates.
-func NewCompositeGate(gates ...pipeline.DispatchGate) *CompositeGate {
+func NewCompositeGate(gates ...pipeline.Gate) *CompositeGate {
 	return &CompositeGate{gates: gates}
 }
 
-// Budget implements DispatchGate.
+// Budget implements pipeline.Gate.
 // Returns the minimum budget across all inner gates.
 // If there are no inner gates, it returns 1.0.
 func (c *CompositeGate) Budget(ctx context.Context) float64 {
@@ -56,45 +55,8 @@ func (c *CompositeGate) Budget(ctx context.Context) float64 {
 	return minBudget
 }
 
-// Acquire implements AttributeGate.
-// It attempts to acquire quota across all inner AttributeGates.
-// If any gate denies the request or fails, it releases the quota acquired from previous gates.
-func (c *CompositeGate) Acquire(ctx context.Context, attributes map[string]string) (pipeline.AcquireResult, error) {
-	var releases []func()
-	releaseAll := func() {
-		for i := len(releases) - 1; i >= 0; i-- {
-			releases[i]()
-		}
-	}
-
-	finalClassification := api.ClassificationNone
-	for _, gate := range c.gates {
-		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			res, err := attrGate.Acquire(ctx, attributes)
-			if err != nil {
-				releaseAll()
-				return pipeline.AcquireResult{}, err
-			}
-			if !res.Allowed {
-				releaseAll()
-				return pipeline.AcquireResult{Allowed: false, Classification: api.ClassificationOverflow}, nil
-			}
-			if res.Release != nil {
-				releases = append(releases, res.Release)
-			}
-
-			// Aggregate classification: Overflow dominates.
-			if res.Classification == api.ClassificationOverflow {
-				finalClassification = api.ClassificationOverflow
-			} else if res.Classification == api.ClassificationReserved && finalClassification == api.ClassificationNone {
-				finalClassification = api.ClassificationReserved
-			}
-		}
-	}
-
-	return pipeline.AcquireResult{
-		Allowed:        true,
-		Classification: finalClassification,
-		Release:        releaseAll,
-	}, nil
+// Apply implements pipeline.Gate.
+// It runs ApplyChain across all inner gates.
+func (c *CompositeGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+	return pipeline.ApplyChain(ctx, msg, c.gates)
 }

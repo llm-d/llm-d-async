@@ -17,11 +17,9 @@ import (
 )
 
 // TestSortedSetQuotaGate_AcquireDequeueRelease validates the full cross-package
-// contract: RedisQuotaGate.Acquire gates dequeue from a sorted set, the message
+// contract: RedisQuotaGate.Apply gates dequeue from a sorted set, the message
 // flows through a channel, and the release function decrements the concurrency
 // counter in Redis — allowing the next request through.
-//
-// Packages exercised: pkg/redis (quota_gate + sorted set ops), api, pipeline.
 func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	s := miniredis.RunT(t)
 	rdb := goredis.NewClient(&goredis.Options{Addr: s.Addr()})
@@ -52,7 +50,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Pop first message — Acquire should succeed (concurrency limit = 1).
+	// Pop first message — Apply should succeed (concurrency limit = 1).
 	results, err := rdb.ZPopMin(ctx, queueName, 1).Result()
 	require.NoError(t, err)
 	require.Len(t, results, 1)
@@ -60,12 +58,12 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	var ir1 api.InternalRequest
 	require.NoError(t, json.Unmarshal([]byte(results[0].Member.(string)), &ir1))
 
-	res1, err := gate.Acquire(ctx, ir1.PublicRequest.ReqMetadata())
+	verdict1, err := gate.Apply(ctx, &ir1)
 	require.NoError(t, err)
-	assert.True(t, res1.Allowed, "First request should be allowed")
-	require.NotNil(t, res1.Release)
+	assert.False(t, verdict1.Redeliver, "First request should be allowed")
+	assert.NotEmpty(t, ir1.Releases())
 
-	// Pop second message — Acquire should be denied (concurrency limit reached).
+	// Pop second message — Apply should be denied (concurrency limit reached).
 	results2, err := rdb.ZPopMin(ctx, queueName, 1).Result()
 	require.NoError(t, err)
 	require.Len(t, results2, 1)
@@ -73,9 +71,9 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	var ir2 api.InternalRequest
 	require.NoError(t, json.Unmarshal([]byte(results2[0].Member.(string)), &ir2))
 
-	res2, err := gate.Acquire(ctx, ir2.PublicRequest.ReqMetadata())
+	verdict2, err := gate.Apply(ctx, &ir2)
 	require.NoError(t, err)
-	assert.False(t, res2.Allowed, "Second request should be denied while first is in-flight")
+	assert.True(t, verdict2.Redeliver, "Second request should be denied while first is in-flight")
 
 	// Re-enqueue denied message (as sortedset_impl does).
 	err = rdb.ZAdd(ctx, queueName, goredis.Z{
@@ -84,7 +82,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	require.NoError(t, err)
 
 	// Release the first request (simulates resultWorker calling release).
-	res1.Release()
+	ir1.Release()
 
 	// Now the second message should be acquirable.
 	results3, err := rdb.ZPopMin(ctx, queueName, 1).Result()
@@ -95,12 +93,10 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(results3[0].Member.(string)), &ir3))
 	assert.Equal(t, "msg-2", ir3.PublicRequest.ReqID())
 
-	res3, err := gate.Acquire(ctx, ir3.PublicRequest.ReqMetadata())
+	verdict3, err := gate.Apply(ctx, &ir3)
 	require.NoError(t, err)
-	assert.True(t, res3.Allowed, "Second request should be allowed after first was released")
-	if res3.Release != nil {
-		res3.Release()
-	}
+	assert.False(t, verdict3.Redeliver, "Second request should be allowed after first was released")
+	ir3.Release()
 }
 
 // TestSortedSetQuotaGate_RateLimitRequeue validates that rate-limited messages
@@ -126,21 +122,30 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 		},
 	)
 
-	// First acquire — allowed.
-	res, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
+	// First Apply — allowed.
+	verdict1, err := gate.Apply(ctx, ir)
 	require.NoError(t, err)
-	assert.True(t, res.Allowed)
+	assert.False(t, verdict1.Redeliver)
 
-	// Second acquire — denied (rate limit hit).
-	res2, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
+	// Second Apply — denied (rate limit hit).
+	ir2 := api.NewInternalRequest(
+		api.InternalRouting{RequestQueueName: queueName},
+		&api.RequestMessage{
+			ID: "rl-msg-2", Created: time.Now().Unix(),
+			Deadline: time.Now().Add(time.Minute).Unix(),
+			Payload:  map[string]any{"model": "test"},
+			Metadata: map[string]string{"userid": "user-b"},
+		},
+	)
+	verdict2, err := gate.Apply(ctx, ir2)
 	require.NoError(t, err)
-	assert.False(t, res2.Allowed, "Should be rate limited")
+	assert.True(t, verdict2.Redeliver, "Should be rate limited")
 
 	// Wait for window to reset.
 	time.Sleep(2100 * time.Millisecond)
 
-	// Third acquire — allowed again.
-	res3, err := gate.Acquire(ctx, ir.PublicRequest.ReqMetadata())
+	// Third Apply — allowed again.
+	verdict3, err := gate.Apply(ctx, ir2)
 	require.NoError(t, err)
-	assert.True(t, res3.Allowed, "Should be allowed after rate limit window resets")
+	assert.False(t, verdict3.Redeliver, "Should be allowed after rate limit window resets")
 }

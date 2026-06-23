@@ -94,7 +94,7 @@ func (f *GateFactory) Close() error {
 //     Params: query (required), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
-func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pipeline.DispatchGate, error) {
+func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pipeline.Gate, error) {
 	switch gateType {
 	case "composite":
 		gatesJSON := params["gates"]
@@ -112,7 +112,7 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 			return nil, fmt.Errorf("composite gate failed to parse 'gates' parameter: %w", err)
 		}
 
-		var innerGates []pipeline.DispatchGate
+		var innerGates []pipeline.Gate
 		for _, cfg := range configs {
 			gate, err := f.CreateGate(cfg.GateType, cfg.GateParams)
 			if err != nil {
@@ -333,6 +333,20 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 		var ms MetricSource = NewScrapeMetricSource(cfg)
 		ms = cachedSource(ms, f.cacheTTL)
 		return NewMetricDispatchGate(ms, baseline, fallback), nil
+
+	case "local-max-concurrency":
+		limitStr := params["limit"]
+		if limitStr == "" {
+			return nil, fmt.Errorf("local-max-concurrency gate requires a 'limit' parameter")
+		}
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil {
+			return nil, fmt.Errorf("local-max-concurrency gate requires a valid integer 'limit': %w", err)
+		}
+		if limit <= 0 {
+			return nil, fmt.Errorf("local-max-concurrency limit must be greater than 0, got %d", limit)
+		}
+		return NewLocalConcurrencyGate(limit), nil
 
 	default:
 		// Unknown gate types default to open gate

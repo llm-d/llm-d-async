@@ -21,11 +21,12 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-var _ pipeline.DispatchGate = (*MetricDispatchGate)(nil)
+var _ pipeline.Gate = (*MetricDispatchGate)(nil)
 
 // MetricDispatchGate implements DispatchGate by querying a MetricSource for a
 // budget value D and returning D − threshold, clamped to [0.0, 1.0].
@@ -94,4 +95,12 @@ func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 		return 0.0
 	}
 	return math.Min(1.0, math.Max(0.0, value-g.threshold))
+}
+
+// Apply implements pipeline.Gate.
+func (g *MetricDispatchGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+	if g.Budget(ctx) <= 0.0 {
+		return pipeline.Refuse(), nil
+	}
+	return pipeline.Continue(), nil
 }

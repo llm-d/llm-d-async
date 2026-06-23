@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 
+	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	promapi "github.com/prometheus/client_golang/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,7 +32,7 @@ var prometheusURL = flag.String("gate.prometheus.url", "", "Prometheus URL for n
 var gmpProjectID = flag.String("gate.pmetric.gmp.project-id", "", "Project ID for Google Managed Prometheus")
 var prometheusQueryModelName = flag.String("gate.prometheus.model-name", "", "metrics name to use for avg_queue_size")
 
-var _ pipeline.DispatchGate = (*BinaryMetricDispatchGate)(nil)
+var _ pipeline.Gate = (*BinaryMetricDispatchGate)(nil)
 
 // BinaryMetricDispatchGate implements DispatchGate using a MetricSource.
 // It returns 0.0 (no capacity) if the metric value is non-zero,
@@ -66,6 +67,14 @@ func (g *BinaryMetricDispatchGate) Budget(ctx context.Context) float64 {
 		return 1.0
 	}
 	return 0.0
+}
+
+// Apply implements pipeline.Gate.
+func (g *BinaryMetricDispatchGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+	if g.Budget(ctx) <= 0.0 {
+		return pipeline.Refuse(), nil
+	}
+	return pipeline.Continue(), nil
 }
 
 // AverageQueueSizeGate creates a BinaryMetricDispatchGate from command-line flags.

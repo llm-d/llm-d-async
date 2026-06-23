@@ -57,7 +57,7 @@ type PubSubMQFlow struct {
 	requestChannels []RequestChannelData
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
-	gate            pipeline.DispatchGate
+	gate            pipeline.Gate
 	gateFactory     pipeline.GateFactory
 	workerPools     []pipeline.WorkerPoolConfig
 	consumeCancel   context.CancelFunc
@@ -70,7 +70,7 @@ type PubSubMQFlow struct {
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
 	subscriberID   string
-	gate           pipeline.DispatchGate
+	gate           pipeline.Gate
 }
 
 // PubSubOption is a functional option for configuring PubSubMQFlow
@@ -169,7 +169,7 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		}
 
 		// Determine gate for this topic
-		var gate pipeline.DispatchGate
+		var gate pipeline.Gate
 		if p.gateFactory != nil && cfg.GateType != "" {
 			// Use factory to create per-topic gate
 			var err error
@@ -416,7 +416,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 	}
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID, poolID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate) {
 	logger := log.FromContext(ctx)
 
 	sub := pubSubClient.Subscriber(subscriberID)
@@ -464,7 +464,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 type receiveFunc func(context.Context, func(context.Context, *pubsub.Message)) error
 
-func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, subscriberID string, poolID string, ch chan *api.InternalRequest, gate pipeline.DispatchGate) error {
+func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, subscriberID string, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate) error {
 	logger := log.FromContext(ctx)
 	return receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 
@@ -483,39 +483,63 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		if msg.DeliveryAttempt != nil {
 			irout.RetryCount = *msg.DeliveryAttempt - 1
 		}
-		ir := api.NewInternalRequest(irout, &body)
-
-		// Per-attribute gating
-		var release func()
-		if attrGate, ok := gate.(pipeline.AttributeGate); ok {
-			res, err := attrGate.Acquire(ctx, msg.Attributes)
-			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to acquire attribute quota")
-				msg.Nack()
-				return
-			}
-			if !res.Allowed {
-				logger.V(logutil.DEBUG).Info("Quota exceeded, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)
-				go func() {
-					select {
-					case <-time.After(quotaExceededNackDelay):
-						msg.Nack()
-					case <-ctx.Done():
-						msg.Nack()
-					}
-				}()
-				return
-			}
-			release = res.Release
-			ir.Classification = res.Classification
-		} else {
-			release = func() {}
+		if body.Metadata == nil {
+			body.Metadata = make(map[string]string)
 		}
-		defer release()
+		for k, v := range msg.Attributes {
+			body.Metadata[k] = v
+		}
+
+		ir := api.NewInternalRequest(irout, &body)
+		defer ir.Release()
 
 		resultsChannel := make(chan bool, 1)
 		resultChannels.Store(msg.ID, resultsChannel)
 		defer resultChannels.Delete(msg.ID)
+
+		// Apply gate
+		verdict, err := gate.Apply(ctx, ir)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
+			msg.Nack()
+			return
+		}
+
+		if verdict.Redeliver {
+			logger.V(logutil.DEBUG).Info("Quota exceeded or capacity full, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)
+			go func() {
+				select {
+				case <-time.After(quotaExceededNackDelay):
+					msg.Nack()
+				case <-ctx.Done():
+					msg.Nack()
+				}
+			}()
+			return
+		}
+
+		if verdict.Terminate {
+			var resultMsg api.ResultMessage
+			if verdict.Result != nil {
+				resultMsg = verdict.Result.ResultMessage
+			} else {
+				resultMsg = api.ResultMessage{
+					ID:      body.ID,
+					Payload: `{"status": "dropped"}`,
+				}
+			}
+			resultMsg.Routing = ir.InternalRouting
+			r.resultChannel <- resultMsg
+
+			// Wait for the result worker to finish publishing and signal true
+			result := <-resultsChannel
+			if !result {
+				msg.Nack()
+			} else {
+				msg.Ack()
+			}
+			return
+		}
 
 		// Stamp ingestion time as the message enters the in-process buffer so the
 		// worker can record queue residence time when it pulls the message.
