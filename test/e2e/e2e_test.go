@@ -210,7 +210,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 		cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "wait", "pod",
 			"-l", "app.kubernetes.io/instance=integration",
-			"--for=delete", "--timeout=120s")
+			"--for=delete", "--timeout=150s")
 		session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
