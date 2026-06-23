@@ -4,7 +4,6 @@ package integration_test
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"testing"
 	"time"
@@ -22,13 +21,16 @@ func TestRedisImpl(t *testing.T) {
 	redisURL := fmt.Sprintf("redis://%s:%s", s.Host(), s.Port())
 
 	ctx := context.Background()
-	err := flag.Set("redis.url", redisURL)
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	_ = flag.Set("redis.igw-base-url", "http://localhost:30800")
-	flow, err := redis.NewRedisMQFlow(redis.WithWorkerPools([]pipeline.WorkerPoolConfig{
+	flowOpts := redis.PubSubFlowOptions{
+		IGWBaseURL:       "http://localhost:30800",
+		RequestPathURL:   "/v1/completions",
+		RequestQueueName: "request-queue",
+		RetryQueueName:   "retry-sortedset",
+		ResultQueueName:  "result-queue",
+	}
+	connOpts := redis.ConnectionOptions{URL: redisURL}
+	flow, err := redis.NewRedisMQFlow(flowOpts, connOpts, redis.WithWorkerPools([]pipeline.WorkerPoolConfig{
 		{
 			ID:      "default",
 			Workers: 1,
@@ -95,10 +97,18 @@ func TestRedisImplWithAuth(t *testing.T) {
 	redisURL := fmt.Sprintf("redis://default:test-password@%s:%s", s.Host(), s.Port())
 
 	ctx := context.Background()
-	_ = flag.Set("redis.url", redisURL)
 
-	_ = flag.Set("redis.ss.igw-base-url", "http://localhost:30800")
-	flow, err := redis.NewRedisSortedSetFlow(redis.WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{
+	flowOpts := redis.SortedSetFlowOptions{
+		IGWBaseURL:       "http://localhost:30800",
+		RequestPathURL:   "/v1/completions",
+		RequestQueueName: "request-sortedset",
+		ResultQueueName:  "result-list",
+		PollIntervalMs:   1000,
+		BatchSize:        10,
+		GateParamsJSON:   "{}",
+	}
+	connOpts := redis.ConnectionOptions{URL: redisURL}
+	flow, err := redis.NewRedisSortedSetFlow(flowOpts, connOpts, redis.WithSortedSetWorkerPools([]pipeline.WorkerPoolConfig{
 		{
 			ID:      "default",
 			Workers: 1,

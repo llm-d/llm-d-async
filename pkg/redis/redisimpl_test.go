@@ -318,15 +318,16 @@ func TestMQRetryWorker_RequeuesOnShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	retryQueue := *retryQueueName
+	retryQueue := "retry-sortedset"
 	queueName := "req-queue"
 
 	// Use a blocking (unbuffered) request channel so the worker blocks on send.
 	reqCh := make(chan *api.InternalRequest)
 	flow := &RedisMQFlow{
-		rdb:           rdb,
-		resultChannel: make(chan api.ResultMessage, resultChannelBuffer),
-		retryChannel:  make(chan pipeline.RetryMessage),
+		rdb:            rdb,
+		resultChannel:  make(chan api.ResultMessage, resultChannelBuffer),
+		retryChannel:   make(chan pipeline.RetryMessage),
+		retryQueueName: retryQueue,
 		requestChannels: []RequestChannelData{{
 			requestChannel: pipeline.RequestChannel{Channel: reqCh},
 			queueName:      queueName,
@@ -741,53 +742,48 @@ func TestMQRetryWorker_ExitsPromptlyOnCancelDuringSleep(t *testing.T) {
 }
 
 func TestNewRedisMQFlow_PoolRequiredAndValidation(t *testing.T) {
-	origConfig := *queuesConfig
-	origURL := *RedisURL
-	defer func() {
-		*queuesConfig = origConfig
-		*RedisURL = origURL
-	}()
-
-	*RedisURL = "redis://localhost:6379"
+	s := miniredis.RunT(t)
+	defer s.Close()
+	connOpts := ConnectionOptions{URL: "redis://" + s.Addr()}
 
 	// Case 1: worker_pool_id is missing from configuration, and pool "default" does not exist
-	*queuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`
-	_, err := NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	opts := PubSubFlowOptions{QueuesConfig: `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`}
+	_, err := NewRedisMQFlow(opts, connOpts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
 	if err == nil {
 		t.Error("Expected error when worker_pool_id is missing and 'default' pool does not exist, got nil")
 	}
 
 	// Case 5: worker_pool_id is missing, but only a single 'default' pool is specified
-	*queuesConfig = `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`
-	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
+	opts = PubSubFlowOptions{QueuesConfig: `[{"queue_name":"test-queue","inference_objective":"obj","igw_base_url":"http://gw"}]`}
+	_, err = NewRedisMQFlow(opts, connOpts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
 	if err != nil {
 		t.Errorf("Unexpected error when worker_pool_id is missing but default pool exists: %v", err)
 	}
 
 	// Case 6: worker_pool_id is specified as custom, but only a single 'default' pool is specified
-	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"custom-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
-	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
+	opts = PubSubFlowOptions{QueuesConfig: `[{"queue_name":"test-queue","worker_pool_id":"custom-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`}
+	_, err = NewRedisMQFlow(opts, connOpts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
 	if err == nil {
 		t.Error("Expected error when worker_pool_id is custom but only default pool exists, got nil")
 	}
 
 	// Case 2: worker_pool_id is specified but pool does not exist
-	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"non-existent","inference_objective":"obj","igw_base_url":"http://gw"}]`
-	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	opts = PubSubFlowOptions{QueuesConfig: `[{"queue_name":"test-queue","worker_pool_id":"non-existent","inference_objective":"obj","igw_base_url":"http://gw"}]`}
+	_, err = NewRedisMQFlow(opts, connOpts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
 	if err == nil {
 		t.Error("Expected error when specified worker_pool_id does not exist, got nil")
 	}
 
 	// Case 3: worker_pool_id specified and pool exists, but igw_base_url is missing
-	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj"}]`
-	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	opts = PubSubFlowOptions{QueuesConfig: `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj"}]`}
+	_, err = NewRedisMQFlow(opts, connOpts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
 	if err == nil {
 		t.Error("Expected error when igw_base_url is missing in queue config, got nil")
 	}
 
 	// Case 4: worker_pool_id and igw_base_url specified and pool exists
-	*queuesConfig = `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
-	_, err = NewRedisMQFlow(WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	opts = PubSubFlowOptions{QueuesConfig: `[{"queue_name":"test-queue","worker_pool_id":"test-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`}
+	_, err = NewRedisMQFlow(opts, connOpts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
 	if err != nil {
 		t.Errorf("Unexpected error when worker_pool_id exists: %v", err)
 	}

@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -19,20 +18,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
-)
-
-var (
-	ssIGWBaseURL         = flag.String("redis.ss.igw-base-url", "", "IGW base URL")
-	ssRequestPathURL     = flag.String("redis.ss.request-path-url", "/v1/completions", "Request path URL")
-	ssInferenceObjective = flag.String("redis.ss.inference-objective", "", "Inference objective header")
-	ssRequestQueueName   = flag.String("redis.ss.request-queue-name", "request-sortedset", "Request sorted set name")
-	ssResultQueueName    = flag.String("redis.ss.result-queue-name", "result-list", "Result list name")
-	ssQueuesConfig       = flag.String("redis.ss.queues-config", "", "Inline JSON queues configuration")
-	ssQueuesConfigFile   = flag.String("redis.ss.queues-config-file", "", "Multiple queues config file")
-	ssPollIntervalMs     = flag.Int("redis.ss.poll-interval-ms", 1000, "Poll interval in milliseconds")
-	ssBatchSize          = flag.Int("redis.ss.batch-size", 10, "Number of messages to process per poll")
-	ssGateType           = flag.String("redis.ss.gate-type", "", "Gate type for single-queue mode (e.g. redis, prometheus-saturation, prometheus-budget)")
-	ssGateParamsJSON     = flag.String("redis.ss.gate-params", "{}", "JSON-encoded gate params map for single-queue mode")
 )
 
 // parseGateParams parses a JSON-encoded string (from --redis.ss.gate-params)
@@ -100,22 +85,24 @@ var (
 )
 
 type RedisSortedSetFlow struct {
-	rdb             *redis.Client
-	requestChannels []requestChannelData
-	retryChannel    chan pipeline.RetryMessage
-	resultChannel   chan api.ResultMessage
-	pollInterval    time.Duration
-	batchSize       int
-	activeReleases  sync.Map
-	gate            pipeline.Gate
-	gateFactory     pipeline.GateFactory
-	configMap       map[string]queueConfig
-	workerPools     []pipeline.WorkerPoolConfig
-	consumeCancel   context.CancelFunc
-	consumeWg       sync.WaitGroup
-	drainCancel     context.CancelFunc
-	drainWg         sync.WaitGroup
-	enableTracing   bool
+	rdb                     *redis.Client
+	requestChannels         []requestChannelData
+	retryChannel            chan pipeline.RetryMessage
+	resultChannel           chan api.ResultMessage
+	pollInterval            time.Duration
+	batchSize               int
+	activeReleases          sync.Map
+	gate                    pipeline.Gate
+	gateFactory             pipeline.GateFactory
+	configMap               map[string]queueConfig
+	defaultRequestQueueName string
+	defaultResultQueueName  string
+	workerPools             []pipeline.WorkerPoolConfig
+	consumeCancel           context.CancelFunc
+	consumeWg               sync.WaitGroup
+	drainCancel             context.CancelFunc
+	drainWg                 sync.WaitGroup
+	enableTracing           bool
 }
 
 // SortedSetOption is a functional option for configuring RedisSortedSetFlow
@@ -143,26 +130,28 @@ func WithSortedSetWorkerPools(workerPools []pipeline.WorkerPoolConfig) SortedSet
 	}
 }
 
-func NewRedisSortedSetFlow(opts ...SortedSetOption) (*RedisSortedSetFlow, error) {
-	configs, err := loadQueueConfigs()
+func NewRedisSortedSetFlow(flowOpts SortedSetFlowOptions, connOpts ConnectionOptions, fns ...SortedSetOption) (*RedisSortedSetFlow, error) {
+	configs, err := loadQueueConfigs(flowOpts)
 	if err != nil {
 		return nil, err
 	}
-	redisOpts, err := RedisOptions()
+	redisOpts, err := ParseRedisOptions(connOpts.URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
 	}
 	r := &RedisSortedSetFlow{
-		rdb:             redis.NewClient(redisOpts),
-		requestChannels: make([]requestChannelData, 0, len(configs)),
-		retryChannel:    make(chan pipeline.RetryMessage),
-		resultChannel:   make(chan api.ResultMessage, resultChannelBuffer),
-		pollInterval:    time.Duration(*ssPollIntervalMs) * time.Millisecond,
-		batchSize:       *ssBatchSize,
+		rdb:                     redis.NewClient(redisOpts),
+		requestChannels:         make([]requestChannelData, 0, len(configs)),
+		retryChannel:            make(chan pipeline.RetryMessage),
+		resultChannel:           make(chan api.ResultMessage, resultChannelBuffer),
+		pollInterval:            time.Duration(flowOpts.PollIntervalMs) * time.Millisecond,
+		batchSize:               flowOpts.BatchSize,
+		defaultRequestQueueName: flowOpts.RequestQueueName,
+		defaultResultQueueName:  flowOpts.ResultQueueName,
 	}
 
-	for _, opt := range opts {
-		opt(r)
+	for _, fn := range fns {
+		fn(r)
 	}
 
 	if r.enableTracing {
@@ -244,16 +233,16 @@ func parseQueueConfigs(data []byte) ([]queueConfig, error) {
 	return configs, nil
 }
 
-func loadQueueConfigs() ([]queueConfig, error) {
+func loadQueueConfigs(opts SortedSetFlowOptions) ([]queueConfig, error) {
 	var configs []queueConfig
-	if *ssQueuesConfig != "" {
+	if opts.QueuesConfig != "" {
 		var err error
-		configs, err = parseQueueConfigs([]byte(*ssQueuesConfig))
+		configs, err = parseQueueConfigs([]byte(opts.QueuesConfig))
 		if err != nil {
 			return nil, err
 		}
-	} else if *ssQueuesConfigFile != "" {
-		data, err := os.ReadFile(*ssQueuesConfigFile)
+	} else if opts.QueuesConfigFile != "" {
+		data, err := os.ReadFile(opts.QueuesConfigFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
@@ -263,12 +252,12 @@ func loadQueueConfigs() ([]queueConfig, error) {
 		}
 	} else {
 		configs = []queueConfig{{
-			QueueName:          *ssRequestQueueName,
-			InferenceObjective: *ssInferenceObjective,
-			IGWBaseURL:         *ssIGWBaseURL,
-			RequestPathURL:     *ssRequestPathURL,
-			GateType:           *ssGateType,
-			GateParams:         parseGateParams(*ssGateParamsJSON),
+			QueueName:          opts.RequestQueueName,
+			InferenceObjective: opts.InferenceObjective,
+			IGWBaseURL:         opts.IGWBaseURL,
+			RequestPathURL:     opts.RequestPathURL,
+			GateType:           opts.GateType,
+			GateParams:         parseGateParams(opts.GateParamsJSON),
 			WorkerPoolID:       "default",
 		}}
 	}
@@ -567,7 +556,7 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 		}
 		queueName := msg.RequestQueueName
 		if queueName == "" {
-			queueName = *ssRequestQueueName
+			queueName = r.defaultRequestQueueName
 		}
 		bytes, err := json.Marshal(msg.InternalRequest)
 		if err != nil {
@@ -630,7 +619,7 @@ func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 
 func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.ResultMessage) {
 	logger := log.FromContext(ctx)
-	defaultQueue := *ssResultQueueName
+	defaultQueue := r.defaultResultQueueName
 	queued := make(map[string][]string)
 	for _, result := range batch {
 		resultQueue := defaultQueue

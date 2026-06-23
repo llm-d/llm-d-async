@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -25,18 +24,7 @@ import (
 
 var pubSubClient *pubsub.Client
 
-var (
-	igwBaseURL          = flag.String("pubsub.igw-base-url", "", "Base URL for IGW. Mutually exclusive with pubsub.topics-config-file flag.")
-	projectID           = flag.String("pubsub.project-id", "", "GCP project ID for PubSub")
-	requestPathURL      = flag.String("pubsub.request-path-url", "/v1/completions", "inference request path url. Mutually exclusive with pubsub.topics-config-file flag.")
-	inferenceObjective  = flag.String("pubsub.inference-objective", "", "inference objective to use in requests. Mutually exclusive with pubsub.topics-config-file flag.")
-	requestSubscriberID = flag.String("pubsub.request-subscriber-id", "", "GCP PubSub request topic subscriber ID. Mutually exclusive with pubsub.topics-config-file flag.")
-	resultTopicID       = flag.String("pubsub.result-topic-id", "", "GCP PubSub topic ID for results")
-	topicsConfigFile    = flag.String("pubsub.topics-config-file", "", "Topics Configuration file. Mutually exclusive with pubsub.igw-base-url, pubsub.request-subscriber-id, pubsub.request-path-url and pubsub.inference-objective flags. See documentation about syntax")
-	batchSize           = flag.Int("pubsub.batch-size", 10, "Number of inflight messages")
-
-	resultChannels sync.Map
-)
+var resultChannels sync.Map
 
 const quotaExceededNackDelay = 10 * time.Second
 
@@ -57,6 +45,7 @@ type PubSubMQFlow struct {
 	requestChannels []RequestChannelData
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
+	batchSize       int
 	gate            pipeline.Gate
 	gateFactory     pipeline.GateFactory
 	workerPools     []pipeline.WorkerPoolConfig
@@ -91,18 +80,18 @@ func WithWorkerPools(workerPools []pipeline.WorkerPoolConfig) PubSubOption {
 	}
 }
 
-func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
+func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) *PubSubMQFlow {
 
 	ctx := context.Background()
 	var err error
-	pubSubClient, err = pubsub.NewClient(ctx, *projectID)
+	pubSubClient, err = pubsub.NewClient(ctx, pubsubOpts.ProjectID)
 	if err != nil {
 		// TODO:
 		panic(err)
 	}
 	var configs []TopicConfig
-	if *topicsConfigFile != "" {
-		data, err := os.ReadFile(*topicsConfigFile)
+	if pubsubOpts.TopicsConfigFile != "" {
+		data, err := os.ReadFile(pubsubOpts.TopicsConfigFile)
 		if err != nil {
 			panic(fmt.Sprintf("failed to read topics config file: %v", err))
 		}
@@ -112,33 +101,30 @@ func NewGCPPubSubMQFlow(opts ...PubSubOption) *PubSubMQFlow {
 		}
 	} else {
 		configs = []TopicConfig{{
-			SubscriberID:       *requestSubscriberID,
+			SubscriberID:       pubsubOpts.RequestSubscriberID,
 			WorkerPoolID:       "default",
-			InferenceObjective: *inferenceObjective,
-			IGWBaseURL:         *igwBaseURL,
-			RequestPathURL:     *requestPathURL,
+			InferenceObjective: pubsubOpts.InferenceObjective,
+			IGWBaseURL:         pubsubOpts.IGWBaseURL,
+			RequestPathURL:     pubsubOpts.RequestPathURL,
 		}}
 	}
 	p := &PubSubMQFlow{
-		resultTopicID:   *resultTopicID,
+		resultTopicID:   pubsubOpts.ResultTopicID,
 		requestChannels: make([]RequestChannelData, 0, len(configs)),
 		retryChannel:    make(chan pipeline.RetryMessage),
 		resultChannel:   make(chan api.ResultMessage),
-		projectID:       *projectID,
+		batchSize:       pubsubOpts.BatchSize,
+		projectID:       pubsubOpts.ProjectID,
 	}
 
-	// Cloud Monitoring client for broker-backlog metrics. Best-effort: if it
-	// can't be created (e.g. missing credentials), backlog reporting is
-	// skipped but the flow still operates normally.
 	if metricClient, mErr := monitoring.NewMetricClient(ctx); mErr != nil {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(mErr, "Failed to create Cloud Monitoring client; broker backlog metrics disabled")
 	} else {
 		p.metricClient = metricClient
 	}
 
-	// Apply functional options
-	for _, opt := range opts {
-		opt(p)
+	for _, fn := range fns {
+		fn(p)
 	}
 
 	// Create per-topic channels with gates
@@ -441,7 +427,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			}
 		}()
 
-		currBatchSize := int(math.Floor(float64(*batchSize) * budget))
+		currBatchSize := int(math.Floor(float64(r.batchSize) * budget))
 		logger.V(logutil.DEFAULT).Info("PubSub MaxOutstandingMessages", "value", currBatchSize)
 		sub.ReceiveSettings.MaxOutstandingMessages = currBatchSize
 		sub.ReceiveSettings.NumGoroutines = 1
