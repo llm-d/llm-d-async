@@ -142,6 +142,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `redis-quota`: Per-attribute quota management via Redis.
 - `local-max-concurrency`: Limits the number of concurrent in-flight requests processed from a queue locally using thread-safe, in-process state.
 - `composite`: Combines multiple gates. Returns the minimum budget across all inner dispatch gates and acquires quota across all inner attribute gates (all or nothing).
+- `wait-on-refuse`: Decorator that wraps a single inner gate and converts any `ActionRefuse` verdict into `ActionWait` (parking/polling in-memory instead of immediate broker redelivery).
 - `prometheus-saturation`: Queries Prometheus for pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
 - `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
 - `prometheus-query`: Evaluates an arbitrary user-supplied PromQL expression as the dispatch budget. The expression must resolve to an instant vector with a single sample whose value is in [0, 1]. Unlike `prometheus-saturation` and `prometheus-budget`, this gate does not construct queries internally — the user provides the complete PromQL expression. Values outside [0, 1] are clamped.
@@ -239,6 +240,9 @@ For more fine-grained control, configure gates per queue in your configuration f
 
 - `composite`:
   - `gates` (**required**): A JSON array of gate configurations. Each configuration is an object with `gate_type` and `gate_params`.
+
+- `wait-on-refuse`:
+  - `gate` (**required**): A JSON string containing a single gate configuration (with `gate_type` and `gate_params`) to wrap. This can be used to wrap prometheus gates in pool configuration so that they park requests instead of redelivering them to the message broker when the gate is saturated.
 
 - `redis`:
   - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.
