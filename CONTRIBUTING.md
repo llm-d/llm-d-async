@@ -139,6 +139,16 @@ git push origin v0.8.0
 
 Go requires sub-module tags to carry the directory prefix — see [Managing module source](https://go.dev/doc/modules/managing-source) for details.
 
+## Go Conventions
+
+These conventions are enforced by linters where possible (see `.golangci.yml`) and by code review otherwise.
+
+1. **No mutable package globals.** Use unexported state with constructors and accessors. Exceptions: Prometheus metric registrations (`pkg/metrics/`) and build-time version vars (`pkg/version/`).
+2. **Compile-time interface assertions.** Every interface implementation (and test fake) must include `var _ Interface = (*Impl)(nil)` to catch breakage at compile time, not at runtime.
+3. **Wrap errors with context.** When returning an error from an external package, wrap it: `fmt.Errorf("doing X: %w", err)`. This makes logs actionable.
+4. **YAGNI.** Don't add exported functions, methods, or types without a caller in this repo. Unused API surface is maintenance burden.
+5. **Porting rule.** When adapting code from EPP or another repo, strip it to what is actually called and re-fit it to local idioms before opening the PR.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for our vulnerability disclosure process.
