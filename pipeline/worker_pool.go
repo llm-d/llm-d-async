@@ -16,7 +16,7 @@ type WorkerPoolConfig struct {
 // LoadWorkerPools loads and validates worker pool configurations from a JSON file.
 // It ensures that all pool IDs are non-empty and unique.
 func LoadWorkerPools(path string) ([]WorkerPoolConfig, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path from trusted config flag
+	data, err := os.ReadFile(path) // #nosec G304 -- path from trusted config flag
 	if err != nil {
 		return nil, fmt.Errorf("failed to read pool config file: %w", err)
 	}
