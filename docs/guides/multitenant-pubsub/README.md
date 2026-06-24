@@ -4,6 +4,11 @@ A runnable guide for the [Async Processor](../../../charts/async-processor) over
 three teams, each with its own subscription, worker pool, **per-team quota**, and **priority tier**,
 observed through either **GCP Cloud Monitoring** or a **self-hosted Prometheus + Grafana** stack.
 
+![Animated architecture: per-team messages flow through quota + saturation gates; under load the batch gate closes and its backlog grows while premium keeps flowing](diagram/architecture.gif)
+
+> The loop above shows the priority-under-saturation story. Source + regeneration:
+> [`diagram/`](diagram/) (`architecture.html` is the editable animated SVG).
+
 ## What it shows
 
 | Team / tier | Subscription | Workers | Saturation tolerance | Per-team quota | `inference_objective` |

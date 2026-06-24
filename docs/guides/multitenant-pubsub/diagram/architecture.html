@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>llm-d Async Processor — Multi-tenant Pub/Sub demo</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#121a2e; --panel2:#0f1730; --stroke:#2a3a5e;
+    --ink:#e6edf7; --muted:#8aa0c6;
+    --premium:#8b7bff; --standard:#2dd4bf; --batch:#f5a623;
+    --ok:#37d67a; --bad:#ff5d6c; --warn:#ffcc4d;
+    /* one shared loop period — every timed effect uses this so they stay in sync */
+    --loop:12s;
+  }
+  html,body{margin:0;background:radial-gradient(1200px 700px at 30% 10%, #131d38 0%, var(--bg) 60%);}
+  .wrap{width:1280px;height:760px;margin:0 auto;font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;}
+  text{fill:var(--ink);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;}
+  .title{font-size:26px;font-weight:700;letter-spacing:.3px;}
+  .sub{font-size:13px;fill:var(--muted);}
+  .lbl{font-size:13px;}
+  .small{font-size:11px;fill:var(--muted);}
+  .node{fill:var(--panel);stroke:var(--stroke);stroke-width:1.5;rx:12;filter:url(#soft);}
+  .edge{fill:none;stroke:#3a4f7d;stroke-width:2;}
+  .edge.dim{stroke:#2a3a5e;stroke-dasharray:5 6;}
+  .tag{font-size:11px;fill:var(--muted);}
+
+  /* ---- flowing message dots ---- */
+  .dot{filter:url(#glow);}
+  .dot.premium{fill:var(--premium);} .dot.standard{fill:var(--standard);} .dot.batch{fill:var(--batch);}
+
+  /* batch flow halts while its gate is closed (synced to the loop) */
+  @keyframes batchFlow{
+    0%,33%{opacity:1} 38%,72%{opacity:0} 77%,100%{opacity:1}
+  }
+  .batchdot{animation:batchFlow var(--loop) linear infinite;}
+
+  /* standard partially throttles */
+  @keyframes stdFlow{0%,40%{opacity:1} 50%,66%{opacity:.15} 74%,100%{opacity:1}}
+  .stddot{animation:stdFlow var(--loop) linear infinite;}
+
+  /* ---- gate state: open(green) -> closed(red) on the same timeline ---- */
+  @keyframes gateBatch{0%,33%{fill:var(--ok)}38%,72%{fill:var(--bad)}77%,100%{fill:var(--ok)}}
+  @keyframes gateStd{0%,40%{fill:var(--ok)}50%,66%{fill:var(--warn)}74%,100%{fill:var(--ok)}}
+  .gate-batch{animation:gateBatch var(--loop) steps(1) infinite;}
+  .gate-std{animation:gateStd var(--loop) steps(1) infinite;}
+  @keyframes gateBatchTxt{0%,33%{opacity:0}38%,72%{opacity:1}77%,100%{opacity:0}}
+  .gate-batch-closed{animation:gateBatchTxt var(--loop) steps(1) infinite;}
+
+  /* ---- vLLM saturation meter fills, then drains ---- */
+  @keyframes sat{0%{height:6px;fill:var(--ok)}33%{height:78px;fill:var(--warn)}
+                 55%{height:120px;fill:var(--bad)}80%{height:40px;fill:var(--warn)}100%{height:6px;fill:var(--ok)}}
+  .satbar{animation:sat var(--loop) ease-in-out infinite;}
+
+  /* ---- batch backlog bar grows while throttled ---- */
+  @keyframes backlog{0%,33%{height:0px}55%{height:96px}72%{height:96px}90%,100%{height:0px}}
+  .backlogbar{animation:backlog var(--loop) ease-in-out infinite;}
+  @keyframes quotaPulse{0%,33%{opacity:.25}40%,72%{opacity:1}80%,100%{opacity:.25}}
+  .quota-hot{animation:quotaPulse var(--loop) ease-in-out infinite;}
+
+  .flowline{stroke-dasharray:4 8;animation:dash 1.2s linear infinite;}
+  @keyframes dash{to{stroke-dashoffset:-24}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<svg viewBox="0 0 1280 760" width="1280" height="760" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <defs>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5570a8"/></marker>
+
+    <!-- lane motion paths: publisher -> topic -> sub -> pool -> gate -> converge -> gateway -> vLLM -->
+    <path id="laneP" d="M150,170 H250 H410 H560 H705 C820,170 820,360 905,360 H1085" />
+    <path id="laneS" d="M150,360 H250 H410 H560 H705 H905 H1085" />
+    <path id="laneB" d="M150,560 H250 H410 H560 H705 C820,560 820,360 905,360 H1085" />
+  </defs>
+
+  <!-- header -->
+  <text class="title" x="40" y="48">llm-d Async Processor — multi-tenant Pub/Sub</text>
+  <text class="sub" x="40" y="70">per-team subscriptions · worker pools · quota + saturation gates · priority under load</text>
+
+  <!-- visible connectors (under the dots) -->
+  <use href="#laneP" class="edge"/>
+  <use href="#laneS" class="edge"/>
+  <use href="#laneB" class="edge"/>
+
+  <!-- ===================== PUBLISHERS ===================== -->
+  <g>
+    <rect class="node" x="30" y="142" width="120" height="56"/>
+    <text class="lbl" x="44" y="166" style="fill:var(--premium)">premium</text>
+    <text class="small" x="44" y="184">publisher</text>
+
+    <rect class="node" x="30" y="332" width="120" height="56"/>
+    <text class="lbl" x="44" y="356" style="fill:var(--standard)">standard</text>
+    <text class="small" x="44" y="374">publisher</text>
+
+    <rect class="node" x="30" y="532" width="120" height="56"/>
+    <text class="lbl" x="44" y="556" style="fill:var(--batch)">batch</text>
+    <text class="small" x="44" y="574">publisher</text>
+  </g>
+
+  <!-- ===================== PUB/SUB TOPICS ===================== -->
+  <g>
+    <text class="tag" x="250" y="120">GCP Pub/Sub</text>
+    <rect class="node" x="250" y="148" width="120" height="44"/><text class="small" x="262" y="174">team-premium ▸</text>
+    <rect class="node" x="250" y="338" width="120" height="44"/><text class="small" x="262" y="364">team-standard ▸</text>
+    <rect class="node" x="250" y="538" width="120" height="44"/><text class="small" x="262" y="564">team-batch ▸</text>
+    <text class="small" x="250" y="612" style="fill:var(--muted)">attr: team=&lt;tier&gt;</text>
+  </g>
+
+  <!-- ===================== ASYNC PROCESSOR ===================== -->
+  <rect x="392" y="96" width="470" height="556" rx="16" fill="var(--panel2)" stroke="var(--stroke)" stroke-width="1.5"/>
+  <text class="tag" x="408" y="120" style="fill:var(--ink)">Async Processor  ·  gcp-pubsub-gated</text>
+
+  <!-- subscriptions -->
+  <rect class="node" x="408" y="150" width="96" height="40"/><text class="small" x="420" y="174">sub</text>
+  <rect class="node" x="408" y="340" width="96" height="40"/><text class="small" x="420" y="364">sub</text>
+  <rect class="node" x="408" y="540" width="96" height="40"/><text class="small" x="420" y="564">sub</text>
+
+  <!-- worker pools -->
+  <rect class="node" x="540" y="146" width="120" height="48"/><text class="small" x="552" y="166">worker pool</text><text class="lbl" x="552" y="184" style="fill:var(--premium)">16 workers</text>
+  <rect class="node" x="540" y="336" width="120" height="48"/><text class="small" x="552" y="356">worker pool</text><text class="lbl" x="552" y="374" style="fill:var(--standard)">8 workers</text>
+  <rect class="node" x="540" y="536" width="120" height="48"/><text class="small" x="552" y="556">worker pool</text><text class="lbl" x="552" y="574" style="fill:var(--batch)">4 workers</text>
+
+  <!-- gates (hero) -->
+  <g>
+    <rect class="node" x="690" y="146" width="120" height="48"/>
+    <circle cx="708" cy="170" r="7" fill="var(--ok)"/><text class="small" x="724" y="166">gate</text><text class="small" x="724" y="182" style="fill:var(--ok)">OPEN</text>
+  </g>
+  <g>
+    <rect class="node" x="690" y="336" width="120" height="48"/>
+    <circle cx="708" cy="360" r="7" class="gate-std"/><text class="small" x="724" y="356">gate · quota 20</text><text class="small" x="724" y="372">+ saturation</text>
+  </g>
+  <g>
+    <rect class="node" x="690" y="536" width="120" height="48"/>
+    <circle cx="708" cy="560" r="7" class="gate-batch"/><text class="small" x="724" y="556">gate · quota 2</text>
+    <text class="small gate-batch-closed" x="724" y="572" style="fill:var(--bad)">CLOSED ✕</text>
+  </g>
+
+  <!-- batch backlog bar (grows while throttled) -->
+  <rect x="470" y="500" width="14" height="0" rx="3" fill="var(--bad)" class="backlogbar" transform="scale(1,-1)" transform-origin="470 590"/>
+  <text class="small" x="430" y="606" style="fill:var(--bad)">backlog ▲</text>
+
+  <!-- ===================== SIDE INPUTS: Redis (quota) & Prometheus (saturation) ===================== -->
+  <rect class="node" x="690" y="648" width="120" height="44"/><text class="small" x="702" y="668">Redis</text><text class="small" x="702" y="684" style="fill:var(--muted)">quota counters</text>
+  <path class="edge flowline" d="M750,648 V592" marker-end="url(#arrow)"/>
+  <circle cx="769" cy="676" r="6" fill="var(--batch)" class="quota-hot"/><text class="small quota-hot" x="780" y="680" style="fill:var(--batch)">team=batch ≥ 2</text>
+
+  <rect class="node" x="900" y="36" width="184" height="44"/><text class="small" x="914" y="56">Prometheus / GMP</text><text class="small" x="914" y="72" style="fill:var(--muted)">vllm:num_requests_running</text>
+  <path class="edge flowline" d="M960,80 C910,120 858,124 814,156" marker-end="url(#arrow)"/>
+  <text class="small" x="828" y="120" style="fill:var(--muted)">saturation</text>
+
+  <!-- ===================== GATEWAY + vLLM ===================== -->
+  <rect class="node" x="905" y="330" width="120" height="60"/><text class="small" x="918" y="356">Inference</text><text class="small" x="918" y="372">Gateway · EPP</text>
+
+  <rect class="node" x="1085" y="300" width="150" height="120"/>
+  <text class="small" x="1100" y="324">vLLM</text>
+  <text class="small" x="1100" y="340" style="fill:var(--muted)">Llama-3.1-8B</text>
+  <!-- saturation meter -->
+  <rect x="1190" y="316" width="22" height="92" rx="4" fill="#0b1226" stroke="var(--stroke)"/>
+  <rect x="1190" y="408" width="22" height="6" rx="3" class="satbar" transform="scale(1,-1)" transform-origin="1190 408"/>
+  <text class="small" x="1100" y="404" style="fill:var(--muted)">saturation</text>
+  <!-- vLLM feeds Prometheus -->
+  <path class="edge dim" d="M1150,300 C1150,170 1080,110 1010,82" marker-end="url(#arrow)"/>
+
+  <!-- ===================== RESULTS RETURN + OBSERVABILITY ===================== -->
+  <path class="edge dim" d="M1160,420 C1160,720 720,720 380,720" marker-end="url(#arrow)"/>
+  <rect class="node" x="250" y="700" width="120" height="40"/><text class="small" x="262" y="724">results ▸ consumers</text>
+
+  <rect class="node" x="1085" y="650" width="150" height="50"/><text class="small" x="1098" y="672">Grafana /</text><text class="small" x="1098" y="688">Cloud Monitoring</text>
+  <path class="edge dim" d="M862,640 C980,660 1010,668 1085,672"/>
+
+  <!-- ===================== FLOWING MESSAGE DOTS ===================== -->
+  <!-- premium: never throttled -->
+  <g class="dot premium">
+    <circle r="5"><animateMotion dur="3s" begin="0s"   repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
+    <circle r="5"><animateMotion dur="3s" begin="1s"   repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
+    <circle r="5"><animateMotion dur="3s" begin="2s"   repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
+  </g>
+  <!-- standard: dims during throttle -->
+  <g class="dot standard">
+    <circle r="5" class="stddot"><animateMotion dur="3s" begin="0.4s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
+    <circle r="5" class="stddot"><animateMotion dur="3s" begin="1.5s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
+    <circle r="5" class="stddot"><animateMotion dur="3s" begin="2.6s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
+  </g>
+  <!-- batch: halts at the gate during throttle (dots fade) -->
+  <g class="dot batch">
+    <circle r="5" class="batchdot"><animateMotion dur="3s" begin="0.2s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
+    <circle r="5" class="batchdot"><animateMotion dur="3s" begin="1.3s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
+    <circle r="5" class="batchdot"><animateMotion dur="3s" begin="2.4s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
+  </g>
+
+  <!-- legend -->
+  <g transform="translate(40,716)">
+    <circle cx="6" cy="-4" r="5" fill="var(--premium)"/><text class="small" x="18" y="0">premium</text>
+    <circle cx="96" cy="-4" r="5" fill="var(--standard)"/><text class="small" x="108" y="0">standard</text>
+    <circle cx="186" cy="-4" r="5" fill="var(--batch)"/><text class="small" x="198" y="0">batch</text>
+  </g>
+</svg>
+</div>
+</body>
+</html>
