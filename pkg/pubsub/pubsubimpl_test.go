@@ -145,7 +145,7 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 
 	baseOpts := Options{ProjectID: "test-project"}
 
-	// Case 1: worker_pool_id is missing, and pool "default" does not exist (so it defaults to "default" and panics because not found)
+	// Case 1: worker_pool_id is missing, and pool "default" does not exist
 	missingPoolConfig := `[{"subscriber_id":"sub-1","inference_objective":"obj","igw_base_url":"http://gw"}]`
 	if err := os.WriteFile(tmpFile.Name(), []byte(missingPoolConfig), 0644); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
@@ -153,19 +153,10 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	opts := baseOpts
 	opts.TopicsConfigFile = tmpFile.Name()
 
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("Expected panic when worker_pool_id is missing and 'default' pool does not exist, got none")
-			} else {
-				msg, ok := r.(string)
-				if !ok || !strings.Contains(msg, "not found in pool configuration") {
-					t.Errorf("Unexpected panic message for missing worker_pool_id: %v", r)
-				}
-			}
-		}()
-		NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
-	}()
+	_, err = NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err == nil || !strings.Contains(err.Error(), "not found in pool configuration") {
+		t.Errorf("Expected error about missing pool, got: %v", err)
+	}
 
 	// Case 5: worker_pool_id is missing, but only a single 'default' pool is specified
 	if err := os.WriteFile(tmpFile.Name(), []byte(missingPoolConfig), 0644); err != nil {
@@ -174,14 +165,10 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	opts = baseOpts
 	opts.TopicsConfigFile = tmpFile.Name()
 
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("Unexpected panic when worker_pool_id is missing but default pool exists: %v", r)
-			}
-		}()
-		NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
-	}()
+	_, err = NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
+	if err != nil {
+		t.Errorf("Unexpected error when worker_pool_id is missing but default pool exists: %v", err)
+	}
 
 	// Case 6: worker_pool_id is specified as custom, but only a single 'default' pool is specified
 	customPoolConfig := `[{"subscriber_id":"sub-1","worker_pool_id":"custom-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
@@ -191,14 +178,10 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	opts = baseOpts
 	opts.TopicsConfigFile = tmpFile.Name()
 
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("Expected panic when worker_pool_id is custom but only default pool exists, got nil")
-			}
-		}()
-		NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
-	}()
+	_, err = NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}))
+	if err == nil {
+		t.Error("Expected error when worker_pool_id is custom but only default pool exists")
+	}
 
 	// Case 2: worker_pool_id specified but pool does not exist
 	nonExistentPoolConfig := `[{"subscriber_id":"sub-1","worker_pool_id":"non-existent","inference_objective":"obj","igw_base_url":"http://gw"}]`
@@ -208,19 +191,10 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	opts = baseOpts
 	opts.TopicsConfigFile = tmpFile.Name()
 
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("Expected panic when specified worker_pool_id does not exist, got none")
-			} else {
-				msg, ok := r.(string)
-				if !ok || !strings.Contains(msg, "not found in pool configuration") {
-					t.Errorf("Unexpected panic message for non-existent worker_pool_id: %v", r)
-				}
-			}
-		}()
-		NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
-	}()
+	_, err = NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err == nil || !strings.Contains(err.Error(), "not found in pool configuration") {
+		t.Errorf("Expected error about missing pool, got: %v", err)
+	}
 
 	// Case 3: worker_pool_id specified and pool exists, but igw_base_url is missing
 	missingIgwConfig := `[{"subscriber_id":"sub-1","worker_pool_id":"test-pool","inference_objective":"obj"}]`
@@ -230,19 +204,10 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	opts = baseOpts
 	opts.TopicsConfigFile = tmpFile.Name()
 
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("Expected panic when igw_base_url is missing in config, got none")
-			} else {
-				msg, ok := r.(string)
-				if !ok || !strings.Contains(msg, "igw_base_url must be specified") {
-					t.Errorf("Unexpected panic message for missing igw_base_url: %v", r)
-				}
-			}
-		}()
-		NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
-	}()
+	_, err = NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err == nil || !strings.Contains(err.Error(), "igw_base_url must be specified") {
+		t.Errorf("Expected error about missing igw_base_url, got: %v", err)
+	}
 
 	// Case 4: worker_pool_id and igw_base_url specified and pool exists
 	validConfig := `[{"subscriber_id":"sub-1","worker_pool_id":"test-pool","inference_objective":"obj","igw_base_url":"http://gw"}]`
@@ -252,12 +217,8 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	opts = baseOpts
 	opts.TopicsConfigFile = tmpFile.Name()
 
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("Unexpected panic when worker_pool_id and igw_base_url exist: %v", r)
-			}
-		}()
-		NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
-	}()
+	_, err = NewGCPPubSubMQFlow(opts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
+	if err != nil {
+		t.Errorf("Unexpected error when worker_pool_id and igw_base_url exist: %v", err)
+	}
 }

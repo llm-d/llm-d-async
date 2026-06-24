@@ -115,9 +115,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		impl = flow
 		setupLog.Info("Using Redis sorted-set flow with per-queue gating")
 	case "gcp-pubsub":
-		impl = pubsub.NewGCPPubSubMQFlow(opts.PubSub, pubsub.WithWorkerPools(workerPools))
+		flow, err := pubsub.NewGCPPubSubMQFlow(opts.PubSub, pubsub.WithWorkerPools(workerPools))
+		if err != nil {
+			setupLog.Error(err, "Failed to create GCP PubSub flow")
+			return err
+		}
+		impl = flow
 	case "gcp-pubsub-gated":
-		impl = pubsub.NewGCPPubSubMQFlow(opts.PubSub, pubsub.WithGateFactory(gateFactory), pubsub.WithWorkerPools(workerPools))
+		flow, err := pubsub.NewGCPPubSubMQFlow(opts.PubSub, pubsub.WithGateFactory(gateFactory), pubsub.WithWorkerPools(workerPools))
+		if err != nil {
+			setupLog.Error(err, "Failed to create GCP PubSub gated flow")
+			return err
+		}
+		impl = flow
 		setupLog.Info("Using GCP PubSub flow with per-queue gating")
 	default:
 		return fmt.Errorf("unknown message queue implementation: %s", opts.Queue.Impl)
@@ -272,7 +282,7 @@ func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	}
 
 	if (cfg.Cert != "") != (cfg.Key != "") {
-		return nil, fmt.Errorf("both tls-cert and tls-key must be provided together")
+		return nil, fmt.Errorf("both --tls-cert and --tls-key must be provided together")
 	}
 
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec
@@ -333,10 +343,18 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 	}
 }
 
+var sensitiveFlags = map[string]bool{
+	"redis.url": true,
+}
+
 func printAllFlags(setupLog logr.Logger) {
 	flags := make(map[string]any)
 	pflag.VisitAll(func(f *pflag.Flag) {
-		flags[f.Name] = f.Value
+		if sensitiveFlags[f.Name] {
+			flags[f.Name] = "REDACTED"
+		} else {
+			flags[f.Name] = f.Value
+		}
 	})
 	setupLog.Info("Flags processed", "flags", flags)
 }

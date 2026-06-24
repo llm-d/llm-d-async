@@ -80,24 +80,23 @@ func WithWorkerPools(workerPools []pipeline.WorkerPoolConfig) PubSubOption {
 	}
 }
 
-func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) *PubSubMQFlow {
+func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) (*PubSubMQFlow, error) {
 
 	ctx := context.Background()
 	var err error
 	pubSubClient, err = pubsub.NewClient(ctx, pubsubOpts.ProjectID)
 	if err != nil {
-		// TODO:
-		panic(err)
+		return nil, fmt.Errorf("failed to create PubSub client: %w", err)
 	}
 	var configs []TopicConfig
 	if pubsubOpts.TopicsConfigFile != "" {
 		data, err := os.ReadFile(pubsubOpts.TopicsConfigFile)
 		if err != nil {
-			panic(fmt.Sprintf("failed to read topics config file: %v", err))
+			return nil, fmt.Errorf("failed to read topics config file: %w", err)
 		}
 
 		if err := json.Unmarshal(data, &configs); err != nil {
-			panic(fmt.Sprintf("failed to unmarshal topics config: %v", err))
+			return nil, fmt.Errorf("failed to unmarshal topics config: %w", err)
 		}
 	} else {
 		configs = []TopicConfig{{
@@ -142,11 +141,11 @@ func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) *PubSubMQFlow {
 			}
 		}
 		if !found {
-			panic(fmt.Sprintf("worker pool %q specified in topic config not found in pool configuration", workerPoolID))
+			return nil, fmt.Errorf("worker pool %q specified in topic config not found in pool configuration", workerPoolID)
 		}
 
 		if cfg.IGWBaseURL == "" {
-			panic(fmt.Sprintf("topic config for subscriber %q: igw_base_url must be specified", cfg.SubscriberID))
+			return nil, fmt.Errorf("topic config for subscriber %q: igw_base_url must be specified", cfg.SubscriberID)
 		}
 
 		reqPath := cfg.RequestPathURL
@@ -158,10 +157,9 @@ func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) *PubSubMQFlow {
 		var gate pipeline.Gate
 		if p.gateFactory != nil && cfg.GateType != "" {
 			// Use factory to create per-topic gate
-			var err error
 			gate, err = p.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
 			if err != nil {
-				panic(fmt.Sprintf("failed to create gate for topic subscriber %q (gate_type=%q): %v", cfg.SubscriberID, cfg.GateType, err))
+				return nil, fmt.Errorf("failed to create gate for topic subscriber %q (gate_type=%q): %w", cfg.SubscriberID, cfg.GateType, err)
 			}
 		} else if p.gate != nil {
 			// Fall back to global gate if provided
@@ -191,7 +189,7 @@ func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) *PubSubMQFlow {
 		p.gate = pipeline.ConstOpenGate()
 	}
 
-	return p
+	return p, nil
 }
 
 func (r *PubSubMQFlow) RetryChannel() chan pipeline.RetryMessage {
