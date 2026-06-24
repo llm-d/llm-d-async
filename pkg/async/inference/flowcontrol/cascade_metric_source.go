@@ -52,8 +52,8 @@ func (c *CascadeMetricSource) Query(ctx context.Context) ([]Sample, error) {
 	for i, s := range c.sources {
 		samples, err := s.Query(ctx)
 		if err == nil && len(samples) > 0 {
-			prev := c.activeIndex.Swap(int32(i))
-			if int32(i) != prev {
+			prev := c.activeIndex.Swap(int32(i)) //nolint:gosec // i bounded by len(c.sources)
+			if int32(i) != prev {                //nolint:gosec // same as above
 				if i == 0 {
 					logger.V(logutil.DEFAULT).Info("primary metric source recovered")
 				} else {
