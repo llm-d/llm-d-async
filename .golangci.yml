@@ -4,9 +4,11 @@ linters:
   enable:
     - depguard
     - errcheck
+    - gochecknoglobals
     - govet
     - staticcheck
     - unused
+    - wrapcheck
   settings:
     depguard:
       rules:
@@ -23,3 +25,40 @@ linters:
         - (io.ReadCloser).Close
         - (*net.TCPListener).Close
         - (net.Conn).Close
+  exclusions:
+    rules:
+      # Prometheus metrics are idiomatically registered as package-level vars.
+      - path: pkg/metrics/
+        linters: [gochecknoglobals]
+      # Build-time version vars injected via -ldflags.
+      - path: pkg/version/
+        linters: [gochecknoglobals]
+      # Existing package-level state predating gochecknoglobals.
+      - path: pkg/async/inference/flowcontrol/binary_metric_dispatch_gate\.go
+        linters: [gochecknoglobals]
+      - path: pkg/plugins/registry\.go
+        linters: [gochecknoglobals]
+      - path: pkg/pubsub/pubsubimpl\.go
+        linters: [gochecknoglobals]
+      - path: pkg/redis/redisimpl\.go
+        linters: [gochecknoglobals]
+      - path: pkg/server/(options|runner)\.go
+        linters: [gochecknoglobals]
+      # Existing unwrapped errors predating wrapcheck.
+      - path: internal/health/
+        linters: [wrapcheck]
+      - path: internal/logging/
+        linters: [wrapcheck]
+      - path: internal/otel/
+        linters: [wrapcheck]
+      - path: pkg/async/inference/flowcontrol/composite_gate\.go
+        linters: [wrapcheck]
+      - path: pkg/asyncworker/transform/gcsmultipart/
+        linters: [wrapcheck]
+      - path: pkg/redis/(quota_gate|redisimpl|sortedset_impl)\.go
+        linters: [wrapcheck]
+      - path: pkg/server/runner\.go
+        linters: [wrapcheck]
+      # Test files — enforce conventions on production code first.
+      - path: _test\.go
+        linters: [gochecknoglobals, wrapcheck]
