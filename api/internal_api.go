@@ -76,6 +76,17 @@ func (r *InternalRequest) RollbackReleases(snapshot int) {
 	r.releases = r.releases[:snapshot]
 }
 
+// CloneWithoutReleases returns a shallow copy of the InternalRequest with a clean releases slice.
+func (r *InternalRequest) CloneWithoutReleases() *InternalRequest {
+	if r == nil {
+		return nil
+	}
+	copyReq := *r
+	copyReq.releases = nil
+	return &copyReq
+}
+
+
 // NewInternalRequest returns an InternalRequest with a non-nil PublicRequest.
 // routing fields may be zero; PublicRequest must be non-nil.
 func NewInternalRequest(routing InternalRouting, typedReq Request) *InternalRequest {
