@@ -123,7 +123,7 @@ func TestProcessMessages_QuotaGating(t *testing.T) {
 				}
 			}()
 
-			_ = flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, gate)
+			_ = flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, gate, nil)
 		})
 	}
 }
@@ -223,4 +223,69 @@ func TestNewGCPPubSubMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected error when worker_pool_id and igw_base_url exist: %v", err)
 	}
+}
+
+func (m *mockAttributeGate) Release(ctx context.Context, msg *api.InternalRequest) error { return nil }
+
+func TestProcessMessages_LabelsPropagation(t *testing.T) {
+	flow := &PubSubMQFlow{
+		resultChannel: make(chan api.ResultMessage, 10),
+	}
+	ch := make(chan *api.InternalRequest, 10)
+	gate := &mockAttributeGate{allowed: true}
+
+	msgData, _ := json.Marshal(api.RequestMessage{ID: "test-msg"})
+	receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
+		msg := &pubsub.Message{
+			ID:   "msg-1",
+			Data: msgData,
+		}
+		f(ctx, msg)
+		return nil
+	}
+
+	labels := map[string]string{
+		"env":     "prod",
+		"version": "1.2.3",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Spin up a goroutine to capture the request and unblock processMessages
+	var receivedIR *api.InternalRequest
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case ir := <-ch:
+			receivedIR = ir
+			// Unblock processMessages
+			pubsubID := ir.TransportCorrelationID
+			if val, ok := resultChannels.Load(pubsubID); ok {
+				resCh := val.(chan bool)
+				resCh <- true
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	// We wrap in a recover to catch panics from Ack/Nack on uninitialized messages,
+	// which is expected because we don't fully mock pubsub.Message.
+	defer func() {
+		_ = recover()
+		// After recover, check the captured request
+		if receivedIR == nil {
+			t.Fatal("expected a request to be received, got nil")
+		}
+		if receivedIR.Labels == nil {
+			t.Fatal("expected labels, got nil")
+		}
+		if receivedIR.Labels["env"] != "prod" || receivedIR.Labels["version"] != "1.2.3" {
+			t.Fatalf("unexpected labels: %v", receivedIR.Labels)
+		}
+	}()
+
+	_ = flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, gate, labels)
+	<-done
 }

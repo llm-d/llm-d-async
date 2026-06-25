@@ -45,7 +45,7 @@ func (m *mockGate) Apply(ctx context.Context, msg *api.InternalRequest, releases
 		return pipeline.Verdict{}, m.err
 	}
 	if m.classification != "" {
-		msg.Classification = m.classification
+		msg.SetClassification(m.classification)
 	}
 	if m.verdict.Action != pipeline.ActionContinue {
 		return m.verdict, nil

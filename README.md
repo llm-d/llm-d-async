@@ -618,7 +618,11 @@ The configuration file when using the `redis.queues-config-file` flag should hav
        "igw_base_url": "http://localhost:30800",
        "worker_pool_id": "qwen-pool",
        "inference_objective": "some_inference_objective",
-       "request_path_url": "/v1/completions"
+       "request_path_url": "/v1/completions",
+       "labels": {
+          "env": "prod",
+          "team": "billing"
+       }
     },
     {
        "queue_name": "another_queue",
@@ -639,6 +643,7 @@ The configuration file when using the `redis.queues-config-file` flag should hav
 - `inference_objective`: The inference objective header value.
 - `igw_base_url` (required): Base URL of the inference gateway or target model server for this queue.
 - `request_path_url` (optional): Request path URL (e.g. `/v1/chat/completions`) for this queue.
+- `labels` (optional): A map of key-value string pairs injected as routing metadata (`Labels`) into the `InternalRequest` envelope at ingestion/pull time.
 
 ### GCP Pub/Sub
 
@@ -678,7 +683,11 @@ The configuration file when using the `pubsub.topics-config-file` flag should ha
        "igw_base_url": "http://localhost:80/",
        "request_path_url": "/v1/completions",
        "gate_type": "constant",
-       "gate_params": {}
+       "gate_params": {},
+       "labels": {
+          "env": "prod",
+          "team": "billing"
+       }
     },
     {
        "subscriber_id": "another_subscriber",
@@ -704,6 +713,7 @@ The configuration file when using the `pubsub.topics-config-file` flag should ha
 - `request_path_url` (required): Request path URL (e.g. `/v1/chat/completions`) for this topic.
 - `gate_type`: Required type of dispatch gate for this topic.
 - `gate_params` (optional): Parameters for the gate type (e.g., pool name, threshold for prometheus gates).
+- `labels` (optional): A map of key-value string pairs injected as routing metadata (`Labels`) into the `InternalRequest` envelope at ingestion/pull time.
 
 ## Development
 

@@ -61,15 +61,16 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 }
 
 type queueConfig struct {
-	ID                 string    `json:"id,omitempty"`
-	QueueName          string    `json:"queue_name,omitempty"`
-	ResultQueueName    string    `json:"result_queue_name,omitempty"`
-	WorkerPoolID       string    `json:"worker_pool_id"`
-	InferenceObjective string    `json:"inference_objective"`
-	RequestPathURL     string    `json:"request_path_url"`
-	IGWBaseURL         string    `json:"igw_base_url"`
-	GateType           string    `json:"gate_type"`
-	GateParams         StringMap `json:"gate_params,omitempty"`
+	ID                 string            `json:"id,omitempty"`
+	QueueName          string            `json:"queue_name,omitempty"`
+	ResultQueueName    string            `json:"result_queue_name,omitempty"`
+	WorkerPoolID       string            `json:"worker_pool_id"`
+	InferenceObjective string            `json:"inference_objective"`
+	RequestPathURL     string            `json:"request_path_url"`
+	IGWBaseURL         string            `json:"igw_base_url"`
+	GateType           string            `json:"gate_type"`
+	GateParams         StringMap         `json:"gate_params,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
 }
 
 type requestChannelData struct {
@@ -437,6 +438,14 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 		if ir.QueueID == "" {
 			ir.QueueID = queueID
+		}
+		if cfg, ok := r.configMap[queueID]; ok && len(cfg.Labels) > 0 {
+			if ir.Labels == nil {
+				ir.Labels = make(map[string]string, len(cfg.Labels))
+			}
+			for k, v := range cfg.Labels {
+				ir.Labels[k] = v
+			}
 		}
 
 		// Apply gate

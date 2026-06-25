@@ -541,7 +541,7 @@ func TestRequestWorker_ReconnectsAfterChannelClose(t *testing.T) {
 	queueName := "reconnect-test-queue"
 	msgChannel := make(chan *api.InternalRequest, 10)
 
-	go requestWorker(ctx, rdb, msgChannel, queueName)
+	go requestWorker(ctx, rdb, msgChannel, queueName, nil)
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -786,5 +786,48 @@ func TestNewRedisMQFlow_PoolRequiredAndValidation(t *testing.T) {
 	_, err = NewRedisMQFlow(opts, connOpts, WithWorkerPools([]pipeline.WorkerPoolConfig{{ID: "test-pool", Workers: 1}}))
 	if err != nil {
 		t.Errorf("Unexpected error when worker_pool_id exists: %v", err)
+	}
+}
+
+func TestRedisMQFlow_QueueLabels(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer rdb.Close() // nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	queueName := "labels-test-queue"
+	msgChannel := make(chan *api.InternalRequest, 10)
+	labels := map[string]string{
+		"foo": "bar",
+		"abc": "xyz",
+	}
+
+	go requestWorker(ctx, rdb, msgChannel, queueName, labels)
+
+	time.Sleep(100 * time.Millisecond)
+
+	ir := api.NewInternalRequest(
+		api.InternalRouting{},
+		&api.RequestMessage{ID: "msg-with-labels", Created: time.Now().Unix(), Deadline: time.Now().Unix() + 3600},
+	)
+	bytes, _ := json.Marshal(ir)
+	rdb.Publish(ctx, queueName, string(bytes))
+
+	select {
+	case msg := <-msgChannel:
+		if msg.PublicRequest == nil || msg.PublicRequest.ReqID() != "msg-with-labels" {
+			t.Fatalf("expected msg-with-labels, got %v", msg)
+		}
+		if msg.Labels == nil {
+			t.Fatal("expected labels, got nil")
+		}
+		if msg.Labels["foo"] != "bar" || msg.Labels["abc"] != "xyz" {
+			t.Fatalf("unexpected labels: %v", msg.Labels)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for message with labels")
 	}
 }
