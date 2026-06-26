@@ -15,6 +15,7 @@ const (
 	LabelQueueID   = "queue_id"
 	LabelQueueName = "queue_name"
 	LabelPoolName  = "pool_name"
+	LabelReason    = "reason"
 )
 
 var queueLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName}
@@ -98,6 +99,18 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_pool_worker_limit",
 		Help: "Configured number of concurrent workers (the concurrency limit) for a pool. Compare against async_inflight_requests for worker utilization.",
 	}, []string{LabelPoolName})
+	GateDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_gate_decisions_total",
+		Help: "Count of gate decisions that prevented a message from being dispatched, by reason (gate_closed, quota_exhausted, dropped, error).",
+	}, []string{LabelQueueID, LabelQueueName, LabelPoolName, LabelReason})
+)
+
+// Gate decision reason label values for async_gate_decisions_total.
+const (
+	ReasonGateClosed     = "gate_closed"
+	ReasonQuotaExhausted = "quota_exhausted"
+	ReasonDropped        = "dropped"
+	ReasonError          = "error"
 )
 
 func RecordRetry(queueID, queueName, poolName string) {
@@ -174,12 +187,18 @@ func SetPoolWorkerLimit(poolName string, n float64) {
 	PoolWorkerLimit.WithLabelValues(poolName).Set(n)
 }
 
+// RecordGateDecision increments the count of gate decisions that prevented a
+// message from being dispatched, labeled by reason.
+func RecordGateDecision(reason, queueID, queueName, poolName string) {
+	GateDecisions.WithLabelValues(queueID, queueName, poolName, reason).Inc()
+}
+
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
 		Retries, AsyncReqs, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests,
 		QueueDepth, InflightRequests, BrokerBacklog, InferenceLatencyTime, QueueResidenceTime,
-		DispatchBudget, PoolWorkerLimit,
+		DispatchBudget, PoolWorkerLimit, GateDecisions,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

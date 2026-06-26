@@ -76,6 +76,28 @@ func TestSetPoolWorkerLimit(t *testing.T) {
 	}
 }
 
+func TestRecordGateDecision(t *testing.T) {
+	RecordGateDecision(ReasonQuotaExhausted, "q9", "queue-9", "pool-z")
+	RecordGateDecision(ReasonQuotaExhausted, "q9", "queue-9", "pool-z")
+	RecordGateDecision(ReasonGateClosed, "q9", "queue-9", "pool-z")
+
+	if got := testutil.ToFloat64(GateDecisions.WithLabelValues("q9", "queue-9", "pool-z", ReasonQuotaExhausted)); got != 2 {
+		t.Errorf("GateDecisions[quota_exhausted] = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(GateDecisions.WithLabelValues("q9", "queue-9", "pool-z", ReasonGateClosed)); got != 1 {
+		t.Errorf("GateDecisions[gate_closed] = %v, want 1", got)
+	}
+}
+
+func TestGetAsyncProcessorCollectors_includesGateDecisions(t *testing.T) {
+	for _, withLatency := range []bool{false, true} {
+		collectors := GetAsyncProcessorCollectors(withLatency)
+		if !containsCollector(collectors, GateDecisions) {
+			t.Errorf("expected GateDecisions to be present (supportsMessageLatency=%v)", withLatency)
+		}
+	}
+}
+
 func containsCollector(collectors []prometheus.Collector, target prometheus.Collector) bool {
 	for _, c := range collectors {
 		if c == target {

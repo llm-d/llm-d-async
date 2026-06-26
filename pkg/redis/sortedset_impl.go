@@ -459,6 +459,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		verdict, err := gate.Apply(ctx, ir, &releases)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
+			metrics.RecordGateDecision(metrics.ReasonError, queueID, queueName, poolName)
 			// Re-enqueue the message on gating failure
 			member, _ := json.Marshal(ir)
 			r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
@@ -466,6 +467,11 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 
 		if verdict.Action == pipeline.ActionRefuse {
+			reason := metrics.ReasonGateClosed
+			if ir.GetClassification() == api.ClassificationOverflow {
+				reason = metrics.ReasonQuotaExhausted
+			}
+			metrics.RecordGateDecision(reason, queueID, queueName, poolName)
 			// Re-enqueue the message (wait for capacity or quota)
 			member, _ := json.Marshal(ir)
 			r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
@@ -473,6 +479,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 
 		if verdict.Action == pipeline.ActionDrop {
+			metrics.RecordGateDecision(metrics.ReasonDropped, queueID, queueName, poolName)
 			if verdict.Result != nil {
 				r.resultChannel <- *verdict.Result
 			} else {

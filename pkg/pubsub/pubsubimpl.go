@@ -498,11 +498,17 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		verdict, err := gate.Apply(ctx, ir, &releases)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
+			metrics.RecordGateDecision(metrics.ReasonError, "", subscriberID, poolID)
 			msg.Nack()
 			return
 		}
 
 		if verdict.Action == pipeline.ActionRefuse {
+			reason := metrics.ReasonGateClosed
+			if ir.GetClassification() == api.ClassificationOverflow {
+				reason = metrics.ReasonQuotaExhausted
+			}
+			metrics.RecordGateDecision(reason, "", subscriberID, poolID)
 			logger.V(logutil.DEBUG).Info("Quota exceeded or capacity full, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)
 			go func() {
 				select {
@@ -516,6 +522,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		}
 
 		if verdict.Action == pipeline.ActionDrop {
+			metrics.RecordGateDecision(metrics.ReasonDropped, "", subscriberID, poolID)
 			var resultMsg api.ResultMessage
 			if verdict.Result != nil {
 				resultMsg = *verdict.Result

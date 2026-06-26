@@ -536,6 +536,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `llm_d_async_async_queue_residence_time_millis` | Histogram | Time in milliseconds a message spent buffered in-process, from broker ingestion until a worker pulled it for processing. Measures the async delay introduced by the system (queue time). Always registered. |
 | `llm_d_async_async_dispatch_budget` | Gauge | Current dispatch budget [0.0–1.0] returned by the queue's gate; the fraction of system capacity available for new requests (0.0 = gate fully closed). Useful for diagnosing why throughput is throttled. |
 | `llm_d_async_async_pool_worker_limit` | Gauge | Configured worker concurrency limit for a pool (carries only the `pool_name` label). Compare against `llm_d_async_async_inflight_requests` to compute worker utilization. |
+| `llm_d_async_async_gate_decisions_total` | Counter | Count of gate decisions that prevented a message from being dispatched, by `reason`: `gate_closed` (no dispatch budget), `quota_exhausted` (per-attribute quota overflow), `dropped` (gate permanently rejected the request), `error` (gate evaluation failed). |
 
 **Labels:**
 
@@ -544,6 +545,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `queue_id` | Transport-level queue identifier |
 | `queue_name` | Logical queue name from the queue configuration |
 | `pool_name` | Worker pool the queue routes to (`async_pool_worker_limit` carries only this label) |
+| `reason` | Gate-decision reason (only on `async_gate_decisions_total`): `gate_closed`, `quota_exhausted`, `dropped`, `error` |
 
 **Example PromQL queries:**
 
