@@ -188,6 +188,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		poolsMap[p.ID] = p
 		totalConcurrency += p.Workers
+		metrics.SetPoolWorkerLimit(p.ID, float64(p.Workers))
 	}
 
 	inferenceTransport := &http.Transport{

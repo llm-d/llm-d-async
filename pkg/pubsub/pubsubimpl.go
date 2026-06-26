@@ -411,6 +411,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 	for ctx.Err() == nil {
 		receiveCtx, cancel := context.WithCancel(ctx)
 		budget := gate.Budget(ctx)
+		metrics.SetDispatchBudget(budget, "", subscriberID, poolID)
 		go func() {
 			ticker := time.NewTicker(10 * time.Second)
 			defer ticker.Stop()

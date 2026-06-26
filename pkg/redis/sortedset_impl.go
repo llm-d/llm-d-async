@@ -13,6 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -405,6 +406,11 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 	currentTime := float64(time.Now().Unix())
 
 	budget := gate.Budget(ctx)
+	poolName := ""
+	if cfg, ok := r.configMap[queueID]; ok {
+		poolName = cfg.WorkerPoolID
+	}
+	metrics.SetDispatchBudget(budget, queueID, queueName, poolName)
 	batchSize := int(math.Floor(float64(r.batchSize) * budget))
 
 	for i := 0; i < batchSize; i++ {
