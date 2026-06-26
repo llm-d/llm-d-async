@@ -9,47 +9,49 @@
     --ink:#e6edf7; --muted:#93a6c9; --wire:#6f8ad0;
     --premium:#8b7bff; --standard:#2dd4bf; --batch:#f5a623;
     --ok:#37d67a; --bad:#ff5d6c; --warn:#ffcc4d;
-    /* one shared loop period — every timed effect uses % of this, so all stay in sync */
-    --loop:18s;
+    --loop:18s;   /* one shared loop period; all timed effects use % of it */
   }
-  html,body{margin:0;background:#0b1020;}  /* flat bg: avoids GIF banding */
+  html,body{margin:0;background:#0b1020;}
   .wrap{width:1280px;height:760px;margin:0 auto;font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;}
   text{fill:var(--ink);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;}
-  .title{font-size:26px;font-weight:700;letter-spacing:.3px;}
-  .sub{font-size:13px;fill:var(--muted);}
+  .title{font-size:25px;font-weight:700;} .sub{font-size:13px;fill:var(--muted);}
   .lbl{font-size:13px;} .small{font-size:11px;fill:var(--muted);} .tag{font-size:11px;fill:var(--muted);}
-  .node{fill:var(--panel);stroke:var(--stroke);stroke-width:1.5;rx:12;filter:url(#soft);}
+  .gl{font-size:10px;fill:var(--muted);}
+  .node{fill:var(--panel);stroke:var(--stroke);stroke-width:1.5;rx:10;filter:url(#soft);}
   .wire{fill:none;stroke:var(--wire);stroke-width:2.4;}
   .wire.dim{stroke:#3a4f7d;stroke-width:2;stroke-dasharray:5 6;}
 
   .dot{filter:url(#glow);}
   .dot.premium{fill:var(--premium);} .dot.standard{fill:var(--standard);} .dot.batch{fill:var(--batch);}
 
-  /* batch flow halts while its gate is closed; standard partially throttles */
-  @keyframes batchFlow{0%,33%{opacity:1} 40%,70%{opacity:0} 78%,100%{opacity:1}}
-  @keyframes stdFlow{0%,42%{opacity:1} 52%,66%{opacity:.12} 76%,100%{opacity:1}}
+  /* flow halts downstream while the team's POOL gate is in WAIT (sharp linear, no steps()) */
+  /* NOTE: use fill-opacity (main-thread paint), not opacity (compositor-only),
+     so headless --virtual-time-budget capture renders these states correctly. */
+  @keyframes batchFlow{0%,39%{fill-opacity:1} 41%,70%{fill-opacity:0} 72%,100%{fill-opacity:1}}
+  @keyframes stdFlow{0%,52%{fill-opacity:1} 54%,66%{fill-opacity:.12} 68%,100%{fill-opacity:1}}
   .batchdot{animation:batchFlow var(--loop) linear infinite;}
   .stddot{animation:stdFlow var(--loop) linear infinite;}
 
-  /* gate state open(green) -> closed(red) on the same timeline */
-  @keyframes gateBatch{0%,33%{fill:var(--ok)}40%,70%{fill:var(--bad)}78%,100%{fill:var(--ok)}}
-  @keyframes gateStd{0%,42%{fill:var(--ok)}52%,66%{fill:var(--warn)}76%,100%{fill:var(--ok)}}
-  .gate-batch{animation:gateBatch var(--loop) steps(1) infinite;}
-  .gate-std{animation:gateStd var(--loop) steps(1) infinite;}
-  @keyframes showWhenClosed{0%,33%{opacity:0}40%,70%{opacity:1}78%,100%{opacity:0}}
-  .gate-batch-closed{animation:showWhenClosed var(--loop) steps(1) infinite;}
-  @keyframes showWhenOpen{0%,33%{opacity:1}40%,70%{opacity:0}78%,100%{opacity:1}}
-  .gate-batch-open{animation:showWhenOpen var(--loop) steps(1) infinite;}
+  /* POOL gate: OPEN(green) -> WAIT(amber) */
+  @keyframes pgBatch{0%,40%{fill:var(--ok)}42%,70%{fill:var(--warn)}72%,100%{fill:var(--ok)}}
+  @keyframes pgStd{0%,53%{fill:var(--ok)}55%,66%{fill:var(--warn)}68%,100%{fill:var(--ok)}}
+  .pg-batch{animation:pgBatch var(--loop) linear infinite;}
+  .pg-std{animation:pgStd var(--loop) linear infinite;}
+  @keyframes showWait{0%,40%{fill-opacity:0}42%,70%{fill-opacity:1}72%,100%{fill-opacity:0}}
+  @keyframes showOpen{0%,40%{fill-opacity:1}42%,70%{fill-opacity:0}72%,100%{fill-opacity:1}}
+  .b-wait{animation:showWait var(--loop) linear infinite;}
+  .b-open{animation:showOpen var(--loop) linear infinite;}
 
-  /* vLLM saturation meter fills then drains; batch backlog grows while throttled */
+  /* parked (in-memory) requests appear at the pool gate during WAIT */
+  @keyframes parkBatch{0%,40%{fill-opacity:0}43%,69%{fill-opacity:1}72%,100%{fill-opacity:0}}
+  .park-batch circle{animation:parkBatch var(--loop) linear infinite;}
+
+  /* vLLM saturation meter */
   @keyframes sat{0%{height:8px;fill:var(--ok)}33%{height:80px;fill:var(--warn)}
                  55%{height:120px;fill:var(--bad)}82%{height:42px;fill:var(--warn)}100%{height:8px;fill:var(--ok)}}
   .satbar{animation:sat var(--loop) ease-in-out infinite;}
-  @keyframes backlog{0%,33%{height:0px}55%{height:92px}70%{height:92px}90%,100%{height:0px}}
-  .backlogbar{animation:backlog var(--loop) ease-in-out infinite;}
-  @keyframes quotaPulse{0%,33%{opacity:.25}42%,70%{opacity:1}82%,100%{opacity:.25}}
-  .quota-hot{animation:quotaPulse var(--loop) ease-in-out infinite;}
-
+  @keyframes qpulse{0%,100%{opacity:.5}50%{opacity:1}}
+  .qhot{animation:qpulse 2.4s ease-in-out infinite;}
   .flowline{stroke-dasharray:4 8;animation:dash 3.6s linear infinite;}
   @keyframes dash{to{stroke-dashoffset:-24}}
 </style>
@@ -58,125 +60,129 @@
 <div class="wrap">
 <svg viewBox="0 0 1280 760" width="1280" height="760" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
   <defs>
-    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity="0.45"/>
-    </filter>
-    <filter id="glow" x="-90%" y="-90%" width="280%" height="280%">
-      <feGaussianBlur stdDeviation="2.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto">
-      <path d="M0,0 L8,4 L0,8 Z" fill="var(--wire)"/></marker>
-    <marker id="ahd" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
-      <path d="M0,0 L7,3.5 L0,7 Z" fill="#3a4f7d"/></marker>
-
-    <!-- dot motion paths == the visible connector geometry, so dots ride the wires exactly -->
-    <path id="laneP" d="M150,170 H810 C870,170 870,360 905,360 H1085"/>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity="0.45"/></filter>
+    <filter id="glow" x="-90%" y="-90%" width="280%" height="280%"><feGaussianBlur stdDeviation="2.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--wire)"/></marker>
+    <marker id="ahd" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#3a4f7d"/></marker>
+    <!-- dot motion paths == connector geometry -->
+    <path id="laneP" d="M150,170 H840 C892,170 892,360 905,360 H1085"/>
     <path id="laneS" d="M150,360 H1085"/>
-    <path id="laneB" d="M150,560 H810 C870,560 870,360 905,360 H1085"/>
+    <path id="laneB" d="M150,560 H840 C892,560 892,360 905,360 H1085"/>
   </defs>
 
-  <!-- header -->
-  <text class="title" x="40" y="48">llm-d Async Processor — multi-tenant Pub/Sub</text>
-  <text class="sub" x="40" y="70">per-team subscriptions · worker pools · quota + saturation gates · priority under load</text>
+  <text class="title" x="40" y="46">llm-d Async Processor — multi-tenant Pub/Sub</text>
+  <text class="sub" x="40" y="68">two gate levels (#276): queue-level quota (nack) · pool-level saturation (wait/park)</text>
 
-  <!-- ============ CONNECTORS (arrowed, between adjacent stages) ============ -->
+  <!-- ============ CONNECTORS ============ -->
   <g>
-    <!-- premium row (y=170) -->
-    <path class="wire" d="M150,170 H244"  marker-end="url(#ah)"/>
-    <path class="wire" d="M370,170 H402"  marker-end="url(#ah)"/>
-    <path class="wire" d="M504,170 H534"  marker-end="url(#ah)"/>
-    <path class="wire" d="M660,170 H684"  marker-end="url(#ah)"/>
-    <path class="wire" d="M810,170 C870,170 870,360 899,360" marker-end="url(#ah)"/>
-    <!-- standard row (y=360) -->
-    <path class="wire" d="M150,360 H244"  marker-end="url(#ah)"/>
-    <path class="wire" d="M370,360 H402"  marker-end="url(#ah)"/>
-    <path class="wire" d="M504,360 H534"  marker-end="url(#ah)"/>
-    <path class="wire" d="M660,360 H684"  marker-end="url(#ah)"/>
-    <path class="wire" d="M810,360 H899"  marker-end="url(#ah)"/>
-    <!-- batch row (y=560) -->
-    <path class="wire" d="M150,560 H244"  marker-end="url(#ah)"/>
-    <path class="wire" d="M370,560 H402"  marker-end="url(#ah)"/>
-    <path class="wire" d="M504,560 H534"  marker-end="url(#ah)"/>
-    <path class="wire" d="M660,560 H684"  marker-end="url(#ah)"/>
-    <path class="wire" d="M810,560 C870,560 870,360 899,360" marker-end="url(#ah)"/>
+    <!-- premium (no queue gate): sub -> pool straight -->
+    <path class="wire" d="M150,170 H244" marker-end="url(#ah)"/>
+    <path class="wire" d="M370,170 H400" marker-end="url(#ah)"/>
+    <path class="wire" d="M488,170 H552" marker-end="url(#ah)"/>
+    <path class="wire" d="M660,170 H688" marker-end="url(#ah)"/>
+    <path class="wire" d="M712,170 C880,170 880,360 901,360" marker-end="url(#ah)"/>
+    <!-- standard (queue gate between sub & pool) -->
+    <path class="wire" d="M150,360 H244" marker-end="url(#ah)"/>
+    <path class="wire" d="M370,360 H400" marker-end="url(#ah)"/>
+    <path class="wire" d="M488,360 H512" marker-end="url(#ah)"/>
+    <path class="wire" d="M536,360 H552" marker-end="url(#ah)"/>
+    <path class="wire" d="M660,360 H688" marker-end="url(#ah)"/>
+    <path class="wire" d="M712,360 H901" marker-end="url(#ah)"/>
+    <!-- batch -->
+    <path class="wire" d="M150,560 H244" marker-end="url(#ah)"/>
+    <path class="wire" d="M370,560 H400" marker-end="url(#ah)"/>
+    <path class="wire" d="M488,560 H512" marker-end="url(#ah)"/>
+    <path class="wire" d="M536,560 H552" marker-end="url(#ah)"/>
+    <path class="wire" d="M660,560 H688" marker-end="url(#ah)"/>
+    <path class="wire" d="M712,560 C880,560 880,360 901,360" marker-end="url(#ah)"/>
     <!-- gateway -> vLLM -->
     <path class="wire" d="M1025,360 H1079" marker-end="url(#ah)"/>
   </g>
 
-  <!-- ============ FLOWING DOTS (under the boxes: show only on the wires) ============ -->
+  <!-- ============ FLOW DOTS (under boxes) ============ -->
   <g class="dot premium">
     <circle r="6"><animateMotion dur="9s" begin="0s"    repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
-    <circle r="6"><animateMotion dur="9s" begin="2.25s" repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
-    <circle r="6"><animateMotion dur="9s" begin="4.5s"  repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
-    <circle r="6"><animateMotion dur="9s" begin="6.75s" repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
+    <circle r="6"><animateMotion dur="9s" begin="3s"    repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
+    <circle r="6"><animateMotion dur="9s" begin="6s"    repeatCount="indefinite"><mpath xlink:href="#laneP"/></animateMotion></circle>
   </g>
   <g class="dot standard">
-    <circle r="6" class="stddot"><animateMotion dur="9s" begin="0s"    repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
-    <circle r="6" class="stddot"><animateMotion dur="9s" begin="2.25s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
-    <circle r="6" class="stddot"><animateMotion dur="9s" begin="4.5s"  repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
-    <circle r="6" class="stddot"><animateMotion dur="9s" begin="6.75s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
+    <circle r="6" class="stddot"><animateMotion dur="9s" begin="1s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
+    <circle r="6" class="stddot"><animateMotion dur="9s" begin="4s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
+    <circle r="6" class="stddot"><animateMotion dur="9s" begin="7s" repeatCount="indefinite"><mpath xlink:href="#laneS"/></animateMotion></circle>
   </g>
   <g class="dot batch">
-    <circle r="6" class="batchdot"><animateMotion dur="9s" begin="0s"    repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
-    <circle r="6" class="batchdot"><animateMotion dur="9s" begin="2.25s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
-    <circle r="6" class="batchdot"><animateMotion dur="9s" begin="4.5s"  repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
-    <circle r="6" class="batchdot"><animateMotion dur="9s" begin="6.75s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
+    <circle r="6" class="batchdot"><animateMotion dur="9s" begin="2s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
+    <circle r="6" class="batchdot"><animateMotion dur="9s" begin="5s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
+    <circle r="6" class="batchdot"><animateMotion dur="9s" begin="8s" repeatCount="indefinite"><mpath xlink:href="#laneB"/></animateMotion></circle>
   </g>
 
-  <!-- ============ NODES (drawn over the wires + dots) ============ -->
+  <!-- ============ NODES ============ -->
   <!-- publishers -->
+  <rect class="node" x="30" y="142" width="120" height="56"/><text class="lbl" x="44" y="166" style="fill:var(--premium)">premium</text><text class="small" x="44" y="184">publisher</text>
+  <rect class="node" x="30" y="332" width="120" height="56"/><text class="lbl" x="44" y="356" style="fill:var(--standard)">standard</text><text class="small" x="44" y="374">publisher</text>
+  <rect class="node" x="30" y="532" width="120" height="56"/><text class="lbl" x="44" y="556" style="fill:var(--batch)">batch</text><text class="small" x="44" y="574">publisher</text>
+
+  <!-- topics -->
+  <text class="tag" x="250" y="120">GCP Pub/Sub topics</text>
+  <rect class="node" x="250" y="148" width="120" height="44"/><text class="small" x="262" y="174">team-premium</text>
+  <rect class="node" x="250" y="338" width="120" height="44"/><text class="small" x="262" y="364">team-standard</text>
+  <rect class="node" x="250" y="538" width="120" height="44"/><text class="small" x="262" y="564">team-batch</text>
+  <text class="small" x="250" y="610" style="fill:var(--muted)">msg attr: team=&lt;tier&gt;</text>
+
+  <!-- processor frame -->
+  <rect x="384" y="96" width="486" height="556" rx="16" fill="var(--panel2)" stroke="var(--stroke)" stroke-width="1.5"/>
+  <text class="tag" x="398" y="120" style="fill:var(--ink)">Async Processor  ·  gcp-pubsub-gated</text>
+
+  <!-- subs -->
+  <rect class="node" x="404" y="150" width="84" height="40"/><text class="small" x="416" y="174">sub</text>
+  <rect class="node" x="404" y="340" width="84" height="40"/><text class="small" x="416" y="364">sub</text>
+  <rect class="node" x="404" y="540" width="84" height="40"/><text class="small" x="416" y="564">sub</text>
+
+  <!-- QUEUE gates (admission; quota; nack on refuse) — standard & batch -->
   <g>
-    <rect class="node" x="30" y="142" width="120" height="56"/><text class="lbl" x="44" y="166" style="fill:var(--premium)">premium</text><text class="small" x="44" y="184">publisher</text>
-    <rect class="node" x="30" y="332" width="120" height="56"/><text class="lbl" x="44" y="356" style="fill:var(--standard)">standard</text><text class="small" x="44" y="374">publisher</text>
-    <rect class="node" x="30" y="532" width="120" height="56"/><text class="lbl" x="44" y="556" style="fill:var(--batch)">batch</text><text class="small" x="44" y="574">publisher</text>
+    <circle cx="524" cy="360" r="10" fill="var(--ok)"/><path d="M520,356 h8 v8 h-8 z" fill="#0b1020"/>
+    <text class="gl" x="500" y="392">queue gate</text><text class="gl" x="500" y="404" style="fill:var(--standard)">quota 20</text>
+  </g>
+  <g>
+    <circle cx="524" cy="560" r="10" fill="var(--ok)"/><path d="M520,556 h8 v8 h-8 z" fill="#0b1020"/>
+    <text class="gl" x="500" y="592">queue gate</text><text class="gl" x="500" y="604" style="fill:var(--batch)">quota 2</text>
   </g>
 
-  <!-- pub/sub topics -->
+  <!-- worker pools -->
+  <rect class="node" x="552" y="146" width="108" height="48"/><text class="small" x="564" y="166">worker pool</text><text class="lbl" x="564" y="184" style="fill:var(--premium)">16 workers</text>
+  <rect class="node" x="552" y="336" width="108" height="48"/><text class="small" x="564" y="356">worker pool</text><text class="lbl" x="564" y="374" style="fill:var(--standard)">8 workers</text>
+  <rect class="node" x="552" y="536" width="108" height="48"/><text class="small" x="564" y="556">worker pool</text><text class="lbl" x="564" y="574" style="fill:var(--batch)">4 workers</text>
+
+  <!-- POOL gates (in worker loop; saturation; WAIT/park on refuse) -->
   <g>
-    <text class="tag" x="250" y="120">GCP Pub/Sub topics</text>
-    <rect class="node" x="250" y="148" width="120" height="44"/><text class="small" x="262" y="174">team-premium</text>
-    <rect class="node" x="250" y="338" width="120" height="44"/><text class="small" x="262" y="364">team-standard</text>
-    <rect class="node" x="250" y="538" width="120" height="44"/><text class="small" x="262" y="564">team-batch</text>
-    <text class="small" x="250" y="610" style="fill:var(--muted)">msg attr: team=&lt;tier&gt;</text>
+    <circle cx="700" cy="170" r="11" fill="var(--ok)"/>
+    <text class="gl" x="676" y="146">pool gate</text><text class="gl" x="676" y="200" style="fill:var(--ok)">OPEN</text>
+  </g>
+  <g>
+    <circle cx="700" cy="360" r="11" class="pg-std"/>
+    <text class="gl" x="676" y="336">pool gate · sat N=20</text>
+  </g>
+  <g>
+    <circle cx="700" cy="560" r="11" class="pg-batch"/>
+    <text class="gl" x="676" y="536">pool gate · sat N=8</text>
+    <text class="gl b-open"  x="676" y="590" style="fill:var(--ok)">OPEN</text>
+    <text class="gl b-wait"  x="676" y="590" style="fill:var(--warn)">WAIT ⏸ park</text>
   </g>
 
-  <!-- async processor -->
-  <rect x="392" y="96" width="470" height="556" rx="16" fill="var(--panel2)" stroke="var(--stroke)" stroke-width="1.5"/>
-  <text class="tag" x="408" y="120" style="fill:var(--ink)">Async Processor  ·  gcp-pubsub-gated</text>
-  <rect class="node" x="408" y="150" width="96" height="40"/><text class="small" x="420" y="174">sub</text>
-  <rect class="node" x="408" y="340" width="96" height="40"/><text class="small" x="420" y="364">sub</text>
-  <rect class="node" x="408" y="540" width="96" height="40"/><text class="small" x="420" y="564">sub</text>
-  <rect class="node" x="540" y="146" width="120" height="48"/><text class="small" x="552" y="166">worker pool</text><text class="lbl" x="552" y="184" style="fill:var(--premium)">16 workers</text>
-  <rect class="node" x="540" y="336" width="120" height="48"/><text class="small" x="552" y="356">worker pool</text><text class="lbl" x="552" y="374" style="fill:var(--standard)">8 workers</text>
-  <rect class="node" x="540" y="536" width="120" height="48"/><text class="small" x="552" y="556">worker pool</text><text class="lbl" x="552" y="574" style="fill:var(--batch)">4 workers</text>
-
-  <!-- gates -->
-  <rect class="node" x="690" y="146" width="120" height="48"/>
-  <circle cx="708" cy="170" r="7" fill="var(--ok)"/><text class="small" x="724" y="166">gate</text><text class="small" x="724" y="183" style="fill:var(--ok)">OPEN</text>
-
-  <rect class="node" x="690" y="336" width="120" height="48"/>
-  <circle cx="708" cy="360" r="7" class="gate-std"/><text class="small" x="724" y="356">gate · quota 20</text><text class="small" x="724" y="373">+ saturation</text>
-
-  <rect class="node" x="690" y="536" width="120" height="48"/>
-  <circle cx="708" cy="560" r="7" class="gate-batch"/><text class="small" x="724" y="556">gate · quota 2</text>
-  <text class="small gate-batch-open"   x="724" y="573" style="fill:var(--ok)">OPEN</text>
-  <text class="small gate-batch-closed" x="724" y="573" style="fill:var(--bad)">CLOSED ✕</text>
-
-  <!-- batch backlog bar (grows while throttled) -->
-  <rect x="468" y="592" width="14" height="0" rx="3" fill="var(--bad)" class="backlogbar" transform="scale(1,-1)" transform-origin="468 592"/>
-  <text class="small" x="430" y="610" style="fill:var(--bad)">backlog ▲</text>
+  <!-- parked (in-memory) batch requests at the pool gate during WAIT -->
+  <g class="dot batch park-batch">
+    <circle cx="676" cy="548" r="5"/><circle cx="676" cy="562" r="5"/><circle cx="676" cy="576" r="5"/>
+  </g>
 
   <!-- side inputs -->
-  <rect class="node" x="690" y="648" width="120" height="44"/><text class="small" x="702" y="668">Redis</text><text class="small" x="702" y="684" style="fill:var(--muted)">quota counters</text>
-  <!-- Redis feeds the per-team quota gates -->
-  <path class="wire dim flowline" d="M748,648 V586" marker-end="url(#ahd)"/>
-  <path class="wire dim flowline" d="M806,660 H836 V360 H812" marker-end="url(#ahd)"/>
-  <text class="small" x="842" y="470" style="fill:var(--muted)">quota</text>
-  <circle cx="648" cy="676" r="6" fill="var(--batch)" class="quota-hot"/><text class="small quota-hot" x="540" y="680" style="fill:var(--batch)">team=batch ≥ 2</text>
+  <rect class="node" x="470" y="648" width="118" height="44"/><text class="small" x="482" y="668">Redis</text><text class="small" x="482" y="684" style="fill:var(--muted)">quota counters</text>
+  <path class="wire dim flowline" d="M528,648 V576" marker-end="url(#ahd)"/>     <!-- Redis -> batch queue gate -->
+  <path class="wire dim flowline" d="M560,650 H600 V360 H536" marker-end="url(#ahd)"/> <!-- Redis -> standard queue gate -->
+  <text class="gl" x="604" y="470">quota</text>
 
   <rect class="node" x="900" y="36" width="184" height="44"/><text class="small" x="914" y="56">Prometheus / GMP</text><text class="small" x="914" y="72" style="fill:var(--muted)">vllm:num_requests_running</text>
-  <path class="wire dim flowline" d="M958,80 C910,120 858,126 814,158" marker-end="url(#ahd)"/>
-  <text class="small" x="828" y="120" style="fill:var(--muted)">saturation</text>
+  <path class="wire dim flowline" d="M946,80 C900,150 820,150 712,168" marker-end="url(#ahd)"/>
+  <text class="gl" x="812" y="150" style="fill:var(--muted)">saturation</text>
 
   <!-- gateway + vLLM -->
   <rect class="node" x="905" y="330" width="120" height="60"/><text class="small" x="918" y="356">Inference</text><text class="small" x="918" y="372">Gateway · EPP</text>
@@ -187,17 +193,18 @@
   <text class="small" x="1100" y="404" style="fill:var(--muted)">saturation</text>
   <path class="wire dim" d="M1150,300 C1150,170 1080,110 1010,82" marker-end="url(#ahd)"/>
 
-  <!-- results return + observability -->
-  <path class="wire dim" d="M1160,420 C1160,724 720,724 372,722" marker-end="url(#ahd)"/>
-  <rect class="node" x="250" y="702" width="124" height="40"/><text class="small" x="262" y="726">results ▸ consumers</text>
+  <!-- results + observability -->
+  <path class="wire dim" d="M1160,420 C1160,724 720,724 374,722" marker-end="url(#ahd)"/>
+  <rect class="node" x="246" y="702" width="124" height="40"/><text class="small" x="258" y="726">results ▸ consumers</text>
   <rect class="node" x="1085" y="648" width="150" height="50"/><text class="small" x="1098" y="670">Grafana /</text><text class="small" x="1098" y="686">Cloud Monitoring</text>
-  <path class="wire dim" d="M862,628 C980,652 1010,660 1085,668"/>
+  <path class="wire dim" d="M872,628 C980,652 1010,660 1085,668"/>
 
   <!-- legend -->
   <g transform="translate(40,752)">
     <circle cx="6" cy="-4" r="5" fill="var(--premium)"/><text class="small" x="18" y="0">premium</text>
     <circle cx="96" cy="-4" r="5" fill="var(--standard)"/><text class="small" x="108" y="0">standard</text>
     <circle cx="186" cy="-4" r="5" fill="var(--batch)"/><text class="small" x="198" y="0">batch</text>
+    <text class="gl" x="280" y="0">■ queue gate (quota·nack)   ● pool gate (saturation·wait)</text>
   </g>
 </svg>
 </div>
