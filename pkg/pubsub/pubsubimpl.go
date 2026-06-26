@@ -36,6 +36,7 @@ type TopicConfig struct {
 	IGWBaseURL         string            `json:"igw_base_url"`
 	GateType           string            `json:"gate_type"`
 	GateParams         map[string]string `json:"gate_params,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
 }
 
 var _ pipeline.Flow = (*PubSubMQFlow)(nil)
@@ -60,6 +61,7 @@ type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
 	subscriberID   string
 	gate           pipeline.Gate
+	labels         map[string]string
 }
 
 // PubSubOption is a functional option for configuring PubSubMQFlow
@@ -181,6 +183,7 @@ func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) (*PubSubMQFlow,
 			},
 			subscriberID: cfg.SubscriberID,
 			gate:         gate,
+			labels:       cfg.Labels,
 		})
 	}
 
@@ -228,7 +231,7 @@ func (r *PubSubMQFlow) Start(ctx context.Context) {
 		r.consumeWg.Add(1)
 		go func(cd RequestChannelData) {
 			defer r.consumeWg.Done()
-			r.requestWorker(consumeCtx, pubSubClient, cd.subscriberID, cd.requestChannel.WorkerPoolID, cd.requestChannel.Channel, cd.gate)
+			r.requestWorker(consumeCtx, pubSubClient, cd.subscriberID, cd.requestChannel.WorkerPoolID, cd.requestChannel.Channel, cd.gate, cd.labels)
 		}(channelData)
 	}
 	publisher := pubSubClient.Publisher(r.resultTopicID)
@@ -400,7 +403,7 @@ func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMes
 	}
 }
 
-func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate) {
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate, labels map[string]string) {
 	logger := log.FromContext(ctx)
 
 	sub := pubSubClient.Subscriber(subscriberID)
@@ -435,7 +438,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 			continue
 		}
 
-		err := r.processMessages(receiveCtx, sub.Receive, subscriberID, poolID, ch, gate)
+		err := r.processMessages(receiveCtx, sub.Receive, subscriberID, poolID, ch, gate, labels)
 
 		cancel()
 		// TODO
@@ -448,7 +451,7 @@ func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.C
 
 type receiveFunc func(context.Context, func(context.Context, *pubsub.Message)) error
 
-func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, subscriberID string, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate) error {
+func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, subscriberID string, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate, labels map[string]string) error {
 	logger := log.FromContext(ctx)
 	return receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 
@@ -466,6 +469,12 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		irout := api.InternalRouting{TransportCorrelationID: msg.ID, RequestQueueName: subscriberID}
 		if msg.DeliveryAttempt != nil {
 			irout.RetryCount = *msg.DeliveryAttempt - 1
+		}
+		if len(labels) > 0 {
+			irout.Labels = make(map[string]string, len(labels))
+			for k, v := range labels {
+				irout.Labels[k] = v
+			}
 		}
 		if body.Metadata == nil {
 			body.Metadata = make(map[string]string)

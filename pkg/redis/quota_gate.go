@@ -89,12 +89,12 @@ func (g *RedisQuotaGate) Apply(ctx context.Context, msg *api.InternalRequest, re
 
 	if g.gatingMode == GatingModeBlocking {
 		if classification != api.ClassificationReserved {
-			msg.Classification = classification
+			msg.SetClassification(classification)
 			return pipeline.Refuse(), nil
 		}
 	}
 
-	msg.Classification = classification
+	msg.SetClassification(classification)
 	if release != nil && releases != nil {
 		*releases = append(*releases, release)
 	}

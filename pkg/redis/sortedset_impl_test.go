@@ -1392,3 +1392,52 @@ func TestQueueBacklogReportsZeroOnError(t *testing.T) {
 		t.Errorf("queue-ok backlog = %d, want 1", got["queue-ok"])
 	}
 }
+
+func TestSortedSetFlow_QueueLabelsSetOnDequeue(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "test-labels-queue"
+	queueID := "test-labels-qid"
+	labels := map[string]string{
+		"foo": "bar",
+		"abc": "xyz",
+	}
+
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{{
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			queueName: queue,
+			queueID:   queueID,
+		}},
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+		configMap: map[string]queueConfig{
+			queueID: {
+				ID:     queueID,
+				Labels: labels,
+			},
+		},
+	}
+
+	msg := api.RequestMessage{ID: "msg-labels", Created: time.Now().Unix(), Deadline: 9999999999}
+	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
+
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, queueID)
+
+	select {
+	case received := <-flow.requestChannels[0].channel.Channel:
+		if received.Labels == nil {
+			t.Fatal("Expected labels on dequeued request, got nil")
+		}
+		if received.Labels["foo"] != "bar" || received.Labels["abc"] != "xyz" {
+			t.Fatalf("Unexpected labels: %v", received.Labels)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+}

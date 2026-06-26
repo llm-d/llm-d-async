@@ -117,16 +117,18 @@ func drainBatch[T any](first T, channel <-chan T, maxBatchSize int) []T {
 }
 
 type QueueConfig struct {
-	QueueName          string `json:"queue_name"`
-	WorkerPoolID       string `json:"worker_pool_id"`
-	InferenceObjective string `json:"inference_objective"`
-	RequestPathURL     string `json:"request_path_url"`
-	IGWBaseURL         string `json:"igw_base_url"`
+	QueueName          string            `json:"queue_name"`
+	WorkerPoolID       string            `json:"worker_pool_id"`
+	InferenceObjective string            `json:"inference_objective"`
+	RequestPathURL     string            `json:"request_path_url"`
+	IGWBaseURL         string            `json:"igw_base_url"`
+	Labels             map[string]string `json:"labels,omitempty"`
 }
 
 type RequestChannelData struct {
 	requestChannel pipeline.RequestChannel
 	queueName      string
+	labels         map[string]string
 }
 
 var (
@@ -237,13 +239,17 @@ func NewRedisMQFlow(flowOpts PubSubFlowOptions, connOpts ConnectionOptions, fns 
 			reqPath = "/v1/completions"
 		}
 
-		channels = append(channels, RequestChannelData{pipeline.RequestChannel{
-			Channel:            ch,
-			InferenceObjective: cfg.InferenceObjective,
-			RequestPathURL:     reqPath,
-			IGWBaseURL:         cfg.IGWBaseURL,
-			WorkerPoolID:       workerPoolID,
-		}, cfg.QueueName})
+		channels = append(channels, RequestChannelData{
+			requestChannel: pipeline.RequestChannel{
+				Channel:            ch,
+				InferenceObjective: cfg.InferenceObjective,
+				RequestPathURL:     reqPath,
+				IGWBaseURL:         cfg.IGWBaseURL,
+				WorkerPoolID:       workerPoolID,
+			},
+			queueName: cfg.QueueName,
+			labels:    cfg.Labels,
+		})
 	}
 	if flow.enableTracing {
 		if err := redisotel.InstrumentTracing(rdb); err != nil {
@@ -268,7 +274,7 @@ func (r *RedisMQFlow) Start(ctx context.Context) {
 		r.consumeWg.Add(1)
 		go func(cd RequestChannelData) {
 			defer r.consumeWg.Done()
-			requestWorker(consumeCtx, r.rdb, cd.requestChannel.Channel, cd.queueName)
+			requestWorker(consumeCtx, r.rdb, cd.requestChannel.Channel, cd.queueName, cd.labels)
 		}(channelData)
 	}
 
@@ -363,10 +369,10 @@ const (
 )
 
 // Automatically reconnects when the subscription channel closes.
-func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string) {
+func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string, labels map[string]string) {
 	logger := log.FromContext(ctx)
 	for ctx.Err() == nil {
-		shouldReconnect := consumeSubscription(ctx, rdb, msgChannel, queueName)
+		shouldReconnect := consumeSubscription(ctx, rdb, msgChannel, queueName, labels)
 		if ctx.Err() != nil {
 			return
 		}
@@ -381,7 +387,7 @@ func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.
 	}
 }
 
-func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string) bool {
+func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string, labels map[string]string) bool {
 	logger := log.FromContext(ctx)
 	sub := rdb.Subscribe(ctx, queueName)
 	defer sub.Close() // nolint:errcheck
@@ -405,6 +411,14 @@ func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan
 				continue
 			}
 			ir.RequestQueueName = queueName
+			if len(labels) > 0 {
+				if ir.Labels == nil {
+					ir.Labels = make(map[string]string, len(labels))
+				}
+				for k, v := range labels {
+					ir.Labels[k] = v
+				}
+			}
 			msgChannel <- &ir
 		}
 	}
