@@ -59,10 +59,11 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	var ir1 api.InternalRequest
 	require.NoError(t, json.Unmarshal([]byte(results[0].Member.(string)), &ir1))
 
-	verdict1, err := gate.Apply(ctx, &ir1)
+	var releases1 []pipeline.GateReleaseFunc
+	verdict1, err := gate.Apply(ctx, &ir1, &releases1)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict1.Action, "First request should be allowed")
-	assert.NotEmpty(t, ir1.Releases())
+	assert.NotEmpty(t, releases1)
 
 	// Pop second message — Apply should be denied (concurrency limit reached).
 	results2, err := rdb.ZPopMin(ctx, queueName, 1).Result()
@@ -72,7 +73,8 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	var ir2 api.InternalRequest
 	require.NoError(t, json.Unmarshal([]byte(results2[0].Member.(string)), &ir2))
 
-	verdict2, err := gate.Apply(ctx, &ir2)
+	var releases2 []pipeline.GateReleaseFunc
+	verdict2, err := gate.Apply(ctx, &ir2, &releases2)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionRefuse, verdict2.Action, "Second request should be denied while first is in-flight")
 
@@ -83,7 +85,9 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	require.NoError(t, err)
 
 	// Release the first request (simulates resultWorker calling release).
-	ir1.Release()
+	for _, f := range releases1 {
+		f()
+	}
 
 	// Now the second message should be acquirable.
 	results3, err := rdb.ZPopMin(ctx, queueName, 1).Result()
@@ -94,10 +98,13 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(results3[0].Member.(string)), &ir3))
 	assert.Equal(t, "msg-2", ir3.PublicRequest.ReqID())
 
-	verdict3, err := gate.Apply(ctx, &ir3)
+	var releases3 []pipeline.GateReleaseFunc
+	verdict3, err := gate.Apply(ctx, &ir3, &releases3)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict3.Action, "Second request should be allowed after first was released")
-	ir3.Release()
+	for _, f := range releases3 {
+		f()
+	}
 }
 
 // TestSortedSetQuotaGate_RateLimitRequeue validates that rate-limited messages
@@ -124,7 +131,8 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 	)
 
 	// First Apply — allowed.
-	verdict1, err := gate.Apply(ctx, ir)
+	var releases1 []pipeline.GateReleaseFunc
+	verdict1, err := gate.Apply(ctx, ir, &releases1)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict1.Action)
 
@@ -138,7 +146,8 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 			Metadata: map[string]string{"userid": "user-b"},
 		},
 	)
-	verdict2, err := gate.Apply(ctx, ir2)
+	var releases2 []pipeline.GateReleaseFunc
+	verdict2, err := gate.Apply(ctx, ir2, &releases2)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionRefuse, verdict2.Action, "Should be rate limited")
 
@@ -146,7 +155,8 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 	time.Sleep(2100 * time.Millisecond)
 
 	// Third Apply — allowed again.
-	verdict3, err := gate.Apply(ctx, ir2)
+	var releases3 []pipeline.GateReleaseFunc
+	verdict3, err := gate.Apply(ctx, ir2, &releases3)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict3.Action, "Should be allowed after rate limit window resets")
 }

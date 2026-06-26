@@ -61,7 +61,7 @@ func (g *RedisQuotaGate) Budget(ctx context.Context) float64 {
 }
 
 // Apply implements pipeline.Gate.
-func (g *RedisQuotaGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+func (g *RedisQuotaGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
 	val, ok := msg.PublicRequest.ReqMetadata()[g.attribute]
 	if !ok {
 		// If the attribute is missing, we allow it by default.
@@ -95,8 +95,8 @@ func (g *RedisQuotaGate) Apply(ctx context.Context, msg *api.InternalRequest) (p
 	}
 
 	msg.Classification = classification
-	if release != nil {
-		msg.AttachRelease(release)
+	if release != nil && releases != nil {
+		*releases = append(*releases, release)
 	}
 
 	return pipeline.Continue(), nil

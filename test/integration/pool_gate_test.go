@@ -198,7 +198,7 @@ func (g *customMockGate) Budget(ctx context.Context) float64 {
 	return 1.0
 }
 
-func (g *customMockGate) Apply(ctx context.Context, msg *asyncapi.InternalRequest) (pipeline.Verdict, error) {
+func (g *customMockGate) Apply(ctx context.Context, msg *asyncapi.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.index >= len(g.verdicts) {

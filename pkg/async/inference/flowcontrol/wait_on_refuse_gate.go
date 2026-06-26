@@ -2,6 +2,7 @@ package flowcontrol
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
@@ -28,10 +29,13 @@ func (w *WaitOnRefuseGate) Budget(ctx context.Context) float64 {
 
 // Apply implements pipeline.Gate.
 // Calls Apply on the inner gate and overrides ActionRefuse to ActionWait.
-func (w *WaitOnRefuseGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
-	verdict, err := w.inner.Apply(ctx, msg)
+func (w *WaitOnRefuseGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	verdict, err := w.inner.Apply(ctx, msg, releases)
+	if err != nil {
+		return verdict, fmt.Errorf("inner gate apply failed: %w", err)
+	}
 	if verdict.Action == pipeline.ActionRefuse {
 		verdict.Action = pipeline.ActionWait
 	}
-	return verdict, err
+	return verdict, nil
 }

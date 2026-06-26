@@ -89,10 +89,10 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					return
 				}
 
-				// Create a shallow copy of the InternalRequest for pool gating to keep pool-level releases
-				// isolated from queue-level releases.
-				poolIR := msg.CloneWithoutReleases()
-				defer poolIR.Release()
+				var poolReleases []pipeline.GateReleaseFunc
+				defer func() {
+					pipeline.ReleaseGateReleases(poolReleases)
+				}()
 
 				if poolGate != nil {
 					reqDeadline := time.Now().Add(requestTimeout)
@@ -107,7 +107,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					var verdict pipeline.Verdict
 					var err error
 					for {
-						verdict, err = poolGate.Apply(gateCtx, poolIR)
+						verdict, err = poolGate.Apply(gateCtx, msg.InternalRequest, &poolReleases)
 						if err != nil {
 							if errors.Is(err, context.DeadlineExceeded) || gateCtx.Err() != nil {
 								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)

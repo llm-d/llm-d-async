@@ -440,7 +440,8 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 
 		// Apply gate
-		verdict, err := gate.Apply(ctx, ir)
+		var releases []pipeline.GateReleaseFunc
+		verdict, err := gate.Apply(ctx, ir, &releases)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
 			// Re-enqueue the message on gating failure
@@ -468,8 +469,8 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			continue
 		}
 
-		if len(ir.Releases()) > 0 {
-			r.activeReleases.Store(rview.ReqID(), ir)
+		if len(releases) > 0 {
+			r.activeReleases.Store(rview.ReqID(), releases)
 		}
 
 		// Stamp ingestion time as the message enters the in-process buffer so the
@@ -488,7 +489,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			}); err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to re-queue message on shutdown", "id", rview.ReqID())
 			}
-			ir.Release()
+			pipeline.ReleaseGateReleases(releases)
 			return
 		}
 	}
@@ -589,11 +590,10 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 	processMsg := func(flushCtx context.Context, msg api.ResultMessage) {
 		batch := drainBatch(msg, r.resultChannel, maxBatchSize)
-		// Release quota for all messages in the batch
 		for _, m := range batch {
 			if val, ok := r.activeReleases.LoadAndDelete(m.ID); ok {
-				if ir, ok := val.(*api.InternalRequest); ok {
-					ir.Release()
+				if rels, ok := val.([]pipeline.GateReleaseFunc); ok {
+					pipeline.ReleaseGateReleases(rels)
 				}
 			}
 		}

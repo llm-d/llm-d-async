@@ -36,7 +36,7 @@ func (f DispatchGateFunc) Budget(ctx context.Context) float64 {
 }
 
 // Apply implements Gate.
-func (f DispatchGateFunc) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+func (f DispatchGateFunc) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
 	if f(ctx) <= 0.0 {
 		return pipeline.Refuse(), nil
 	}

@@ -20,12 +20,14 @@ type mockAttributeGate struct {
 }
 
 func (m *mockAttributeGate) Budget(ctx context.Context) float64 { return 1.0 }
-func (m *mockAttributeGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+func (m *mockAttributeGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
 	m.acquireCalled = true
 	if !m.allowed {
 		return pipeline.Refuse(), nil
 	}
-	msg.AttachRelease(func() { m.releaseCalled = true })
+	if releases != nil {
+		*releases = append(*releases, func() { m.releaseCalled = true })
+	}
 	return pipeline.Continue(), nil
 }
 

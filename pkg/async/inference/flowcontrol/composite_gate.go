@@ -55,8 +55,6 @@ func (c *CompositeGate) Budget(ctx context.Context) float64 {
 	return minBudget
 }
 
-// Apply implements pipeline.Gate.
-// It runs ApplyChain across all inner gates.
-func (c *CompositeGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
-	return pipeline.ApplyChain(ctx, msg, c.gates)
+func (c *CompositeGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	return pipeline.ApplyChain(ctx, msg, c.gates, releases)
 }

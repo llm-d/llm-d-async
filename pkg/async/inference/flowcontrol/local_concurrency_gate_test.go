@@ -20,18 +20,21 @@ func TestLocalConcurrencyGate_ApplyAndRelease(t *testing.T) {
 	assert.Equal(t, 1.0, gate.Budget(ctx))
 
 	// 2. Allow 3 requests
+	var releases1 []pipeline.GateReleaseFunc
 	r1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	verdict, err := gate.Apply(ctx, r1)
+	verdict, err := gate.Apply(ctx, r1, &releases1)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
+	var releases2 []pipeline.GateReleaseFunc
 	r2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	verdict, err = gate.Apply(ctx, r2)
+	verdict, err = gate.Apply(ctx, r2, &releases2)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
+	var releases3 []pipeline.GateReleaseFunc
 	r3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	verdict, err = gate.Apply(ctx, r3)
+	verdict, err = gate.Apply(ctx, r3, &releases3)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
@@ -39,19 +42,22 @@ func TestLocalConcurrencyGate_ApplyAndRelease(t *testing.T) {
 	assert.Equal(t, 0.0, gate.Budget(ctx))
 
 	// 3. Fourth request should be blocked/refused with redeliver=true
+	var releases4 []pipeline.GateReleaseFunc
 	r4 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	verdict, err = gate.Apply(ctx, r4)
+	verdict, err = gate.Apply(ctx, r4, &releases4)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionRefuse, verdict.Action)
 
 	// 4. Release request 1
-	r1.Release()
+	for _, f := range releases1 {
+		f()
+	}
 
 	// Budget should now be 1/3 (0.333...)
 	assert.InDelta(t, 0.333333, gate.Budget(ctx), 1e-4)
 
 	// Now fourth request can be admitted
-	verdict, err = gate.Apply(ctx, r4)
+	verdict, err = gate.Apply(ctx, r4, &releases4)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, verdict.Action)
 
@@ -59,9 +65,15 @@ func TestLocalConcurrencyGate_ApplyAndRelease(t *testing.T) {
 	assert.Equal(t, 0.0, gate.Budget(ctx))
 
 	// Release remaining requests
-	r2.Release()
-	r3.Release()
-	r4.Release()
+	for _, f := range releases2 {
+		f()
+	}
+	for _, f := range releases3 {
+		f()
+	}
+	for _, f := range releases4 {
+		f()
+	}
 
 	// Budget should be back to 1.0
 	assert.Equal(t, 1.0, gate.Budget(ctx))
@@ -74,14 +86,15 @@ func TestLocalConcurrencyGate_InvalidLimits(t *testing.T) {
 	gate0 := NewLocalConcurrencyGate(0)
 	assert.Equal(t, 0.0, gate0.Budget(ctx))
 	r := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	verdict, err := gate0.Apply(ctx, r)
+	var releases []pipeline.GateReleaseFunc
+	verdict, err := gate0.Apply(ctx, r, &releases)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionRefuse, verdict.Action)
 
 	// Negative limit
 	gateNeg := NewLocalConcurrencyGate(-5)
 	assert.Equal(t, 0.0, gateNeg.Budget(ctx))
-	verdict, err = gateNeg.Apply(ctx, r)
+	verdict, err = gateNeg.Apply(ctx, r, &releases)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionRefuse, verdict.Action)
 }
@@ -92,7 +105,8 @@ func TestLocalConcurrencyGate_Concurrency(t *testing.T) {
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
-	requests := make([]*api.InternalRequest, 100)
+	var mu sync.Mutex
+	allReleases := make([][]pipeline.GateReleaseFunc, 100)
 
 	// Simulate 100 concurrent requests trying to enter
 	for i := 0; i < 100; i++ {
@@ -100,9 +114,12 @@ func TestLocalConcurrencyGate_Concurrency(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			req := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-			verdict, err := gate.Apply(ctx, req)
+			var releases []pipeline.GateReleaseFunc
+			verdict, err := gate.Apply(ctx, req, &releases)
 			if err == nil && verdict.Action == pipeline.ActionContinue {
-				requests[idx] = req
+				mu.Lock()
+				allReleases[idx] = releases
+				mu.Unlock()
 			}
 		}(i)
 	}
@@ -110,7 +127,7 @@ func TestLocalConcurrencyGate_Concurrency(t *testing.T) {
 
 	// Count how many requests were admitted (should be exactly limit)
 	admittedCount := 0
-	for _, r := range requests {
+	for _, r := range allReleases {
 		if r != nil {
 			admittedCount++
 		}
@@ -119,11 +136,13 @@ func TestLocalConcurrencyGate_Concurrency(t *testing.T) {
 
 	// Now concurrently release all admitted requests
 	for i := 0; i < 100; i++ {
-		if requests[i] != nil {
+		if allReleases[i] != nil {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				requests[idx].Release()
+				for _, f := range allReleases[idx] {
+					f()
+				}
 			}(i)
 		}
 	}
@@ -141,13 +160,15 @@ func TestLocalConcurrencyGate_BlockingMode(t *testing.T) {
 	assert.Equal(t, 1.0, gate.Budget(ctx))
 
 	// 2. Admit 2 requests
+	var releases1 []pipeline.GateReleaseFunc
 	r1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	v1, err := gate.Apply(ctx, r1)
+	v1, err := gate.Apply(ctx, r1, &releases1)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, v1.Action)
 
+	var releases2 []pipeline.GateReleaseFunc
 	r2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	v2, err := gate.Apply(ctx, r2)
+	v2, err := gate.Apply(ctx, r2, &releases2)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, v2.Action)
 
@@ -159,10 +180,11 @@ func TestLocalConcurrencyGate_BlockingMode(t *testing.T) {
 	blockedCh := make(chan struct{})
 	resultCh := make(chan pipeline.Verdict, 1)
 	errCh := make(chan error, 1)
+	var releases3 []pipeline.GateReleaseFunc
 
 	go func() {
 		close(blockedCh)
-		v, e := gate.Apply(ctx, r3)
+		v, e := gate.Apply(ctx, r3, &releases3)
 		resultCh <- v
 		errCh <- e
 	}()
@@ -179,7 +201,9 @@ func TestLocalConcurrencyGate_BlockingMode(t *testing.T) {
 	}
 
 	// 4. Release request 1
-	r1.Release()
+	for _, f := range releases1 {
+		f()
+	}
 
 	// 5. Goroutine should unblock and the request should be admitted
 	select {
@@ -194,8 +218,12 @@ func TestLocalConcurrencyGate_BlockingMode(t *testing.T) {
 	assert.Equal(t, 0.0, gate.Budget(ctx))
 
 	// Clean up
-	r2.Release()
-	r3.Release()
+	for _, f := range releases2 {
+		f()
+	}
+	for _, f := range releases3 {
+		f()
+	}
 	assert.Equal(t, 1.0, gate.Budget(ctx))
 }
 
@@ -204,20 +232,24 @@ func TestLocalConcurrencyGate_BlockingModeCancel(t *testing.T) {
 	ctx := context.Background()
 
 	// Admit 1 request to exhaust capacity
+	var releases1 []pipeline.GateReleaseFunc
 	r1 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
-	v1, err := gate.Apply(ctx, r1)
+	v1, err := gate.Apply(ctx, r1, &releases1)
 	require.NoError(t, err)
 	assert.Equal(t, pipeline.ActionContinue, v1.Action)
 
 	// Try to admit 2nd request with a cancelled context
+	var releases2 []pipeline.GateReleaseFunc
 	r2 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{})
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancel() // cancel immediately
 
-	_, err = gate.Apply(cancelCtx, r2)
+	_, err = gate.Apply(cancelCtx, r2, &releases2)
 	assert.ErrorIs(t, err, context.Canceled)
 
 	// Clean up
-	r1.Release()
+	for _, f := range releases1 {
+		f()
+	}
 	assert.Equal(t, 1.0, gate.Budget(ctx))
 }

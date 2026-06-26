@@ -22,7 +22,8 @@ func TestWaitOnRefuseGate_Apply(t *testing.T) {
 		gate := NewWaitOnRefuseGate(inner)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		res, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
 		assert.NoError(t, err)
 		assert.Equal(t, pipeline.ActionWait, res.Action)
 	})
@@ -32,7 +33,8 @@ func TestWaitOnRefuseGate_Apply(t *testing.T) {
 		gate := NewWaitOnRefuseGate(inner)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		res, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
 		assert.NoError(t, err)
 		assert.Equal(t, pipeline.ActionContinue, res.Action)
 	})
@@ -42,7 +44,8 @@ func TestWaitOnRefuseGate_Apply(t *testing.T) {
 		gate := NewWaitOnRefuseGate(inner)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		res, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
 		assert.NoError(t, err)
 		assert.Equal(t, pipeline.ActionWait, res.Action)
 	})
@@ -52,7 +55,8 @@ func TestWaitOnRefuseGate_Apply(t *testing.T) {
 		gate := NewWaitOnRefuseGate(inner)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		res, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
 		assert.NoError(t, err)
 		assert.Equal(t, pipeline.ActionDrop, res.Action)
 	})
@@ -62,8 +66,9 @@ func TestWaitOnRefuseGate_Apply(t *testing.T) {
 		gate := NewWaitOnRefuseGate(inner)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		_, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		_, err := gate.Apply(context.Background(), msg, &releases)
 		assert.Error(t, err)
-		assert.Equal(t, "underlying failure", err.Error())
+		assert.ErrorContains(t, err, "underlying failure")
 	})
 }

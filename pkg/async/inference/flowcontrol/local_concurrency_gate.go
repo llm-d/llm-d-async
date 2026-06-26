@@ -2,6 +2,7 @@ package flowcontrol
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/llm-d-incubation/llm-d-async/api"
@@ -63,7 +64,7 @@ func (g *LocalConcurrencyGate) Budget(ctx context.Context) float64 {
 
 // Apply implements pipeline.Gate.
 // Returns VerdictContinue if request fits in budget, VerdictRefuse with redeliver otherwise.
-func (g *LocalConcurrencyGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+func (g *LocalConcurrencyGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
 	g.mu.Lock()
 
 	if g.limit <= 0 {
@@ -81,15 +82,17 @@ func (g *LocalConcurrencyGate) Apply(ctx context.Context, msg *api.InternalReque
 			g.inFlight++
 			g.mu.Unlock()
 
-			msg.AttachRelease(func() {
-				<-sem
-				g.mu.Lock()
-				g.inFlight--
-				g.mu.Unlock()
-			})
+			if releases != nil {
+				*releases = append(*releases, func() {
+					<-sem
+					g.mu.Lock()
+					g.inFlight--
+					g.mu.Unlock()
+				})
+			}
 			return pipeline.Continue(), nil
 		case <-ctx.Done():
-			return pipeline.Verdict{}, ctx.Err()
+			return pipeline.Verdict{}, fmt.Errorf("context canceled: %w", ctx.Err())
 		}
 	}
 
@@ -102,11 +105,13 @@ func (g *LocalConcurrencyGate) Apply(ctx context.Context, msg *api.InternalReque
 	g.inFlight++
 	g.mu.Unlock()
 
-	msg.AttachRelease(func() {
-		g.mu.Lock()
-		g.inFlight--
-		g.mu.Unlock()
-	})
+	if releases != nil {
+		*releases = append(*releases, func() {
+			g.mu.Lock()
+			g.inFlight--
+			g.mu.Unlock()
+		})
+	}
 
 	return pipeline.Continue(), nil
 }

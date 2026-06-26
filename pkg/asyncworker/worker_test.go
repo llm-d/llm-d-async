@@ -1770,10 +1770,12 @@ func (g *raceMockPoolGate) Budget(ctx context.Context) float64 {
 	return 1.0
 }
 
-func (g *raceMockPoolGate) Apply(ctx context.Context, ir *asyncapi.InternalRequest) (pipeline.Verdict, error) {
-	ir.AttachRelease(func() {
-		atomic.AddInt32(g.releaseCalled, 1)
-	})
+func (g *raceMockPoolGate) Apply(ctx context.Context, ir *asyncapi.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	if releases != nil {
+		*releases = append(*releases, func() {
+			atomic.AddInt32(g.releaseCalled, 1)
+		})
+	}
 	return pipeline.Continue(), nil
 }
 
@@ -1807,7 +1809,8 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 			Payload:  map[string]any{"model": "test"},
 		},
 	)
-	ir.AttachRelease(func() {
+	var queueReleases []pipeline.GateReleaseFunc
+	queueReleases = append(queueReleases, func() {
 		atomic.AddInt32(&queueReleaseCalled, 1)
 	})
 
@@ -1822,17 +1825,21 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 		t.Fatal("timeout waiting for result")
 	}
 
-	// Concurrently invoke Release on the queue flow's reference (ir) while the worker exits processMessage
-	// which executes its deferred poolIR.Release()
+	// Concurrently invoke Release on the queue flow's reference (queueReleases) while the worker exits processMessage
+	// which executes its deferred poolReleases cleanup
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ir.Release()
+		for _, f := range queueReleases {
+			if f != nil {
+				f()
+			}
+		}
 	}()
 	wg.Wait()
 
-	// Wait for worker goroutine poolIR.Release() to finish executing
+	// Wait for worker goroutine poolReleases to finish executing
 	time.Sleep(50 * time.Millisecond)
 
 	if atomic.LoadInt32(&queueReleaseCalled) != 1 {
@@ -1842,4 +1849,3 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 		t.Errorf("expected pool release to be called exactly once, got %d", poolReleaseCalled)
 	}
 }
-

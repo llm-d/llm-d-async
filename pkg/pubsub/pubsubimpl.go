@@ -475,14 +475,17 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		}
 
 		ir := api.NewInternalRequest(irout, &body)
-		defer ir.Release()
+		var releases []pipeline.GateReleaseFunc
+		defer func() {
+			pipeline.ReleaseGateReleases(releases)
+		}()
 
 		resultsChannel := make(chan bool, 1)
 		resultChannels.Store(msg.ID, resultsChannel)
 		defer resultChannels.Delete(msg.ID)
 
 		// Apply gate
-		verdict, err := gate.Apply(ctx, ir)
+		verdict, err := gate.Apply(ctx, ir, &releases)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
 			msg.Nack()

@@ -39,7 +39,7 @@ func (m *mockGate) Budget(ctx context.Context) float64 {
 	return m.budget
 }
 
-func (m *mockGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+func (m *mockGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
 	m.calls++
 	if m.err != nil {
 		return pipeline.Verdict{}, m.err
@@ -50,9 +50,11 @@ func (m *mockGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipelin
 	if m.verdict.Action != pipeline.ActionContinue {
 		return m.verdict, nil
 	}
-	msg.AttachRelease(func() {
-		m.releaseCounter++
-	})
+	if releases != nil {
+		*releases = append(*releases, func() {
+			m.releaseCounter++
+		})
+	}
 	return m.verdict, nil
 }
 
@@ -83,7 +85,8 @@ func TestCompositeGate_Apply(t *testing.T) {
 	t.Run("No inner gates", func(t *testing.T) {
 		gate := NewCompositeGate()
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		res, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
 		assert.NoError(t, err)
 		assert.Equal(t, pipeline.ActionContinue, res.Action)
 	})
@@ -94,11 +97,16 @@ func TestCompositeGate_Apply(t *testing.T) {
 		gate := NewCompositeGate(gate1, gate2)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		res, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
 		assert.NoError(t, err)
 		assert.Equal(t, pipeline.ActionContinue, res.Action)
 
-		msg.Release()
+		for i := len(releases) - 1; i >= 0; i-- {
+			if releases[i] != nil {
+				releases[i]()
+			}
+		}
 		assert.Equal(t, 1, gate1.releaseCounter)
 		assert.Equal(t, 1, gate2.releaseCounter)
 	})
@@ -110,7 +118,8 @@ func TestCompositeGate_Apply(t *testing.T) {
 		gate := NewCompositeGate(gate1, gate2, gate3)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		res, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
 		assert.NoError(t, err)
 		assert.Equal(t, pipeline.ActionRefuse, res.Action)
 
@@ -126,7 +135,8 @@ func TestCompositeGate_Apply(t *testing.T) {
 		gate := NewCompositeGate(gate1, gate2)
 
 		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
-		_, err := gate.Apply(context.Background(), msg)
+		var releases []pipeline.GateReleaseFunc
+		_, err := gate.Apply(context.Background(), msg, &releases)
 		assert.Error(t, err)
 
 		assert.Equal(t, 1, gate1.calls)
