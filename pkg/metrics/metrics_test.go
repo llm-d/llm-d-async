@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestGetAsyncProcessorCollectors_withoutLatency(t *testing.T) {
@@ -27,6 +28,8 @@ func TestGetAsyncProcessorCollectors_includesGauges(t *testing.T) {
 			"QueueDepth":       QueueDepth,
 			"InflightRequests": InflightRequests,
 			"BrokerBacklog":    BrokerBacklog,
+			"DispatchBudget":   DispatchBudget,
+			"PoolWorkerLimit":  PoolWorkerLimit,
 		} {
 			if !containsCollector(collectors, gauge) {
 				t.Errorf("expected %s gauge to be present (supportsMessageLatency=%v)", name, withLatency)
@@ -54,6 +57,22 @@ func TestGetAsyncProcessorCollectors_includesQueueResidence(t *testing.T) {
 		if !containsCollector(collectors, QueueResidenceTime) {
 			t.Errorf("expected QueueResidenceTime to be present (supportsMessageLatency=%v)", withLatency)
 		}
+	}
+}
+
+func TestSetDispatchBudget(t *testing.T) {
+	SetDispatchBudget(0.42, "q1", "queue-1", "pool-a")
+	got := testutil.ToFloat64(DispatchBudget.WithLabelValues("q1", "queue-1", "pool-a"))
+	if got != 0.42 {
+		t.Errorf("DispatchBudget = %v, want 0.42", got)
+	}
+}
+
+func TestSetPoolWorkerLimit(t *testing.T) {
+	SetPoolWorkerLimit("pool-a", 8)
+	got := testutil.ToFloat64(PoolWorkerLimit.WithLabelValues("pool-a"))
+	if got != 8 {
+		t.Errorf("PoolWorkerLimit = %v, want 8", got)
 	}
 }
 

@@ -90,6 +90,14 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_broker_backlog",
 		Help: "Number of undelivered/pending messages held by the broker queue.",
 	}, queueLabels)
+	DispatchBudget = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_dispatch_budget",
+		Help: "Current dispatch budget [0.0-1.0] returned by the queue's gate; the fraction of system capacity available for new requests (0.0 = gate fully closed).",
+	}, queueLabels)
+	PoolWorkerLimit = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_pool_worker_limit",
+		Help: "Configured number of concurrent workers (the concurrency limit) for a pool. Compare against async_inflight_requests for worker utilization.",
+	}, []string{LabelPoolName})
 )
 
 func RecordRetry(queueID, queueName, poolName string) {
@@ -156,11 +164,22 @@ func SetBrokerBacklog(queueID, queueName, poolName string, n float64) {
 	BrokerBacklog.WithLabelValues(queueID, queueName, poolName).Set(n)
 }
 
+// SetDispatchBudget sets the current dispatch budget [0.0-1.0] for a queue's gate.
+func SetDispatchBudget(budget float64, queueID, queueName, poolName string) {
+	DispatchBudget.WithLabelValues(queueID, queueName, poolName).Set(budget)
+}
+
+// SetPoolWorkerLimit sets the configured worker concurrency limit for a pool.
+func SetPoolWorkerLimit(poolName string, n float64) {
+	PoolWorkerLimit.WithLabelValues(poolName).Set(n)
+}
+
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
 		Retries, AsyncReqs, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests,
 		QueueDepth, InflightRequests, BrokerBacklog, InferenceLatencyTime, QueueResidenceTime,
+		DispatchBudget, PoolWorkerLimit,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)
