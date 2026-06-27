@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	ap "github.com/llm-d-incubation/llm-d-async/pkg/async"
+	randomrobin "github.com/llm-d-incubation/llm-d-async/pkg/async/mergepolicy/randomrobin"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d-incubation/llm-d-async/api"
@@ -77,7 +77,7 @@ func TestRedisImpl(t *testing.T) {
 			Workers: 1,
 		},
 	}
-	dispatch := ap.NewRandomRobinPolicy().MergeRequestChannels(flow.RequestChannels(), pools)
+	dispatch := randomrobin.NewRandomRobinPolicy("test").MergeRequestChannels(flow.RequestChannels(), pools)
 	mergedChannel := dispatch.Channels["default"]
 
 	select {

@@ -1,4 +1,4 @@
-package async
+package randomrobin
 
 import (
 	"fmt"
@@ -33,7 +33,7 @@ func TestProcessAllChannels(t *testing.T) {
 		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "http://gw", RequestPathURL: "/v1"},
 		{Channel: make(chan *api.InternalRequest, msgsPerChannel), IGWBaseURL: "http://gw", RequestPathURL: "/v1"},
 	}
-	policy := NewRandomRobinPolicy()
+	policy := NewRandomRobinPolicy("test")
 
 	// Send messages to each channel
 	for i, ch := range channels {
@@ -70,7 +70,7 @@ func TestProcessAllChannels(t *testing.T) {
 }
 
 func TestEmptyChannelsReturnsClosed(t *testing.T) {
-	policy := NewRandomRobinPolicy()
+	policy := NewRandomRobinPolicy("test")
 	merged := policy.MergeRequestChannels(nil, nil)
 	if len(merged.Channels) != 0 {
 		t.Fatalf("expected 0 channels in dispatch, got %d", len(merged.Channels))
@@ -87,7 +87,7 @@ func TestMetaAlignmentAfterChannelClosure(t *testing.T) {
 	pools := map[string]pipeline.WorkerPoolConfig{
 		"pool-a": {ID: "pool-a", Workers: 1},
 	}
-	policy := NewRandomRobinPolicy()
+	policy := NewRandomRobinPolicy("test")
 	merged := policy.MergeRequestChannels(channels, pools)
 	mergedChannel := merged.Channels["pool-a"]
 
@@ -166,7 +166,7 @@ func TestPerMessageEndpointOverridesChannelURL(t *testing.T) {
 	pools := map[string]pipeline.WorkerPoolConfig{
 		"my-pool": {ID: "my-pool", Workers: 1},
 	}
-	policy := NewRandomRobinPolicy()
+	policy := NewRandomRobinPolicy("test")
 
 	// One message with endpoint, one without.
 	ch.Channel <- irWithEndpoint("with-ep", "/v1/custom")
@@ -230,7 +230,7 @@ func TestURLJoinPathHandlesSlashes(t *testing.T) {
 			}
 			close(ch.Channel)
 
-			policy := NewRandomRobinPolicy()
+			policy := NewRandomRobinPolicy("test")
 			merged := policy.MergeRequestChannels([]pipeline.RequestChannel{ch}, pools)
 			mergedChannel := merged.Channels["test-pool"]
 
@@ -266,7 +266,7 @@ func TestPerRequestHeadersMerged(t *testing.T) {
 	pools := map[string]pipeline.WorkerPoolConfig{
 		"test-pool": {ID: "test-pool", Workers: 1},
 	}
-	policy := NewRandomRobinPolicy()
+	policy := NewRandomRobinPolicy("test")
 
 	ch.Channel <- irWithHeaders("custom", map[string]string{
 		"Authorization": "Bearer tok",
@@ -318,7 +318,7 @@ func TestMergedChannelIsBuffered(t *testing.T) {
 	for i := range numChannels {
 		channels[i] = pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 1), IGWBaseURL: "http://gw", RequestPathURL: "/v1"}
 	}
-	policy := NewRandomRobinPolicy()
+	policy := NewRandomRobinPolicy("test")
 	pools := map[string]pipeline.WorkerPoolConfig{
 		"default": {ID: "default", Workers: 1},
 	}
@@ -350,7 +350,7 @@ func TestMergeRequestChannels_PanicOnMissingPool(t *testing.T) {
 	channels := []pipeline.RequestChannel{
 		{WorkerPoolID: "non-existent-pool"},
 	}
-	policy := NewRandomRobinPolicy()
+	policy := NewRandomRobinPolicy("test")
 
 	defer func() {
 		if r := recover(); r == nil {

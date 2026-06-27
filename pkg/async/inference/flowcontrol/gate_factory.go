@@ -131,6 +131,27 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 
 		return NewWaitOnRefuseGate(innerGate), nil
 
+	case "tier-priority-admission":
+		satGateType := params["saturation_gate"]
+		if satGateType == "" {
+			return nil, fmt.Errorf("tier-priority-admission gate requires a 'saturation_gate' parameter")
+		}
+		satGateParamsJSON := params["saturation_gate_params"]
+		var satGateParams map[string]string
+		if satGateParamsJSON != "" {
+			if err := json.Unmarshal([]byte(satGateParamsJSON), &satGateParams); err != nil {
+				return nil, fmt.Errorf("tier-priority-admission gate failed to parse 'saturation_gate_params': %w", err)
+			}
+		}
+
+		satGate, err := f.CreateGate(satGateType, satGateParams)
+		if err != nil {
+			return nil, fmt.Errorf("tier-priority-admission gate failed to create saturation gate %q: %w", satGateType, err)
+		}
+
+		tierLabel := params["tier_label"]
+		return NewTierPriorityAdmissionGate(satGate, tierLabel), nil
+
 	case "constant":
 		return ConstOpenGate(), nil
 

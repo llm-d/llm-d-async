@@ -35,9 +35,9 @@ type WorkerConfig struct {
 }
 
 type QueueConfig struct {
-	Impl                string
-	MergePolicy         string
-	BacklogPollInterval time.Duration
+	Impl                  string
+	MergePolicyConfigFile string
+	BacklogPollInterval   time.Duration
 }
 
 type ObservabilityConfig struct {
@@ -86,7 +86,6 @@ func NewOptions() *Options {
 			},
 			Queue: QueueConfig{
 				Impl:                "redis-pubsub",
-				MergePolicy:         "random-robin",
 				BacklogPollInterval: 15 * time.Second,
 			},
 			Observability: ObservabilityConfig{
@@ -116,7 +115,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&o.Worker.DrainTimeout, "drain-timeout", o.Worker.DrainTimeout, "maximum time to wait for in-flight requests to complete after SIGTERM")
 	fs.StringVar(&o.Worker.PoolConfigFile, "pool-config-file", o.Worker.PoolConfigFile, "Path to the pools configuration JSON file")
 
-	fs.StringVar(&o.Queue.MergePolicy, "request-merge-policy", o.Queue.MergePolicy, "The request merge policy to use. Supported policies: random-robin")
+	fs.StringVar(&o.Queue.MergePolicyConfigFile, "request-merge-policy-config", o.Queue.MergePolicyConfigFile, "Path to the request merge policy configuration JSON file (empty defaults to random-robin)")
 	fs.StringVar(&o.Queue.Impl, "message-queue-impl", o.Queue.Impl, "The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
 	fs.DurationVar(&o.Queue.BacklogPollInterval, "metrics-backlog-poll-interval", o.Queue.BacklogPollInterval, "interval to poll the broker for queue backlog metrics (0 disables); only applies to flows that support it (redis-sortedset, gcp-pubsub)")
 
@@ -166,16 +165,12 @@ func (o *Options) Complete() error {
 }
 
 var (
-	validQueueImpls    = []string{"redis-pubsub", "redis-sortedset", "gcp-pubsub", "gcp-pubsub-gated"}
-	validMergePolicies = []string{"random-robin"}
+	validQueueImpls = []string{"redis-pubsub", "redis-sortedset", "gcp-pubsub", "gcp-pubsub-gated"}
 )
 
 func (o *Options) Validate() error {
 	if !contains(validQueueImpls, o.Queue.Impl) {
 		return fmt.Errorf("--message-queue-impl must be one of: %s", strings.Join(validQueueImpls, ", "))
-	}
-	if !contains(validMergePolicies, o.Queue.MergePolicy) {
-		return fmt.Errorf("--request-merge-policy must be one of: %s", strings.Join(validMergePolicies, ", "))
 	}
 	if strings.HasPrefix(o.Queue.Impl, "redis") && o.RedisConnection.URL == "" {
 		return fmt.Errorf("--redis.url (or REDIS_URL env var) is required when using %s", o.Queue.Impl)
