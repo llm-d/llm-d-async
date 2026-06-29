@@ -95,9 +95,15 @@ func ApplyChain(ctx context.Context, msg *api.InternalRequest, gates []Gate, rel
 	return Continue(), nil
 }
 
+// GateConfig holds the configuration for a single gate instance.
+type GateConfig struct {
+	GateType   string         `json:"gate_type,omitempty"`
+	GateParams map[string]any `json:"gate_params,omitempty"`
+}
+
 // GateFactory defines the interface for creating Gate instances.
 type GateFactory interface {
-	CreateGate(gateType string, params map[string]string) (Gate, error)
+	CreateGate(cfg GateConfig) (Gate, error)
 }
 
 var _ Gate = DispatchGateFunc(nil)

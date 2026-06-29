@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -22,10 +21,10 @@ import (
 )
 
 // parseGateParams parses a JSON-encoded string (from --redis.ss.gate-params)
-// into a map[string]string for gate parameter configuration.
+// into a map[string]any for gate parameter configuration.
 // Used to pass gate parameters from CLI or YAML to the gate factory.
-func parseGateParams(s string) map[string]string {
-	m := map[string]string{}
+func parseGateParams(s string) map[string]any {
+	m := map[string]any{}
 	if s == "" || s == "{}" {
 		return m
 	}
@@ -33,45 +32,16 @@ func parseGateParams(s string) map[string]string {
 	return m
 }
 
-// StringMap is a map[string]string that tolerates non-string JSON values
-// by converting them to their string representation during unmarshaling.
-type StringMap map[string]string
-
-func (m *StringMap) UnmarshalJSON(data []byte) error {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	result := make(map[string]string, len(raw))
-	for k, v := range raw {
-		switch val := v.(type) {
-		case string:
-			result[k] = val
-		case float64:
-			result[k] = strconv.FormatFloat(val, 'f', -1, 64)
-		case bool:
-			result[k] = strconv.FormatBool(val)
-		case nil:
-			result[k] = ""
-		default:
-			return fmt.Errorf("gate_params key %q: unsupported value type %T (only strings, numbers, and booleans are allowed)", k, v)
-		}
-	}
-	*m = result
-	return nil
-}
-
 type queueConfig struct {
-	ID                 string            `json:"id,omitempty"`
-	QueueName          string            `json:"queue_name,omitempty"`
-	ResultQueueName    string            `json:"result_queue_name,omitempty"`
-	WorkerPoolID       string            `json:"worker_pool_id"`
-	InferenceObjective string            `json:"inference_objective"`
-	RequestPathURL     string            `json:"request_path_url"`
-	IGWBaseURL         string            `json:"igw_base_url"`
-	GateType           string            `json:"gate_type"`
-	GateParams         StringMap         `json:"gate_params,omitempty"`
-	Labels             map[string]string `json:"labels,omitempty"`
+	ID                 string `json:"id,omitempty"`
+	QueueName          string `json:"queue_name,omitempty"`
+	ResultQueueName    string `json:"result_queue_name,omitempty"`
+	WorkerPoolID       string `json:"worker_pool_id"`
+	InferenceObjective string `json:"inference_objective"`
+	RequestPathURL     string `json:"request_path_url"`
+	IGWBaseURL         string `json:"igw_base_url"`
+	pipeline.GateConfig
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type requestChannelData struct {
@@ -167,7 +137,7 @@ func NewRedisSortedSetFlow(flowOpts SortedSetFlowOptions, connOpts ConnectionOpt
 	for _, cfg := range configs {
 		var gate pipeline.Gate
 		if r.gateFactory != nil && cfg.GateType != "" {
-			gate, err = r.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
+			gate, err = r.gateFactory.CreateGate(cfg.GateConfig)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create gate for queue %q (gate_type=%q): %w", cfg.QueueName, cfg.GateType, err)
 			}
@@ -258,8 +228,7 @@ func loadQueueConfigs(opts SortedSetFlowOptions) ([]queueConfig, error) {
 			InferenceObjective: opts.InferenceObjective,
 			IGWBaseURL:         opts.IGWBaseURL,
 			RequestPathURL:     opts.RequestPathURL,
-			GateType:           opts.GateType,
-			GateParams:         parseGateParams(opts.GateParamsJSON),
+			GateConfig:         pipeline.GateConfig{GateType: opts.GateType, GateParams: parseGateParams(opts.GateParamsJSON)},
 			WorkerPoolID:       "default",
 		}}
 	}

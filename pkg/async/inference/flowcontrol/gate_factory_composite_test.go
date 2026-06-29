@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -31,9 +32,9 @@ func TestGateFactory_CreateCompositeGate(t *testing.T) {
 			{"gate_type": "constant", "gate_params": {}},
 			{"gate_type": "constant", "gate_params": {}}
 		]`
-		gate, err := factory.CreateGate("composite", map[string]string{
+		gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "composite", GateParams: map[string]any{
 			"gates": gatesJSON,
-		})
+		}})
 
 		assert.NoError(t, err)
 		assert.NotNil(t, gate)
@@ -43,7 +44,7 @@ func TestGateFactory_CreateCompositeGate(t *testing.T) {
 	})
 
 	t.Run("Missing gates parameter", func(t *testing.T) {
-		gate, err := factory.CreateGate("composite", map[string]string{})
+		gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "composite", GateParams: map[string]any{}})
 
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "requires 'gates' parameter")
@@ -51,9 +52,9 @@ func TestGateFactory_CreateCompositeGate(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON", func(t *testing.T) {
-		gate, err := factory.CreateGate("composite", map[string]string{
+		gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "composite", GateParams: map[string]any{
 			"gates": `[invalid json`,
-		})
+		}})
 
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to parse 'gates' parameter")
@@ -65,9 +66,9 @@ func TestGateFactory_CreateCompositeGate(t *testing.T) {
 			{"gate_type": "prometheus-saturation", "gate_params": {}}
 		]`
 		// Missing 'pool' will cause prometheus-saturation to fail
-		gate, err := factory.CreateGate("composite", map[string]string{
+		gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "composite", GateParams: map[string]any{
 			"gates": gatesJSON,
-		})
+		}})
 
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to create inner gate \"prometheus-saturation\"")

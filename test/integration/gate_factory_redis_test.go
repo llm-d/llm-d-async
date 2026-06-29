@@ -20,14 +20,14 @@ func TestGateFactory_RedisQuota_ConcurrencyParsing(t *testing.T) {
 	s := miniredis.RunT(t)
 	factory := flowcontrol.NewGateFactory("")
 
-	gate, err := factory.CreateGate("redis-quota", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "redis-quota", GateParams: map[string]any{
 		"address":   s.Addr(),
 		"attribute": "model",
 		"mode":      "concurrency",
-		"limit":     "2",
+		"limit":     2,
 		"window":    "30s",
 		"prefix":    "test:",
-	})
+	}})
 	require.NoError(t, err)
 	require.NotNil(t, gate)
 
@@ -79,12 +79,12 @@ func TestGateFactory_RedisQuota_RateLimitParsing(t *testing.T) {
 	s := miniredis.RunT(t)
 	factory := flowcontrol.NewGateFactory("")
 
-	gate, err := factory.CreateGate("redis-quota", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "redis-quota", GateParams: map[string]any{
 		"address": s.Addr(),
 		"mode":    "rate-limit",
-		"limit":   "3",
+		"limit":   3,
 		"window":  "1m",
-	})
+	}})
 	require.NoError(t, err)
 	require.NotNil(t, gate)
 
@@ -111,15 +111,15 @@ func TestGateFactory_RedisQuota_RateLimitParsing(t *testing.T) {
 func TestGateFactory_RedisQuota_MissingParams(t *testing.T) {
 	factory := flowcontrol.NewGateFactory("")
 
-	_, err := factory.CreateGate("redis-quota", map[string]string{
-		"limit": "5",
-	})
+	_, err := factory.CreateGate(pipeline.GateConfig{GateType: "redis-quota", GateParams: map[string]any{
+		"limit": 5,
+	}})
 	assert.Error(t, err, "Should fail when address is missing")
 
 	s := miniredis.RunT(t)
-	_, err = factory.CreateGate("redis-quota", map[string]string{
+	_, err = factory.CreateGate(pipeline.GateConfig{GateType: "redis-quota", GateParams: map[string]any{
 		"address": s.Addr(),
-	})
+	}})
 	assert.Error(t, err, "Should fail when limit is missing")
 }
 
@@ -129,10 +129,10 @@ func TestGateFactory_RedisQuota_DefaultParams(t *testing.T) {
 	s := miniredis.RunT(t)
 	factory := flowcontrol.NewGateFactory("")
 
-	gate, err := factory.CreateGate("redis-quota", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "redis-quota", GateParams: map[string]any{
 		"address": s.Addr(),
-		"limit":   "1",
-	})
+		"limit":   1,
+	}})
 	require.NoError(t, err)
 
 	// Default attribute is "userid", default mode is "rate-limit".

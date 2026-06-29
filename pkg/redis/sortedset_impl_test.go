@@ -54,20 +54,20 @@ func TestParseQueueConfigs(t *testing.T) {
 					t.Errorf("expected q1, got %s", configs[0].QueueName)
 				}
 				if configs[0].GateParams["address"] != "localhost:6379" {
-					t.Errorf("expected localhost:6379, got %s", configs[0].GateParams["address"])
+					t.Errorf("expected localhost:6379, got %v", configs[0].GateParams["address"])
 				}
 			},
 		},
 		{
-			name:    "numeric gate params coerced to strings",
+			name:    "numeric gate params preserved as native types",
 			input:   `[{"queue_name":"q1","igw_base_url":"http://gw","gate_type":"prometheus-saturation","gate_params":{"threshold":0.7,"pool":"p1"}}]`,
 			wantLen: 1,
 			validate: func(t *testing.T, configs []queueConfig) {
-				if configs[0].GateParams["threshold"] != "0.7" {
-					t.Errorf("expected '0.7', got '%s'", configs[0].GateParams["threshold"])
+				if configs[0].GateParams["threshold"] != 0.7 {
+					t.Errorf("expected 0.7, got '%v'", configs[0].GateParams["threshold"])
 				}
 				if configs[0].GateParams["pool"] != "p1" {
-					t.Errorf("expected 'p1', got '%s'", configs[0].GateParams["pool"])
+					t.Errorf("expected 'p1', got '%v'", configs[0].GateParams["pool"])
 				}
 			},
 		},
@@ -115,77 +115,6 @@ func TestParseQueueConfigs(t *testing.T) {
 			}
 			if tt.validate != nil {
 				tt.validate(t, configs)
-			}
-		})
-	}
-}
-
-func TestStringMapUnmarshal(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected map[string]string
-	}{
-		{
-			name:     "string values",
-			input:    `{"key":"value"}`,
-			expected: map[string]string{"key": "value"},
-		},
-		{
-			name:     "numeric float",
-			input:    `{"threshold":0.7}`,
-			expected: map[string]string{"threshold": "0.7"},
-		},
-		{
-			name:     "integer",
-			input:    `{"limit":5}`,
-			expected: map[string]string{"limit": "5"},
-		},
-		{
-			name:     "boolean",
-			input:    `{"enabled":true}`,
-			expected: map[string]string{"enabled": "true"},
-		},
-		{
-			name:     "mixed types",
-			input:    `{"pool":"p1","threshold":0.8,"limit":100,"active":true}`,
-			expected: map[string]string{"pool": "p1", "threshold": "0.8", "limit": "100", "active": "true"},
-		},
-		{
-			name:     "null becomes empty string",
-			input:    `{"key":null}`,
-			expected: map[string]string{"key": ""},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var m StringMap
-			if err := json.Unmarshal([]byte(tt.input), &m); err != nil {
-				t.Fatalf("unmarshal error: %v", err)
-			}
-			for k, want := range tt.expected {
-				if got := m[k]; got != want {
-					t.Errorf("key %q: expected %q, got %q", k, want, got)
-				}
-			}
-		})
-	}
-}
-
-func TestStringMapRejectsNonScalar(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-	}{
-		{"nested object", `{"key":{"nested":"value"}}`},
-		{"array", `{"key":[1,2,3]}`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var m StringMap
-			if err := json.Unmarshal([]byte(tt.input), &m); err == nil {
-				t.Error("expected error for non-scalar value, got nil")
 			}
 		})
 	}

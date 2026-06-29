@@ -222,21 +222,21 @@ func TestNewSaturationPromQLSourceFromConfig(t *testing.T) {
 
 	t.Run("DefaultQuery", func(t *testing.T) {
 		source, err := NewSaturationPromQLSourceFromConfig(promConfig,
-			map[string]string{"pool": "my-pool"})
+			map[string]any{"pool": "my-pool"})
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `1 - inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
 		require.NotContains(t, source.expr, "namespace")
 	})
 
 	t.Run("RequiresPool", func(t *testing.T) {
-		_, err := NewSaturationPromQLSourceFromConfig(promConfig, map[string]string{})
+		_, err := NewSaturationPromQLSourceFromConfig(promConfig, map[string]any{})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "inference pool name is required")
 	})
 
 	t.Run("WithNamespace", func(t *testing.T) {
 		source, err := NewSaturationPromQLSourceFromConfig(promConfig,
-			map[string]string{"pool": "my-pool", "namespace": "prod"})
+			map[string]any{"pool": "my-pool", "namespace": "prod"})
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `inference_pool="my-pool"`)
 		require.Contains(t, source.expr, `namespace="prod"`)
