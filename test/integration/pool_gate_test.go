@@ -117,11 +117,15 @@ func TestPoolGating_Blocking(t *testing.T) {
 // TestPoolGating_Timeout verifies that request deadline is respected
 // while worker is parked waiting for gate capacity.
 func TestPoolGating_Timeout(t *testing.T) {
+	var closeOnce sync.Once
 	serverDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-serverDone
 	}))
-	defer server.Close()
+	defer func() {
+		closeOnce.Do(func() { close(serverDone) })
+		server.Close()
+	}()
 
 	client := asyncworker.NewHTTPInferenceClient(server.Client())
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 2)
@@ -185,8 +189,8 @@ func TestPoolGating_Timeout(t *testing.T) {
 	}
 
 	cancel()
+	closeOnce.Do(func() { close(serverDone) })
 	wg.Wait()
-	close(serverDone)
 }
 
 type customMockGate struct {
