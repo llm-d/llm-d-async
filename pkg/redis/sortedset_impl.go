@@ -23,13 +23,15 @@ import (
 // parseGateParams parses a JSON-encoded string (from --redis.ss.gate-params)
 // into a map[string]any for gate parameter configuration.
 // Used to pass gate parameters from CLI or YAML to the gate factory.
-func parseGateParams(s string) map[string]any {
+func parseGateParams(s string) (map[string]any, error) {
 	m := map[string]any{}
 	if s == "" || s == "{}" {
-		return m
+		return m, nil
 	}
-	_ = json.Unmarshal([]byte(s), &m)
-	return m
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, fmt.Errorf("failed to parse gate params JSON: %w", err)
+	}
+	return m, nil
 }
 
 type queueConfig struct {
@@ -223,12 +225,16 @@ func loadQueueConfigs(opts SortedSetFlowOptions) ([]queueConfig, error) {
 			return nil, err
 		}
 	} else {
+		gateParams, err := parseGateParams(opts.GateParamsJSON)
+		if err != nil {
+			return nil, err
+		}
 		configs = []queueConfig{{
 			QueueName:          opts.RequestQueueName,
 			InferenceObjective: opts.InferenceObjective,
 			IGWBaseURL:         opts.IGWBaseURL,
 			RequestPathURL:     opts.RequestPathURL,
-			GateConfig:         pipeline.GateConfig{GateType: opts.GateType, GateParams: parseGateParams(opts.GateParamsJSON)},
+			GateConfig:         pipeline.GateConfig{GateType: opts.GateType, GateParams: gateParams},
 			WorkerPoolID:       "default",
 		}}
 	}

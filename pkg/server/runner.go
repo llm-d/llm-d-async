@@ -134,7 +134,7 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 	poolGates := make(map[string]pipeline.Gate)
 	for poolID, pool := range poolsMap {
 		if pool.GateType != "" {
-			gate, err := gateFactory.CreateGate(pipeline.GateConfig{GateType: pool.GateType, GateParams: toAnyMap(pool.GateParams)})
+			gate, err := gateFactory.CreateGate(pipeline.GateConfig{GateType: pool.GateType, GateParams: pool.GateParams})
 			if err != nil {
 				setupLog.Error(err, "Failed to create pool gate", "poolID", poolID, "gateType", pool.GateType)
 				os.Exit(1)
@@ -399,17 +399,6 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 			poll()
 		}
 	}
-}
-
-func toAnyMap(m map[string]string) map[string]any {
-	if m == nil {
-		return nil
-	}
-	result := make(map[string]any, len(m))
-	for k, v := range m {
-		result[k] = v
-	}
-	return result
 }
 
 var sensitiveFlags = map[string]bool{

@@ -166,8 +166,8 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		if err != nil {
 			return nil, fmt.Errorf("redis-quota gate requires a valid 'limit': %w", err)
 		}
-		if limit == 0 {
-			return nil, fmt.Errorf("redis-quota gate requires a valid 'limit': %w", fmt.Errorf("limit not provided or zero"))
+		if limit <= 0 {
+			return nil, fmt.Errorf("redis-quota gate requires a positive 'limit', got %d", limit)
 		}
 
 		window, err := paramDuration(params, "window", 1*time.Minute)
@@ -398,6 +398,9 @@ func paramInt(params map[string]any, key string, defaultVal int) (int, error) {
 	}
 	switch val := v.(type) {
 	case float64:
+		if val != float64(int(val)) {
+			return 0, fmt.Errorf("invalid %s value: %g is not an integer", key, val)
+		}
 		return int(val), nil
 	case int:
 		return val, nil
