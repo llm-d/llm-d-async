@@ -117,9 +117,9 @@ func TestPoolGating_Blocking(t *testing.T) {
 // TestPoolGating_Timeout verifies that request deadline is respected
 // while worker is parked waiting for gate capacity.
 func TestPoolGating_Timeout(t *testing.T) {
+	serverDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Hang indefinitely to consume capacity
-		select {}
+		<-serverDone
 	}))
 	defer server.Close()
 
@@ -186,6 +186,7 @@ func TestPoolGating_Timeout(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+	close(serverDone)
 }
 
 type customMockGate struct {
