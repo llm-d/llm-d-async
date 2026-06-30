@@ -1,4 +1,4 @@
-{{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig }}
+{{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,5 +15,8 @@ data:
   {{- end }}
   {{- if .Values.ap.transformConfig }}
   transform-config.json: {{ .Values.ap.transformConfig | toJson | quote }}
+  {{- end }}
+  {{- if .Values.ap.requestMergePolicyConfig }}
+  request-merge-policy.json: {{ .Values.ap.requestMergePolicyConfig | toJson | quote }}
   {{- end }}
 {{- end }}

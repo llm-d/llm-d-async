@@ -34,12 +34,27 @@ const (
 
 	shortDrainRequestQueue = "short-drain-request-sortedset"
 	shortDrainResultQueue  = "short-drain-result-list"
+
+	tierPriorityInteractiveQueue = "tier-priority-interactive"
+	tierPriorityAsyncQueue       = "tier-priority-async"
+	tierPriorityResultQueue      = "tier-priority-result-list"
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 func enqueueMessage(ctx context.Context, rdb *redis.Client, queue string, msg api.RequestMessage) {
 	ir := api.NewInternalRequest(api.InternalRouting{}, &msg)
+	data, err := json.Marshal(ir)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	err = rdb.ZAdd(ctx, queue, redis.Z{
+		Score:  float64(msg.Deadline),
+		Member: string(data),
+	}).Err()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
+func enqueueMessageWithRouting(ctx context.Context, rdb *redis.Client, queue string, msg api.RequestMessage, routing api.InternalRouting) {
+	ir := api.NewInternalRequest(routing, &msg)
 	data, err := json.Marshal(ir)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	err = rdb.ZAdd(ctx, queue, redis.Z{
