@@ -1,6 +1,7 @@
 package tierpriority
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestTierPriorityOrdering(t *testing.T) {
 	pools := map[string]pipeline.WorkerPoolConfig{
 		"pool-p": {ID: "pool-p", Workers: 1},
 	}
-	policy := NewTierPriorityPolicy("test-policy", "x-gateway-priority")
+	policy := NewTierPriorityPolicy("test-policy", "x-gateway-priority", "tier")
 
 	// Message 1: overflow + batch => Priority 5
 	m1 := irWithLabels("msg-5", map[string]string{
@@ -90,7 +91,7 @@ func TestTierPriorityOrdering(t *testing.T) {
 }
 
 func TestSchedulerRoundRobin(t *testing.T) {
-	s := newScheduler(10, 2)
+	s := newScheduler(10, 2, "tier")
 
 	a1 := irWithLabels("a1", map[string]string{
 		"team":                  "team-a",
@@ -153,7 +154,7 @@ func TestTierPriorityFallback(t *testing.T) {
 	pools := map[string]pipeline.WorkerPoolConfig{
 		"pool-fb": {ID: "pool-fb", Workers: 1},
 	}
-	policy := NewTierPriorityPolicy("test-policy", "x-gateway-priority")
+	policy := NewTierPriorityPolicy("test-policy", "x-gateway-priority", "tier")
 
 	// Message with missing labels should map to lowest priority (5)
 	m := irWithLabels("missing-labels", nil)
@@ -174,5 +175,120 @@ func TestTierPriorityFallback(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out")
+	}
+}
+
+func TestTierPriorityCustomLabel(t *testing.T) {
+	ch := pipeline.RequestChannel{
+		Channel:      make(chan *api.InternalRequest, 2),
+		WorkerPoolID: "pool-fb",
+		IGWBaseURL:   "http://gw",
+	}
+	pools := map[string]pipeline.WorkerPoolConfig{
+		"pool-fb": {ID: "pool-fb", Workers: 1},
+	}
+	policy := NewTierPriorityPolicy("test-policy", "x-gateway-priority", "my_custom_tier")
+
+	// Message with my_custom_tier label
+	m := irWithLabels("custom-label-msg", map[string]string{
+		"my_custom_tier":        "interactive",
+		api.LabelClassification: string(api.ClassificationReserved),
+	})
+	ch.Channel <- m
+	close(ch.Channel)
+
+	dispatch := policy.MergeRequestChannels([]pipeline.RequestChannel{ch}, pools)
+	merged := dispatch.Channels["pool-fb"]
+
+	select {
+	case msg := <-merged:
+		if msg.PublicRequest.ReqID() != "custom-label-msg" {
+			t.Errorf("expected custom-label-msg, got %q", msg.PublicRequest.ReqID())
+		}
+		pHeader := msg.HttpHeaders["x-gateway-priority"]
+		if pHeader != "0" {
+			t.Errorf("expected priority header 0, got %q", pHeader)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestBucketKeyCleanup(t *testing.T) {
+	b := newBucket()
+	chA := pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)}
+	chB := pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)}
+	keyA := fmt.Sprintf("%p", chA.Channel)
+	keyB := fmt.Sprintf("%p", chB.Channel)
+
+	irA := irWithLabels("a1", nil)
+	irB := irWithLabels("b1", nil)
+
+	b.push(keyA, msgAndMeta{ir: irA, chMeta: chA})
+	b.push(keyB, msgAndMeta{ir: irB, chMeta: chB})
+
+	if len(b.keys) != 2 {
+		t.Errorf("expected 2 keys, got %d", len(b.keys))
+	}
+
+	_, ok := b.pop()
+	if !ok {
+		t.Fatal("expected to pop item")
+	}
+	if len(b.keys) != 1 {
+		t.Errorf("expected 1 key remaining after pop of empty queue, got %d", len(b.keys))
+	}
+
+	_, ok = b.pop()
+	if !ok {
+		t.Fatal("expected to pop second item")
+	}
+	if len(b.keys) != 0 {
+		t.Errorf("expected 0 keys remaining, got %d", len(b.keys))
+	}
+	if len(b.queues) != 0 {
+		t.Errorf("expected map to be empty, got %v", b.queues)
+	}
+}
+
+func TestPerBucketLimitsNonBlocking(t *testing.T) {
+	// scheduler with capacity 1 per bucket
+	s := newScheduler(1, 1, "tier")
+
+	chA := pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)}
+	chB := pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)}
+
+	// Message 1: overflow + batch => Priority 5
+	m1 := irWithLabels("msg-5", map[string]string{
+		"tier":                  "batch",
+		api.LabelClassification: string(api.ClassificationOverflow),
+	})
+
+	// Message 2: reserved + interactive => Priority 0
+	m2 := irWithLabels("msg-0", map[string]string{
+		"tier":                  "interactive",
+		api.LabelClassification: string(api.ClassificationReserved),
+	})
+
+	// Pushing m1 to bucket 5 succeeds
+	if ok := s.Push(m1, chA); !ok {
+		t.Fatal("expected push to succeed")
+	}
+
+	// Pushing another message to bucket 5 would block because capacity is 1.
+	// But pushing m2 to bucket 0 should succeed immediately because bucket 0 is empty.
+	done := make(chan bool)
+	go func() {
+		if ok := s.Push(m2, chB); !ok {
+			t.Error("expected push of m2 to succeed")
+		}
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		// Succeeded immediately without blocking!
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("push to empty bucket blocked")
 	}
 }

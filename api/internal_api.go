@@ -16,6 +16,14 @@ const (
 
 const LabelClassification = "classification"
 
+type PriorityTier string
+
+const (
+	TierInteractive PriorityTier = "interactive"
+	TierAsync       PriorityTier = "async"
+	TierBatch       PriorityTier = "batch"
+)
+
 // InternalRouting holds the resolved, authoritative routing fields used by
 // infrastructure (producers, workers, retry logic). These are not part of the
 // caller-facing contract and should not be set by callers directly.

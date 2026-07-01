@@ -26,7 +26,7 @@ func NewTierPriorityAdmissionGate(saturationGate pipeline.Gate, tierLabel string
 }
 
 func (g *TierPriorityAdmissionGate) Budget(ctx context.Context) float64 {
-	return 1.0
+	return g.saturationGate.Budget(ctx)
 }
 
 func (g *TierPriorityAdmissionGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
@@ -51,7 +51,7 @@ func (g *TierPriorityAdmissionGate) Apply(ctx context.Context, msg *api.Internal
 		tier = msg.Labels[g.tierLabel]
 	}
 
-	if tier == "interactive" && classification == api.ClassificationOverflow {
+	if tier == string(api.TierInteractive) && classification == api.ClassificationOverflow {
 		result := &api.ResultMessage{
 			ID:      msg.PublicRequest.ReqID(),
 			Payload: `{"error": "Too Many Requests", "code": 429}`,

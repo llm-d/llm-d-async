@@ -17,6 +17,7 @@ func init() {
 	plugins.MustRegister("tier-priority", func(name string, parameters json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
 		var params struct {
 			PriorityHeader string `json:"priority_header"`
+			TierLabel      string `json:"tier_label"`
 		}
 		if len(parameters) > 0 {
 			if err := json.Unmarshal(parameters, &params); err != nil {
@@ -26,14 +27,21 @@ func init() {
 		if params.PriorityHeader == "" {
 			params.PriorityHeader = "x-gateway-priority"
 		}
-		return NewTierPriorityPolicy(name, params.PriorityHeader), nil
+		if params.TierLabel == "" {
+			params.TierLabel = "tier"
+		}
+		return NewTierPriorityPolicy(name, params.PriorityHeader, params.TierLabel), nil
 	})
 }
 
-func NewTierPriorityPolicy(name string, priorityHeader string) *TierPriorityPolicy {
+func NewTierPriorityPolicy(name string, priorityHeader string, tierLabel string) *TierPriorityPolicy {
+	if tierLabel == "" {
+		tierLabel = "tier"
+	}
 	return &TierPriorityPolicy{
 		name:           name,
 		priorityHeader: priorityHeader,
+		tierLabel:      tierLabel,
 	}
 }
 
@@ -43,6 +51,7 @@ var _ plugins.Plugin = (*TierPriorityPolicy)(nil)
 type TierPriorityPolicy struct {
 	name           string
 	priorityHeader string
+	tierLabel      string
 }
 
 func (p *TierPriorityPolicy) TypedName() plugins.TypedName {
@@ -61,6 +70,7 @@ type bucket struct {
 	queues  map[string][]msgAndMeta
 	keys    []string
 	nextIdx int
+	size    int
 }
 
 func newBucket() *bucket {
@@ -75,6 +85,7 @@ func (b *bucket) push(key string, mm msgAndMeta) {
 		b.keys = append(b.keys, key)
 	}
 	b.queues[key] = append(q, mm)
+	b.size++
 }
 
 func (b *bucket) pop() (msgAndMeta, bool) {
@@ -82,21 +93,25 @@ func (b *bucket) pop() (msgAndMeta, bool) {
 		return msgAndMeta{}, false
 	}
 
-	startIdx := b.nextIdx
-	for {
-		key := b.keys[b.nextIdx]
-		q := b.queues[key]
-		if len(q) > 0 {
-			mm := q[0]
-			b.queues[key] = q[1:]
-			b.nextIdx = (b.nextIdx + 1) % len(b.keys)
-			return mm, true
+	key := b.keys[b.nextIdx]
+	q := b.queues[key]
+	mm := q[0]
+	b.queues[key] = q[1:]
+	b.size--
+
+	if len(b.queues[key]) == 0 {
+		b.keys = append(b.keys[:b.nextIdx], b.keys[b.nextIdx+1:]...)
+		delete(b.queues, key)
+		if len(b.keys) > 0 {
+			b.nextIdx = b.nextIdx % len(b.keys)
+		} else {
+			b.nextIdx = 0
 		}
+	} else {
 		b.nextIdx = (b.nextIdx + 1) % len(b.keys)
-		if b.nextIdx == startIdx {
-			return msgAndMeta{}, false
-		}
 	}
+
+	return mm, true
 }
 
 type scheduler struct {
@@ -104,15 +119,17 @@ type scheduler struct {
 	cond          *sync.Cond
 	totalBuffered int
 	maxBuffered   int
+	tierLabel     string
 	closed        bool
 	activeReaders int
 	buckets       [6]*bucket
 }
 
-func newScheduler(maxBuffered int, activeReaders int) *scheduler {
+func newScheduler(maxBuffered int, activeReaders int, tierLabel string) *scheduler {
 	s := &scheduler{
 		maxBuffered:   maxBuffered,
 		activeReaders: activeReaders,
+		tierLabel:     tierLabel,
 	}
 	s.cond = sync.NewCond(&s.mu)
 	for i := range s.buckets {
@@ -121,15 +138,15 @@ func newScheduler(maxBuffered int, activeReaders int) *scheduler {
 	return s
 }
 
-func getPriorityIndex(ir *api.InternalRequest) int {
+func getPriorityIndex(ir *api.InternalRequest, tierLabel string) int {
 	tierPri := 2 // default to batch (lowest priority tier)
 	if ir.Labels != nil {
-		switch ir.Labels["tier"] {
-		case "interactive":
+		switch ir.Labels[tierLabel] {
+		case string(api.TierInteractive):
 			tierPri = 0
-		case "async":
+		case string(api.TierAsync):
 			tierPri = 1
-		case "batch":
+		case string(api.TierBatch):
 			tierPri = 2
 		}
 	}
@@ -146,7 +163,10 @@ func (s *scheduler) Push(ir *api.InternalRequest, chMeta pipeline.RequestChannel
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for s.totalBuffered >= s.maxBuffered && !s.closed {
+	pri := getPriorityIndex(ir, s.tierLabel)
+
+	// Backpressure: block only if this specific bucket is full
+	for s.buckets[pri].size >= s.maxBuffered && !s.closed {
 		s.cond.Wait()
 	}
 
@@ -154,9 +174,7 @@ func (s *scheduler) Push(ir *api.InternalRequest, chMeta pipeline.RequestChannel
 		return false
 	}
 
-	pri := getPriorityIndex(ir)
 	key := fmt.Sprintf("%p", chMeta.Channel)
-
 	s.buckets[pri].push(key, msgAndMeta{ir: ir, chMeta: chMeta})
 	s.totalBuffered++
 	s.cond.Broadcast()
@@ -225,7 +243,7 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 			continue
 		}
 
-		s := newScheduler(1000, len(poolChs))
+		s := newScheduler(1000, len(poolChs), p.tierLabel)
 
 		for _, ch := range poolChs {
 			go func(ch pipeline.RequestChannel, s *scheduler) {
@@ -245,7 +263,7 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 			}(ch, s)
 		}
 
-		go func(workerPoolID string, s *scheduler, mergedChannel chan pipeline.EmbelishedRequestMessage, priorityHeader string) {
+		go func(workerPoolID string, s *scheduler, mergedChannel chan pipeline.EmbelishedRequestMessage, priorityHeader string, tierLabel string) {
 			defer close(mergedChannel)
 			defer s.Close()
 			for {
@@ -271,7 +289,7 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 					headers[k] = v
 				}
 
-				pri := getPriorityIndex(ir)
+				pri := getPriorityIndex(ir, tierLabel)
 				if priorityHeader != "" {
 					headers[priorityHeader] = strconv.Itoa(pri)
 				}
@@ -285,7 +303,7 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 				metrics.IncQueueDepth(ir.QueueID, ir.RequestQueueName, workerPoolID)
 				mergedChannel <- erm
 			}
-		}(workerPoolID, s, mergedChannel, p.priorityHeader)
+		}(workerPoolID, s, mergedChannel, p.priorityHeader, p.tierLabel)
 	}
 
 	return dispatch
