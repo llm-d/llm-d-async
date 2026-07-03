@@ -112,13 +112,13 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 							if errors.Is(err, context.DeadlineExceeded) || gateCtx.Err() != nil {
 								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 								select {
-								case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
+								case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
 								case <-requestCtx.Done():
 								}
 								return
 							}
 							select {
-							case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Pool gating error: %s", err.Error())):
+							case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeGateError, fmt.Sprintf("Pool gating error: %s", err.Error())):
 							case <-requestCtx.Done():
 							}
 							return
@@ -133,7 +133,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 							if verdict.Result != nil {
 								resultMsg = *verdict.Result
 							} else {
-								resultMsg = CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, "Pool gating dropped request")
+								resultMsg = asyncapi.NewGateDroppedResult(msg.PublicRequest, msg.InternalRouting)
 							}
 							select {
 							case resultChannel <- resultMsg:
@@ -159,7 +159,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 							case <-gateCtx.Done():
 								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 								select {
-								case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
+								case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
 								case <-requestCtx.Done():
 								}
 								return
@@ -215,7 +215,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						span.SetAttributes(attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)))
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 						select {
-						case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to transform request body: %s", terr.Error())):
+						case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to transform request body: %s", terr.Error())):
 						case <-requestCtx.Done():
 						}
 						return
@@ -226,17 +226,18 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 
 					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
 					inferenceStart := time.Now()
-					responseBody, err := client.SendRequest(reqCtx, msg.RequestURL, sendHeaders, sendPayload)
+					responseBody, statusCode, err := client.SendRequest(reqCtx, msg.RequestURL, sendHeaders, sendPayload)
 					metrics.RecordInferenceLatency(float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
 
 					if err == nil {
 						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)
 						select {
 						case resultChannel <- asyncapi.ResultMessage{
-							ID:       msg.PublicRequest.ReqID(),
-							Payload:  string(responseBody),
-							Routing:  msg.InternalRouting,
-							Metadata: msg.PublicRequest.ReqMetadata(),
+							ID:         msg.PublicRequest.ReqID(),
+							StatusCode: statusCode,
+							Payload:    string(responseBody),
+							Routing:    msg.InternalRouting,
+							Metadata:   msg.PublicRequest.ReqMetadata(),
 						}:
 						case <-requestCtx.Done():
 						}
@@ -260,8 +261,17 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						span.SetStatus(codes.Error, "inference request failed")
 						span.SetAttributes(attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)))
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
+
+						var resultMsg asyncapi.ResultMessage
+						if statusCode > 0 {
+							resultMsg = asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, statusCode, responseBody)
+						} else {
+							resultMsg = asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting,
+								asyncapi.ErrCodeInferenceError,
+								fmt.Sprintf("Failed to send request to inference: %s", err.Error()))
+						}
 						select {
-						case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Failed to send request to inference: %s", err.Error())):
+						case resultChannel <- resultMsg:
 						case <-requestCtx.Done():
 						}
 						return
@@ -276,7 +286,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					if errors.As(err, &clientErr) {
 						retryAfter = clientErr.RetryAfter
 					}
-					retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter)
+					retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, statusCode, responseBody)
 				}
 				sendInferenceRequest()
 			}
@@ -297,7 +307,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	if deadline <= 0 {
 		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- CreateErrorResultMessage(r, msg.InternalRouting, "Failed: deadline is missing or invalid (Unix seconds)."):
+		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, "Failed: deadline is missing or invalid (Unix seconds)."):
 		case <-ctx.Done():
 		}
 		return nil
@@ -306,7 +316,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	if deadline < time.Now().Unix() {
 		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- CreateDeadlineExceededResultMessage(r, msg.InternalRouting):
+		case resultChannel <- asyncapi.NewDeadlineExceededResult(r, msg.InternalRouting):
 		case <-ctx.Done():
 		}
 		return nil
@@ -316,7 +326,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	if err != nil {
 		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- CreateErrorResultMessage(r, msg.InternalRouting, fmt.Sprintf("Failed to marshal message's payload: %s", err.Error())):
+		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to marshal message's payload: %s", err.Error())):
 		case <-ctx.Done():
 		}
 		return nil
@@ -328,7 +338,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	if err := transforms.Validate(payloadBytes, r.ReqMetadata(), deadline); err != nil {
 		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- CreateErrorResultMessage(r, msg.InternalRouting, fmt.Sprintf("Failed to validate request for transform: %s", err.Error())):
+		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to validate request for transform: %s", err.Error())):
 		case <-ctx.Done():
 		}
 		return nil
@@ -337,8 +347,13 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	return payloadBytes
 }
 
-// If it is not after deadline, just publish again.
-func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration) {
+// retryMessage re-enqueues the request for another attempt, or emits a final
+// result if the deadline cannot accommodate another retry.
+//
+// lastStatusCode and lastResponseBody carry the most recent HTTP response (if any)
+// so that when retries are exhausted the actual HTTP status/body is surfaced
+// rather than a generic "deadline exceeded" non-HTTP error.
+func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastStatusCode int, lastResponseBody []byte) {
 	if msg.PublicRequest == nil {
 		return
 	}
@@ -349,7 +364,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	if secondsToDeadline <= 0 {
 		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
+		case resultChannel <- deadlineExhaustedResult(msg, lastStatusCode, lastResponseBody):
 		case <-ctx.Done():
 		}
 		return
@@ -365,7 +380,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	if finalDuration >= float64(secondsToDeadline) {
 		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
+		case resultChannel <- deadlineExhaustedResult(msg, lastStatusCode, lastResponseBody):
 		case <-ctx.Done():
 		}
 		return
@@ -382,24 +397,14 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	}
 }
 
-// CreateErrorResultMessage builds a ResultMessage using the public request identity;
-// metadata is read directly from req.ReqMetadata().
-func CreateErrorResultMessage(req asyncapi.Request, routing asyncapi.InternalRouting, errMsg string) asyncapi.ResultMessage {
-	errorPayload := map[string]string{"error": errMsg}
-	payloadBytes, err := json.Marshal(errorPayload)
-	if err != nil {
-		payloadBytes = []byte(`{"error": "internal error"}`)
+// deadlineExhaustedResult returns the appropriate result message when retries
+// are exhausted. If we have a last HTTP response, surface it (preserving the
+// actual status/body). Otherwise emit a non-HTTP deadline-exceeded error.
+func deadlineExhaustedResult(msg pipeline.EmbelishedRequestMessage, lastStatusCode int, lastResponseBody []byte) asyncapi.ResultMessage {
+	if lastStatusCode > 0 {
+		return asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, lastStatusCode, lastResponseBody)
 	}
-	return asyncapi.ResultMessage{
-		ID:       req.ReqID(),
-		Payload:  string(payloadBytes),
-		Routing:  routing,
-		Metadata: req.ReqMetadata(),
-	}
-}
-
-func CreateDeadlineExceededResultMessage(req asyncapi.Request, routing asyncapi.InternalRouting) asyncapi.ResultMessage {
-	return CreateErrorResultMessage(req, routing, "deadline exceeded")
+	return asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting)
 }
 
 // headersWithContentType returns a copy of headers with Content-Type set to

@@ -527,10 +527,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			if verdict.Result != nil {
 				resultMsg = *verdict.Result
 			} else {
-				resultMsg = api.ResultMessage{
-					ID:      body.ID,
-					Payload: `{"status": "dropped"}`,
-				}
+				resultMsg = api.NewGateDroppedResult(&body, ir.InternalRouting)
 			}
 			resultMsg.Routing = ir.InternalRouting
 			r.resultChannel <- resultMsg

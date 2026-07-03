@@ -63,7 +63,7 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(-10 * time.Second).Unix(),
 	}, "", map[string]string{})
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 0, nil)
 	if len(retryChannel) > 0 {
 		t.Errorf("Message that its deadline passed should not be retried. Got a message in the retry channel")
 		return
@@ -74,6 +74,15 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 
 	}
 	result := <-resultChannel
+	if result.StatusCode != 0 {
+		t.Errorf("Expected StatusCode 0 for deadline exceeded, got %d", result.StatusCode)
+	}
+	if result.ErrorCode != asyncapi.ErrCodeDeadlineExceeded {
+		t.Errorf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeDeadlineExceeded, result.ErrorCode)
+	}
+	if result.ErrorMessage != "deadline exceeded" {
+		t.Errorf("Expected ErrorMessage 'deadline exceeded', got %q", result.ErrorMessage)
+	}
 	var resultMap map[string]any
 	json.Unmarshal([]byte(result.Payload), &resultMap) // nolint:errcheck
 	if resultMap["error"] != "deadline exceeded" {
@@ -90,7 +99,7 @@ func TestRetryMessage_retry(t *testing.T) {
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(10 * time.Second).Unix(),
 	}, "", map[string]string{})
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 0, nil)
 	if len(resultChannel) > 0 {
 		t.Errorf("Should not have any messages in the result channel")
 		return
@@ -190,8 +199,51 @@ func TestSuccessfulRequest(t *testing.T) {
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
+		if r.StatusCode != http.StatusOK {
+			t.Errorf("Expected StatusCode %d, got %d", http.StatusOK, r.StatusCode)
+		}
 	}
 
+}
+
+func TestSuccessfulRequest_PreservesActualStatusCode(t *testing.T) {
+	msgId := "201-created"
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"id":"new-resource"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	select {
+	case <-retryChannel:
+		t.Errorf("should not retry a 2xx response")
+	case r := <-resultChannel:
+		if r.ID != msgId {
+			t.Errorf("Expected result ID %s, got %s", msgId, r.ID)
+		}
+		if r.StatusCode != http.StatusCreated {
+			t.Errorf("Expected StatusCode %d (201 Created), got %d", http.StatusCreated, r.StatusCode)
+		}
+		if r.Payload != `{"id":"new-resource"}` {
+			t.Errorf("Expected body preserved, got %q", r.Payload)
+		}
+	}
 }
 
 func TestFatalError_NoRetry(t *testing.T) {
@@ -223,6 +275,15 @@ func TestFatalError_NoRetry(t *testing.T) {
 	case r := <-resultChannel:
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
+		}
+		if r.StatusCode != 0 {
+			t.Errorf("Expected StatusCode 0 for non-HTTP error, got %d", r.StatusCode)
+		}
+		if r.ErrorCode != asyncapi.ErrCodeInferenceError {
+			t.Errorf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeInferenceError, r.ErrorCode)
+		}
+		if r.ErrorMessage == "" {
+			t.Errorf("Expected non-empty ErrorMessage for non-HTTP error")
 		}
 		var resultMap map[string]any
 		err := json.Unmarshal([]byte(r.Payload), &resultMap)
@@ -387,7 +448,7 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 		Created:  now,
 		Deadline: now, // same second → no time left to retry
 	}, "", nil)
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 0, nil)
 	if len(retryChannel) > 0 {
 		t.Errorf("secondsToDeadline==0 should not produce a retry")
 	}
@@ -448,7 +509,7 @@ func TestRetryMessage_retryAfterHonored(t *testing.T) {
 
 	// Server says wait 30s; expBackoff for retry 1 would be ~[1,2) seconds,
 	// so the Retry-After value should win.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, 0, nil)
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -469,7 +530,7 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 
 	// Server says wait 1s, but expBackoff at retry 5 is much larger.
 	// expBackoff should win.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 1*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 1*time.Second, 0, nil)
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -489,7 +550,7 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	}, "", nil)
 
 	// Server says wait 30s, but deadline is only 5s away → deadline exceeded.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, 0, nil)
 	if len(retryChannel) > 0 {
 		t.Errorf("should not retry when Retry-After exceeds deadline")
 	}
@@ -501,6 +562,35 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	json.Unmarshal([]byte(result.Payload), &resultMap) // nolint:errcheck
 	if resultMap["error"] != "deadline exceeded" {
 		t.Errorf("expected 'deadline exceeded', got: %s", resultMap["error"])
+	}
+}
+
+func TestRetryMessage_deadlineExhaustedPreservesHTTPResponse(t *testing.T) {
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := newEmb(asyncapi.RequestMessage{
+		ID:       "retry-exhausted-http",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(-1 * time.Second).Unix(),
+	}, "", nil)
+
+	lastBody := []byte(`{"error":"too many requests"}`)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 429, lastBody)
+	if len(retryChannel) > 0 {
+		t.Errorf("should not retry past deadline")
+	}
+	if len(resultChannel) != 1 {
+		t.Fatalf("expected one result, got %d", len(resultChannel))
+	}
+	result := <-resultChannel
+	if result.StatusCode != 429 {
+		t.Errorf("StatusCode = %d, want 429", result.StatusCode)
+	}
+	if result.Payload != string(lastBody) {
+		t.Errorf("Payload = %q, want %q", result.Payload, string(lastBody))
+	}
+	if result.ErrorCode != "" {
+		t.Errorf("ErrorCode should be empty for HTTP error result, got %q", result.ErrorCode)
 	}
 }
 
@@ -589,7 +679,7 @@ func TestRetryMessage_cancelledCtxDoesNotBlock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		retryMessage(ctx, msg, retryChannel, resultChannel, 0)
+		retryMessage(ctx, msg, retryChannel, resultChannel, 0, 0, nil)
 		close(done)
 	}()
 
@@ -676,9 +766,14 @@ func TestClientError_NoRetry(t *testing.T) {
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
-		expectedPayload := `{"error":"Failed to send request to inference: INVALID_REQ: client error: status code 400"}`
-		if r.Payload != expectedPayload {
-			t.Errorf("Expected payload to be %s, got %s", expectedPayload, r.Payload)
+		if r.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected StatusCode 400, got %d", r.StatusCode)
+		}
+		if r.Payload != errorBody {
+			t.Errorf("Expected payload to be response body %q, got %q", errorBody, r.Payload)
+		}
+		if r.ErrorCode != "" {
+			t.Errorf("Expected empty ErrorCode for HTTP error, got %q", r.ErrorCode)
 		}
 	case <-time.After(time.Second):
 		t.Errorf("Timeout waiting for result")

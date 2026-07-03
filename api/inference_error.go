@@ -42,6 +42,7 @@ type ClientError struct {
 	Message       string
 	RawError      error         // original error if available
 	RetryAfter    time.Duration // server-specified retry delay from Retry-After header (0 means not set)
+	StatusCode    int           // HTTP status code; 0 means no HTTP response was received
 }
 
 func (e *ClientError) Error() string {

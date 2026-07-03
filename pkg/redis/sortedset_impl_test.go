@@ -453,6 +453,62 @@ func TestSortedSetFlow_ResultFIFO(t *testing.T) {
 	}
 }
 
+func TestSortedSetFlow_ResultStructuredFields(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "structured-result-queue"
+	flow := &RedisSortedSetFlow{
+		defaultResultQueueName: queue,
+		rdb:                    rdb,
+		resultChannel:          make(chan api.ResultMessage, 4),
+		pollInterval:           50 * time.Millisecond,
+		batchSize:              10,
+		gate:                   noopGate(),
+	}
+
+	messages := []api.ResultMessage{
+		{ID: "success", StatusCode: 201, Payload: `{"id":"new"}`},
+		{ID: "http-err", StatusCode: 502, Payload: `{"error":"bad gateway"}`},
+		{ID: "deadline", Payload: `{"error":"deadline exceeded"}`, ErrorCode: api.ErrCodeDeadlineExceeded, ErrorMessage: "deadline exceeded"},
+		{ID: "gate-drop", Payload: `{"error":"Pool gating dropped request"}`, ErrorCode: api.ErrCodeGateDropped, ErrorMessage: "Pool gating dropped request"},
+	}
+	for _, m := range messages {
+		flow.resultChannel <- m
+	}
+
+	go flow.resultWorker(ctx)
+	time.Sleep(200 * time.Millisecond)
+
+	for _, want := range messages {
+		raw, err := rdb.RPop(ctx, queue).Result()
+		if err != nil {
+			t.Fatalf("RPop error for %s: %v", want.ID, err)
+		}
+		var got api.ResultMessage
+		if err := json.Unmarshal([]byte(raw), &got); err != nil {
+			t.Fatalf("Unmarshal error for %s: %v", want.ID, err)
+		}
+		if got.ID != want.ID {
+			t.Errorf("ID = %q, want %q", got.ID, want.ID)
+		}
+		if got.StatusCode != want.StatusCode {
+			t.Errorf("[%s] StatusCode = %d, want %d", want.ID, got.StatusCode, want.StatusCode)
+		}
+		if got.Payload != want.Payload {
+			t.Errorf("[%s] Payload = %q, want %q", want.ID, got.Payload, want.Payload)
+		}
+		if got.ErrorCode != want.ErrorCode {
+			t.Errorf("[%s] ErrorCode = %q, want %q", want.ID, got.ErrorCode, want.ErrorCode)
+		}
+		if got.ErrorMessage != want.ErrorMessage {
+			t.Errorf("[%s] ErrorMessage = %q, want %q", want.ID, got.ErrorMessage, want.ErrorMessage)
+		}
+	}
+}
+
 func TestSortedSetFlow_ResultBatch(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

@@ -483,10 +483,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			if verdict.Result != nil {
 				r.resultChannel <- *verdict.Result
 			} else {
-				r.resultChannel <- api.ResultMessage{
-					ID:      rview.ReqID(),
-					Payload: `{"status": "dropped"}`,
-				}
+				r.resultChannel <- api.NewGateDroppedResult(rview, ir.InternalRouting)
 			}
 			continue
 		}

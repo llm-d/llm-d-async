@@ -23,12 +23,15 @@ func TestSendRequest_success(t *testing.T) {
 		}, nil
 	}))
 
-	got, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	got, sc, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if string(got) != body {
 		t.Errorf("body = %q, want %q", string(got), body)
+	}
+	if sc != http.StatusOK {
+		t.Errorf("statusCode = %d, want %d", sc, http.StatusOK)
 	}
 }
 
@@ -47,7 +50,7 @@ func TestSendRequest_headersForwarded(t *testing.T) {
 		"X-Custom":     "value1",
 		"Content-Type": "application/json",
 	}
-	_, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", headers, []byte(`{}`))
+	_, _, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", headers, []byte(`{}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -68,7 +71,7 @@ func TestSendRequest_rateLimitWithoutRetryAfter(t *testing.T) {
 		}, nil
 	}))
 
-	body, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	body, sc, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for 429 response")
 	}
@@ -78,6 +81,12 @@ func TestSendRequest_rateLimitWithoutRetryAfter(t *testing.T) {
 	}
 	if ce.ErrorCategory != asyncapi.ErrCategoryRateLimit {
 		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryRateLimit)
+	}
+	if ce.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want %d", ce.StatusCode, http.StatusTooManyRequests)
+	}
+	if sc != http.StatusTooManyRequests {
+		t.Errorf("returned statusCode = %d, want %d", sc, http.StatusTooManyRequests)
 	}
 	if ce.RetryAfter != 0 {
 		t.Errorf("RetryAfter = %v, want 0 (no header)", ce.RetryAfter)
@@ -98,7 +107,7 @@ func TestSendRequest_rateLimitWithRetryAfter(t *testing.T) {
 		}, nil
 	}))
 
-	_, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	_, _, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for 429 response")
 	}
@@ -120,7 +129,7 @@ func TestSendRequest_clientError(t *testing.T) {
 		}, nil
 	}))
 
-	body, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	body, sc, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for 400 response")
 	}
@@ -130,6 +139,12 @@ func TestSendRequest_clientError(t *testing.T) {
 	}
 	if ce.ErrorCategory != asyncapi.ErrCategoryInvalidReq {
 		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryInvalidReq)
+	}
+	if ce.StatusCode != http.StatusBadRequest {
+		t.Errorf("StatusCode = %d, want %d", ce.StatusCode, http.StatusBadRequest)
+	}
+	if sc != http.StatusBadRequest {
+		t.Errorf("returned statusCode = %d, want %d", sc, http.StatusBadRequest)
 	}
 	if len(body) == 0 {
 		t.Error("expected response body to be returned with 4xx error")
@@ -145,7 +160,7 @@ func TestSendRequest_serverError(t *testing.T) {
 		}, nil
 	}))
 
-	body, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	body, sc, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
@@ -155,6 +170,12 @@ func TestSendRequest_serverError(t *testing.T) {
 	}
 	if ce.ErrorCategory != asyncapi.ErrCategoryServer {
 		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryServer)
+	}
+	if ce.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want %d", ce.StatusCode, http.StatusInternalServerError)
+	}
+	if sc != http.StatusInternalServerError {
+		t.Errorf("returned statusCode = %d, want %d", sc, http.StatusInternalServerError)
 	}
 	if len(body) == 0 {
 		t.Error("expected response body to be returned with 5xx error")
@@ -166,7 +187,7 @@ func TestSendRequest_transportError(t *testing.T) {
 		return nil, fmt.Errorf("connection refused")
 	}))
 
-	_, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	_, sc, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for transport failure")
 	}
@@ -177,6 +198,12 @@ func TestSendRequest_transportError(t *testing.T) {
 	if ce.ErrorCategory != asyncapi.ErrCategoryUnknown {
 		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryUnknown)
 	}
+	if ce.StatusCode != 0 {
+		t.Errorf("StatusCode = %d, want 0 for transport error", ce.StatusCode)
+	}
+	if sc != 0 {
+		t.Errorf("returned statusCode = %d, want 0 for transport error", sc)
+	}
 }
 
 func TestSendRequest_invalidURL(t *testing.T) {
@@ -185,7 +212,7 @@ func TestSendRequest_invalidURL(t *testing.T) {
 		return nil, nil
 	}))
 
-	_, err := client.SendRequest(context.Background(), "://invalid", nil, []byte(`{}`))
+	_, _, err := client.SendRequest(context.Background(), "://invalid", nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
 	}
@@ -207,7 +234,7 @@ func TestSendRequest_contextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := client.SendRequest(ctx, "http://localhost/v1/completions", nil, []byte(`{}`))
+	_, _, err := client.SendRequest(ctx, "http://localhost/v1/completions", nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -218,6 +245,40 @@ func TestSendRequest_contextCancellation(t *testing.T) {
 	if ce.ErrorCategory != asyncapi.ErrCategoryUnknown {
 		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryUnknown)
 	}
+}
+
+func TestSendRequest_bodyReadFailurePreservesStatusCode(t *testing.T) {
+	client := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(&failReader{}),
+			Header:     make(http.Header),
+		}, nil
+	}))
+
+	_, sc, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	if err == nil {
+		t.Fatal("expected error for body read failure")
+	}
+	var ce *asyncapi.ClientError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *ClientError, got %T", err)
+	}
+	if ce.ErrorCategory != asyncapi.ErrCategoryServer {
+		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryServer)
+	}
+	if sc != http.StatusOK {
+		t.Errorf("returned statusCode = %d, want %d (response was received)", sc, http.StatusOK)
+	}
+	if ce.StatusCode != http.StatusOK {
+		t.Errorf("ClientError.StatusCode = %d, want %d", ce.StatusCode, http.StatusOK)
+	}
+}
+
+type failReader struct{}
+
+func (f *failReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated read error")
 }
 
 func TestNewHTTPInferenceClient(t *testing.T) {
