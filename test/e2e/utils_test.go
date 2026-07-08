@@ -38,6 +38,12 @@ const (
 	tierPriorityInteractiveQueue = "tier-priority-interactive"
 	tierPriorityAsyncQueue       = "tier-priority-async"
 	tierPriorityResultQueue      = "tier-priority-result-list"
+
+	benchmarkRequestQueue = "benchmark-request-sortedset"
+	benchmarkResultQueue  = "benchmark-result-list"
+
+	benchmarkPoolGateRequestQueue = "benchmark-pool-gate-request-sortedset"
+	benchmarkPoolGateResultQueue  = "benchmark-pool-gate-result-list"
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}

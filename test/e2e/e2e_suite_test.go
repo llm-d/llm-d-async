@@ -58,7 +58,7 @@ var (
 	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/async-processor:e2e-test", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "registry.k8s.io/gateway-api-inference-extension/epp:v1.5.0", ginkgo.GinkgoLogr)
-	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.1", ginkgo.GinkgoLogr)
+	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0", ginkgo.GinkgoLogr)
 	gaieRoot         = os.Getenv("GAIE_ROOT")
 	simRoot          = os.Getenv("SIM_ROOT")
 
@@ -151,6 +151,19 @@ func pullIfMissing(image string) {
 
 func setupK8sCluster() {
 	kindKubeconfig = filepath.Join(os.TempDir(), "kind-kubeconfig-"+kindClusterName)
+
+	// Check if cluster already exists
+	checkCmd := exec.Command("kind", "get", "clusters")
+	output, err := checkCmd.Output()
+	if err == nil && strings.Contains(string(output), kindClusterName) {
+		ginkgo.By("Kind cluster " + kindClusterName + " already exists, rebuilding and loading async-processor image")
+		command := exec.Command(containerRuntime, "build", "-t", apImage, projectRoot())
+		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+		kindLoadImage(apImage)
+		return
+	}
 
 	if containerRuntime == "podman" {
 		ginkgo.By("Setting KIND_EXPERIMENTAL_PROVIDER=podman")
@@ -335,6 +348,8 @@ func applyManifests() {
 		{"multitenant", helmValuesDir + "/multitenant.yaml"},
 		{"tier-priority", helmValuesDir + "/tier-priority.yaml"},
 		{"mt-merge", helmValuesDir + "/mt-merge.yaml"},
+		{"benchmark", helmValuesDir + "/benchmark.yaml"},
+		{"benchmark-pool-gate", helmValuesDir + "/benchmark-pool-gate.yaml"},
 	} {
 		helmInstall(r.name, r.values, map[string]string{
 			"ap.image.repository": imageRepo,
@@ -394,7 +409,7 @@ func splitImage(image string) (string, string) {
 }
 
 func helmInstall(releaseName, valuesFile string, sets map[string]string) {
-	args := []string{"install", releaseName, chartPath,
+	args := []string{"upgrade", "--install", releaseName, chartPath,
 		"-f", valuesFile, "-n", nsName, "--wait", "--timeout=120s"}
 	for k, v := range sets {
 		args = append(args, "--set", k+"="+v)
@@ -565,6 +580,8 @@ func doRedeployEPPWithFlowControl() {
 		"multitenant-async-processor",
 		"tier-priority-async-processor",
 		"mt-merge-async-processor",
+		"benchmark-async-processor",
+		"benchmark-pool-gate-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
@@ -585,6 +602,8 @@ func doRedeployEPPWithFlowControl() {
 		"multitenant-async-processor",
 		"tier-priority-async-processor",
 		"mt-merge-async-processor",
+		"benchmark-async-processor",
+		"benchmark-pool-gate-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")

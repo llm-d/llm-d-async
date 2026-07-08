@@ -24,4 +24,4 @@ data:
       - pluginRef: queue-scorer
       - pluginRef: kv-cache-utilization-scorer
     flowControl:
-      maxRequests: "10"
+      maxRequests: "100"
