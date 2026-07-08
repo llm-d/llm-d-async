@@ -31,6 +31,11 @@ import (
 // DefaultCacheTTL is the default TTL for cached Prometheus metric sources.
 const DefaultCacheTTL = 5 * time.Second
 
+type gateConfig struct {
+	GateType   string            `json:"gate_type"`
+	GateParams map[string]string `json:"gate_params"`
+}
+
 var _ pipeline.GateFactory = (*GateFactory)(nil)
 
 // GateFactory creates DispatchGate instances based on configuration.
@@ -102,11 +107,6 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 			return nil, fmt.Errorf("composite gate requires 'gates' parameter with JSON array of gate configurations")
 		}
 
-		type gateConfig struct {
-			GateType   string            `json:"gate_type"`
-			GateParams map[string]string `json:"gate_params"`
-		}
-
 		var configs []gateConfig
 		if err := json.Unmarshal([]byte(gatesJSON), &configs); err != nil {
 			return nil, fmt.Errorf("composite gate failed to parse 'gates' parameter: %w", err)
@@ -122,6 +122,24 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 		}
 
 		return NewCompositeGate(innerGates...), nil
+
+	case "wait-on-refuse":
+		gateJSON := params["gate"]
+		if gateJSON == "" {
+			return nil, fmt.Errorf("wait-on-refuse gate requires a 'gate' parameter with the inner gate configuration")
+		}
+
+		var cfg gateConfig
+		if err := json.Unmarshal([]byte(gateJSON), &cfg); err != nil {
+			return nil, fmt.Errorf("wait-on-refuse gate failed to parse 'gate' parameter: %w", err)
+		}
+
+		innerGate, err := f.CreateGate(cfg.GateType, cfg.GateParams)
+		if err != nil {
+			return nil, fmt.Errorf("wait-on-refuse gate failed to create inner gate %q: %w", cfg.GateType, err)
+		}
+
+		return NewWaitOnRefuseGate(innerGate), nil
 
 	case "constant":
 		return ConstOpenGate(), nil
@@ -346,7 +364,15 @@ func (f *GateFactory) CreateGate(gateType string, params map[string]string) (pip
 		if limit <= 0 {
 			return nil, fmt.Errorf("local-max-concurrency limit must be greater than 0, got %d", limit)
 		}
-		return NewLocalConcurrencyGate(limit), nil
+		gate := NewLocalConcurrencyGate(limit)
+		gatingMode := params["gating_mode"]
+		if gatingMode != "" {
+			if gatingMode != string(GatingModeBlocking) && gatingMode != string(GatingModeClassifying) {
+				return nil, fmt.Errorf("local-max-concurrency gating_mode must be either 'blocking' or 'classifying', got %q", gatingMode)
+			}
+			gate.WithGatingMode(GatingMode(gatingMode))
+		}
+		return gate, nil
 
 	default:
 		// Unknown gate types default to open gate

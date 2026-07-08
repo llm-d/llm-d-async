@@ -61,7 +61,7 @@ func (g *RedisDispatchGate) Budget(ctx context.Context) float64 {
 }
 
 // Apply implements pipeline.Gate.
-func (g *RedisDispatchGate) Apply(ctx context.Context, msg *api.InternalRequest) (pipeline.Verdict, error) {
+func (g *RedisDispatchGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
 	if g.Budget(ctx) <= 0.0 {
 		return pipeline.Refuse(), nil
 	}

@@ -14,6 +14,8 @@ const (
 	ClassificationOverflow QuotaClassification = "overflow"
 )
 
+const LabelClassification = "classification"
+
 // InternalRouting holds the resolved, authoritative routing fields used by
 // infrastructure (producers, workers, retry logic). These are not part of the
 // caller-facing contract and should not be set by callers directly.
@@ -22,12 +24,36 @@ const (
 // values here. All internal pipeline code reads routing exclusively from this
 // struct rather than reaching back into the typed request.
 type InternalRouting struct {
-	RetryCount             int                 `json:"retry_count,omitempty"`
-	QueueID                string              `json:"queue_id,omitempty"`
-	RequestQueueName       string              `json:"request_queue_name,omitempty"`
-	ResultQueueName        string              `json:"result_queue_name,omitempty"`
-	TransportCorrelationID string              `json:"transport_correlation_id,omitempty"`
-	Classification         QuotaClassification `json:"classification,omitempty"`
+	RetryCount             int    `json:"retry_count,omitempty"`
+	QueueID                string `json:"queue_id,omitempty"`
+	RequestQueueName       string `json:"request_queue_name,omitempty"`
+	ResultQueueName        string `json:"result_queue_name,omitempty"`
+	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
+	// Labels is the framework's per-message label set. Seeded by the
+	// Flow at pull time from the originating channel's effective
+	// policy read and mutate this map in place. Producer-controlled
+	// per-message correlation data rides on body.Metadata, not Labels.
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// SetClassification sets the quota classification inside the Labels map.
+func (ir *InternalRouting) SetClassification(c QuotaClassification) {
+	if ir.Labels == nil {
+		ir.Labels = make(map[string]string)
+	}
+	if c == ClassificationNone {
+		delete(ir.Labels, LabelClassification)
+	} else {
+		ir.Labels[LabelClassification] = string(c)
+	}
+}
+
+// GetClassification retrieves the quota classification from the Labels map.
+func (ir *InternalRouting) GetClassification() QuotaClassification {
+	if ir.Labels == nil {
+		return ClassificationNone
+	}
+	return QuotaClassification(ir.Labels[LabelClassification])
 }
 
 // InternalRequest is the internal envelope: routing data plus a concrete Request.
@@ -40,40 +66,6 @@ type InternalRequest struct {
 	// (un)marshaling does not persist it, so a re-enqueued (retried) message is
 	// re-stamped on its next delivery. Zero when not set (e.g. drained messages).
 	IngestionTime time.Time `json:"-"`
-
-	// releases holds cleanup and release functions registered by stateful gates
-	// (e.g., reservation counters or quota allocations) during the request's
-	// lifecycle. These are executed in reverse order on Release() or discarded
-	// if RollbackReleases() is invoked.
-	releases []func()
-}
-
-func (r *InternalRequest) AttachRelease(f func()) {
-	if f != nil {
-		r.releases = append(r.releases, f)
-	}
-}
-
-func (r *InternalRequest) Release() {
-	for i := len(r.releases) - 1; i >= 0; i-- {
-		if r.releases[i] != nil {
-			r.releases[i]()
-		}
-	}
-	r.releases = nil
-}
-
-func (r *InternalRequest) Releases() []func() {
-	return r.releases
-}
-
-func (r *InternalRequest) RollbackReleases(snapshot int) {
-	for i := len(r.releases) - 1; i >= snapshot; i-- {
-		if r.releases[i] != nil {
-			r.releases[i]()
-		}
-	}
-	r.releases = r.releases[:snapshot]
 }
 
 // NewInternalRequest returns an InternalRequest with a non-nil PublicRequest.

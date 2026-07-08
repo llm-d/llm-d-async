@@ -16,6 +16,8 @@ const (
 	ActionDrop
 	// ActionRefuse temporarily rejects the request and requests redelivery/re-enqueue.
 	ActionRefuse
+	// ActionWait temporarily parks the worker goroutine until capacity opens.
+	ActionWait
 )
 
 // Verdict carries the outcome of a gating decision.
@@ -39,6 +41,23 @@ func Refuse() Verdict {
 	return Verdict{Action: ActionRefuse}
 }
 
+// Wait returns a verdict to temporarily park the worker.
+func Wait() Verdict {
+	return Verdict{Action: ActionWait}
+}
+
+// GateReleaseFunc defines the signature for gating resource release/cleanup closures.
+type GateReleaseFunc func()
+
+// ReleaseGateReleases executes all release functions in the slice in reverse order.
+func ReleaseGateReleases(releases []GateReleaseFunc) {
+	for i := len(releases) - 1; i >= 0; i-- {
+		if releases[i] != nil {
+			releases[i]()
+		}
+	}
+}
+
 // Gate defines a unified interface for system capacity and request admission control.
 type Gate interface {
 	// Budget returns the system dispatch capacity budget in the range [0.0, 1.0].
@@ -48,17 +67,28 @@ type Gate interface {
 	// The system always returns a valid value, even in case of internal error.
 	Budget(ctx context.Context) float64
 	// Apply applies the gating logic to a request.
-	Apply(ctx context.Context, msg *api.InternalRequest) (Verdict, error)
+	Apply(ctx context.Context, msg *api.InternalRequest, releases *[]GateReleaseFunc) (Verdict, error)
 }
 
 // ApplyChain runs a series of gates sequentially. If any gate fails or indicates a non-continue
 // verdict, the chain terminates immediately and rolls back any state acquired by previous gates in the chain.
-func ApplyChain(ctx context.Context, msg *api.InternalRequest, gates []Gate) (Verdict, error) {
-	snapshot := len(msg.Releases())
+func ApplyChain(ctx context.Context, msg *api.InternalRequest, gates []Gate, releases *[]GateReleaseFunc) (Verdict, error) {
+	var snapshot int
+	if releases != nil {
+		snapshot = len(*releases)
+	}
 	for _, gate := range gates {
-		verdict, err := gate.Apply(ctx, msg)
+		verdict, err := gate.Apply(ctx, msg, releases)
 		if err != nil || verdict.Action != ActionContinue {
-			msg.RollbackReleases(snapshot)
+			if releases != nil {
+				// Rollback releases acquired in this chain
+				for i := len(*releases) - 1; i >= snapshot; i-- {
+					if (*releases)[i] != nil {
+						(*releases)[i]()
+					}
+				}
+				*releases = (*releases)[:snapshot]
+			}
 			return verdict, err
 		}
 	}
@@ -79,7 +109,7 @@ func (f DispatchGateFunc) Budget(ctx context.Context) float64 {
 	return f(ctx)
 }
 
-func (f DispatchGateFunc) Apply(ctx context.Context, msg *api.InternalRequest) (Verdict, error) {
+func (f DispatchGateFunc) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]GateReleaseFunc) (Verdict, error) {
 	if f(ctx) <= 0.0 {
 		return Refuse(), nil
 	}

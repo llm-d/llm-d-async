@@ -1,3 +1,22 @@
+{{- /* ---- Fail-fast configuration validation ----
+       Turn common misconfigurations into clear install-time errors instead of
+       runtime crash-loops or silently dropped requests. */ -}}
+{{- if .Values.ap.redis.enabled }}
+{{- if and (not .Values.ap.redis.url) (not .Values.ap.redis.secretName) }}
+{{- fail "ap.redis is enabled but no connection is configured: set ap.redis.url, or set ap.redis.secretName/ap.redis.secretKey to reference an existing Secret." }}
+{{- end }}
+{{- else if .Values.ap.gcpPubSub.enabled }}
+{{- if not .Values.ap.gcpPubSub.projectId }}
+{{- fail "ap.gcpPubSub is enabled but ap.gcpPubSub.projectId is empty: the GCP Pub/Sub backend requires a project ID (the process panics on startup without it)." }}
+{{- end }}
+{{- end }}
+{{- if not .Values.ap.igwBaseURL }}
+{{- if and .Values.ap.redis.enabled (not .Values.ap.redis.queuesConfig) }}
+{{- fail "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-queue igw_base_url entries via ap.redis.queuesConfig." }}
+{{- else if and .Values.ap.gcpPubSub.enabled (not .Values.ap.gcpPubSub.topicsConfig) }}
+{{- fail "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-topic igw_base_url entries via ap.gcpPubSub.topicsConfig." }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

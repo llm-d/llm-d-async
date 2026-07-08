@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestGetAsyncProcessorCollectors_withoutLatency(t *testing.T) {
@@ -27,6 +28,8 @@ func TestGetAsyncProcessorCollectors_includesGauges(t *testing.T) {
 			"QueueDepth":       QueueDepth,
 			"InflightRequests": InflightRequests,
 			"BrokerBacklog":    BrokerBacklog,
+			"DispatchBudget":   DispatchBudget,
+			"PoolWorkerLimit":  PoolWorkerLimit,
 		} {
 			if !containsCollector(collectors, gauge) {
 				t.Errorf("expected %s gauge to be present (supportsMessageLatency=%v)", name, withLatency)
@@ -53,6 +56,44 @@ func TestGetAsyncProcessorCollectors_includesQueueResidence(t *testing.T) {
 		collectors := GetAsyncProcessorCollectors(withLatency)
 		if !containsCollector(collectors, QueueResidenceTime) {
 			t.Errorf("expected QueueResidenceTime to be present (supportsMessageLatency=%v)", withLatency)
+		}
+	}
+}
+
+func TestSetDispatchBudget(t *testing.T) {
+	SetDispatchBudget(0.42, "q1", "queue-1", "pool-a")
+	got := testutil.ToFloat64(DispatchBudget.WithLabelValues("q1", "queue-1", "pool-a"))
+	if got != 0.42 {
+		t.Errorf("DispatchBudget = %v, want 0.42", got)
+	}
+}
+
+func TestSetPoolWorkerLimit(t *testing.T) {
+	SetPoolWorkerLimit("pool-a", 8)
+	got := testutil.ToFloat64(PoolWorkerLimit.WithLabelValues("pool-a"))
+	if got != 8 {
+		t.Errorf("PoolWorkerLimit = %v, want 8", got)
+	}
+}
+
+func TestRecordGateDecision(t *testing.T) {
+	RecordGateDecision(ReasonQuotaExhausted, "q9", "queue-9", "pool-z")
+	RecordGateDecision(ReasonQuotaExhausted, "q9", "queue-9", "pool-z")
+	RecordGateDecision(ReasonGateClosed, "q9", "queue-9", "pool-z")
+
+	if got := testutil.ToFloat64(GateDecisions.WithLabelValues("q9", "queue-9", "pool-z", ReasonQuotaExhausted)); got != 2 {
+		t.Errorf("GateDecisions[quota_exhausted] = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(GateDecisions.WithLabelValues("q9", "queue-9", "pool-z", ReasonGateClosed)); got != 1 {
+		t.Errorf("GateDecisions[gate_closed] = %v, want 1", got)
+	}
+}
+
+func TestGetAsyncProcessorCollectors_includesGateDecisions(t *testing.T) {
+	for _, withLatency := range []bool{false, true} {
+		collectors := GetAsyncProcessorCollectors(withLatency)
+		if !containsCollector(collectors, GateDecisions) {
+			t.Errorf("expected GateDecisions to be present (supportsMessageLatency=%v)", withLatency)
 		}
 	}
 }

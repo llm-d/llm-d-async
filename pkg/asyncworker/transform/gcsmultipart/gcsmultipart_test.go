@@ -181,7 +181,7 @@ func TestValidate(t *testing.T) {
 		{"expired before deadline", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(-time.Minute))), whisper, true},
 		{"no gcs_uri", `{"model":"whisper-1"}`, whisper, false},
 		{"provider mismatch", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(-time.Minute))), map[string]string{"provider": "other"}, false},
-		{"unparseable expiry", `{"gcs_uri":"https://signed/url?sig=x"}`, whisper, false},
+		{"unparsable expiry", `{"gcs_uri":"https://signed/url?sig=x"}`, whisper, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

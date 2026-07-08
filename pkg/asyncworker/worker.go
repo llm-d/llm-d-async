@@ -30,6 +30,11 @@ const (
 
 func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
 	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain) {
+	WorkerWithGate(consumeCtx, requestCtx, characteristics, client, requestChannel, retryChannel, resultChannel, requestTimeout, transforms, nil)
+}
+
+func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
+	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain, poolGate pipeline.Gate) {
 
 	logger := log.FromContext(requestCtx)
 	for {
@@ -75,9 +80,6 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 			}
 
 			processMessage := func() {
-				metrics.IncInflight(queueID, queueName, msg.WorkerPoolID)
-				defer metrics.DecInflight(queueID, queueName, msg.WorkerPoolID)
-
 				if msg.RetryCount == 0 {
 					metrics.RecordAsyncReq(queueID, queueName, msg.WorkerPoolID)
 				}
@@ -86,6 +88,90 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 				if payloadBytes == nil {
 					return
 				}
+
+				var poolReleases []pipeline.GateReleaseFunc
+				defer func() {
+					pipeline.ReleaseGateReleases(poolReleases)
+				}()
+
+				if poolGate != nil {
+					reqDeadline := time.Now().Add(requestTimeout)
+					if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
+						if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
+							reqDeadline = msgDeadline
+						}
+					}
+					gateCtx, cancelGate := context.WithDeadline(requestCtx, reqDeadline)
+					defer cancelGate()
+
+					var verdict pipeline.Verdict
+					var err error
+					for {
+						verdict, err = poolGate.Apply(gateCtx, msg.InternalRequest, &poolReleases)
+						if err != nil {
+							if errors.Is(err, context.DeadlineExceeded) || gateCtx.Err() != nil {
+								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+								select {
+								case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
+								case <-requestCtx.Done():
+								}
+								return
+							}
+							select {
+							case resultChannel <- CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, fmt.Sprintf("Pool gating error: %s", err.Error())):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+
+						if verdict.Action == pipeline.ActionContinue {
+							break
+						}
+
+						if verdict.Action == pipeline.ActionDrop {
+							var resultMsg asyncapi.ResultMessage
+							if verdict.Result != nil {
+								resultMsg = *verdict.Result
+							} else {
+								resultMsg = CreateErrorResultMessage(msg.PublicRequest, msg.InternalRouting, "Pool gating dropped request")
+							}
+							select {
+							case resultChannel <- resultMsg:
+							case <-requestCtx.Done():
+							}
+							return
+						}
+
+						if verdict.Action == pipeline.ActionRefuse {
+							select {
+							case retryChannel <- pipeline.RetryMessage{
+								EmbelishedRequestMessage: msg,
+								BackoffDurationSeconds:   0,
+							}:
+							case <-requestCtx.Done():
+							}
+							return
+						}
+
+						// ActionWait: park/wait and retry in-memory
+						if verdict.Action == pipeline.ActionWait {
+							select {
+							case <-gateCtx.Done():
+								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+								select {
+								case resultChannel <- CreateDeadlineExceededResultMessage(msg.PublicRequest, msg.InternalRouting):
+								case <-requestCtx.Done():
+								}
+								return
+							case <-time.After(50 * time.Millisecond):
+								// poll again
+							}
+						}
+					}
+				}
+
+				metrics.IncInflight(queueID, queueName, msg.WorkerPoolID)
+				defer metrics.DecInflight(queueID, queueName, msg.WorkerPoolID)
 
 				sendInferenceRequest := func() {
 					reqCtx := requestCtx

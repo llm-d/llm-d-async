@@ -1,5 +1,10 @@
 ap:
-  igwBaseURL: "http://infra-inference-scheduling-inference-gateway-istio.llm-d-inference-scheduler.svc.cluster.local:80"
+  # Inference gateway base URL (REQUIRED for single-queue / single-topic mode).
+  # Results are dispatched here; an empty or wrong value silently consumes
+  # requests without producing results, so it is validated at install time.
+  # For multi-queue/multi-topic setups, set per-entry igw_base_url in
+  # redis.queuesConfig / gcpPubSub.topicsConfig instead of this global value.
+  igwBaseURL: ""
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
@@ -124,7 +129,9 @@ ap:
     # For production or credentialed URLs, prefer Option 2 (secretName/secretKey).
     # url: "redis://redis-master.redis.svc.cluster.local:6379"
     # Option 2: reference a pre-existing Secret (used when url is not set).
-    secretName: "redis-creds"
+    # Empty by default so an unconfigured Redis connection fails fast at install
+    # time instead of referencing a Secret that may not exist.
+    secretName: ""
     secretKey: "url"
     requestPathURL: "/v1/completions"
     # For redis-sortedset

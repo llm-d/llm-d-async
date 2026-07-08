@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1260,6 +1261,18 @@ func spanAttr(s *tracetest.SpanStub, key string) string {
 	return ""
 }
 
+func getSpansEventually(t *testing.T, exporter *tracetest.InMemoryExporter, expectedCount int) tracetest.SpanStubs {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		spans := exporter.GetSpans()
+		if len(spans) >= expectedCount {
+			return spans
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return exporter.GetSpans()
+}
+
 func TestWorker_SpanOnSuccess(t *testing.T) {
 	exporter := setupTestTracer(t)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
@@ -1285,7 +1298,7 @@ func TestWorker_SpanOnSuccess(t *testing.T) {
 		t.Fatal("timeout waiting for result")
 	}
 
-	spans := exporter.GetSpans()
+	spans := getSpansEventually(t, exporter, 1)
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
@@ -1326,7 +1339,7 @@ func TestWorker_SpanOnFatalError(t *testing.T) {
 		t.Fatal("timeout waiting for result")
 	}
 
-	spans := exporter.GetSpans()
+	spans := getSpansEventually(t, exporter, 1)
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
@@ -1367,7 +1380,7 @@ func TestWorker_SpanOnRetryableError(t *testing.T) {
 		t.Fatal("timeout waiting for retry")
 	}
 
-	spans := exporter.GetSpans()
+	spans := getSpansEventually(t, exporter, 1)
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
@@ -1405,7 +1418,7 @@ func TestWorker_SpanOnServerError(t *testing.T) {
 		t.Fatal("timeout waiting for retry")
 	}
 
-	spans := exporter.GetSpans()
+	spans := getSpansEventually(t, exporter, 1)
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
@@ -1449,7 +1462,7 @@ func TestWorker_TraceContextExtraction(t *testing.T) {
 		t.Fatal("timeout waiting for result")
 	}
 
-	spans := exporter.GetSpans()
+	spans := getSpansEventually(t, exporter, 1)
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
@@ -1490,7 +1503,7 @@ func TestWorker_SpanOnShutdownReenqueue(t *testing.T) {
 		t.Fatal("timeout waiting for retry")
 	}
 
-	spans := exporter.GetSpans()
+	spans := getSpansEventually(t, exporter, 2)
 	processSpan := findSpan(spans, "process-request")
 	if processSpan == nil {
 		t.Fatal("expected 'process-request' span")
@@ -1545,7 +1558,7 @@ func TestWorker_SpanIncludesQueueName(t *testing.T) {
 		t.Fatal("timeout waiting for result")
 	}
 
-	spans := exporter.GetSpans()
+	spans := getSpansEventually(t, exporter, 1)
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
@@ -1746,5 +1759,93 @@ func TestWorker_DrainWithCancelledRequestCtx(t *testing.T) {
 		if !got[id] {
 			t.Errorf("message %s was not re-queued on shutdown", id)
 		}
+	}
+}
+
+type raceMockPoolGate struct {
+	releaseCalled *int32
+}
+
+func (g *raceMockPoolGate) Budget(ctx context.Context) float64 {
+	return 1.0
+}
+
+func (g *raceMockPoolGate) Apply(ctx context.Context, ir *asyncapi.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	if releases != nil {
+		*releases = append(*releases, func() {
+			atomic.AddInt32(g.releaseCalled, 1)
+		})
+	}
+	return pipeline.Continue(), nil
+}
+
+func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var poolReleaseCalled int32
+	var queueReleaseCalled int32
+
+	poolGate := &raceMockPoolGate{
+		releaseCalled: &poolReleaseCalled,
+	}
+
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, poolGate)
+
+	ir := asyncapi.NewInternalRequest(
+		asyncapi.InternalRouting{RequestQueueName: "test-queue"},
+		&asyncapi.RequestMessage{
+			ID:       "req-race-test",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Payload:  map[string]any{"model": "test"},
+		},
+	)
+	var queueReleases []pipeline.GateReleaseFunc
+	queueReleases = append(queueReleases, func() {
+		atomic.AddInt32(&queueReleaseCalled, 1)
+	})
+
+	requestChannel <- pipeline.EmbelishedRequestMessage{
+		InternalRequest: ir,
+		RequestURL:      "http://localhost:30800/v1/completions",
+	}
+
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	// Concurrently invoke Release on the queue flow's reference (queueReleases) while the worker exits processMessage
+	// which executes its deferred poolReleases cleanup
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, f := range queueReleases {
+			if f != nil {
+				f()
+			}
+		}
+	}()
+	wg.Wait()
+
+	// Wait for worker goroutine poolReleases to finish executing
+	time.Sleep(50 * time.Millisecond)
+
+	if atomic.LoadInt32(&queueReleaseCalled) != 1 {
+		t.Errorf("expected queue release to be called exactly once, got %d", queueReleaseCalled)
+	}
+	if atomic.LoadInt32(&poolReleaseCalled) != 1 {
+		t.Errorf("expected pool release to be called exactly once, got %d", poolReleaseCalled)
 	}
 }

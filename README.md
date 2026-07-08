@@ -98,14 +98,18 @@ make deploy-ap-on-k8s
 
 ## Worker Pools Configuration
 
-When using multiple queues or topics, the worker capacities for named pools can be configured via a dedicated worker pools file.
+When using multiple queues or topics, the worker capacities and pool-level gates for named pools can be configured via a dedicated worker pools file.
 
 **JSON Schema:**
 ```json
 [
   {
     "id": "qwen-pool",
-    "workers": 4
+    "workers": 4,
+    "gate_type": "local-max-concurrency",
+    "gate_params": {
+      "limit": "2"
+    }
   }
 ]
 ```
@@ -113,10 +117,19 @@ When using multiple queues or topics, the worker capacities for named pools can 
 **Fields:**
 - `id` (required): Unique pool identifier referenced by queue/topic configurations.
 - `workers` (required): Number of concurrent workers dedicated to this pool. Must be positive.
+- `gate_type` (optional): The type of dispatch gate to apply to the pool (e.g. `local-max-concurrency`, `prometheus-saturation`).
+- `gate_params` (optional): Key-value parameters configuring the gate.
 
 ## Dispatch Gates
 
-The Async Processor supports dispatch gates to control batch processing based on system capacity. Gates can be configured per-queue (via configuration files).
+The Async Processor supports dispatch gates to control batch processing based on system capacity. Gates can be configured at two levels:
+1. **Per-Queue Gates** (configured in the queue/topic config file).
+2. **Per-Pool Gates** (configured in the worker pools config file).
+
+### Difference between Queue and Pool Gates
+
+* **Queue-level gates** run at the admission phase for a specific queue. When a queue-level gate denies admission (returning `ActionRefuse`), the request is immediately returned to the broker to be retried/re-delivered, freeing the worker to process other queues.
+* **Pool-level gates** run directly inside the worker loop to regulate capacity constraints shared by all queues routing to that worker pool. When a pool-level gate returns `ActionWait`, the worker parks in-memory and polls until capacity is available, avoiding broker nack/retry overhead. If the pool-level gate returns `ActionRefuse`, the request is immediately returned to the broker.
 
 ### Per-Queue Dispatch Gates
 
@@ -129,6 +142,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `redis-quota`: Per-attribute quota management via Redis.
 - `local-max-concurrency`: Limits the number of concurrent in-flight requests processed from a queue locally using thread-safe, in-process state.
 - `composite`: Combines multiple gates. Returns the minimum budget across all inner dispatch gates and acquires quota across all inner attribute gates (all or nothing).
+- `wait-on-refuse`: Decorator that wraps a single inner gate and converts any `ActionRefuse` verdict into `ActionWait` (parking/polling in-memory instead of immediate broker redelivery).
 - `prometheus-saturation`: Queries Prometheus for pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
 - `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
 - `prometheus-query`: Evaluates an arbitrary user-supplied PromQL expression as the dispatch budget. The expression must resolve to an instant vector with a single sample whose value is in [0, 1]. Unlike `prometheus-saturation` and `prometheus-budget`, this gate does not construct queries internally — the user provides the complete PromQL expression. Values outside [0, 1] are clamped.
@@ -226,6 +240,9 @@ For more fine-grained control, configure gates per queue in your configuration f
 
 - `composite`:
   - `gates` (**required**): A JSON array of gate configurations. Each configuration is an object with `gate_type` and `gate_params`.
+
+- `wait-on-refuse`:
+  - `gate` (**required**): A JSON string containing a single gate configuration (with `gate_type` and `gate_params`) to wrap. This can be used to wrap prometheus gates in pool configuration so that they park requests instead of redelivering them to the message broker when the gate is saturated.
 
 - `redis`:
   - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.
@@ -517,6 +534,9 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `llm_d_async_async_message_latency_time_millis` | Histogram | End-to-end message latency in milliseconds (publish to successful processing). Only registered when the transport supports message latency (e.g., GCP Pub/Sub). |
 | `llm_d_async_async_inference_latency_time_millis` | Histogram | Time in milliseconds spent calling the inference gateway (IGW), measured around each request attempt. Isolates "model time" from "queue time" and is always registered. |
 | `llm_d_async_async_queue_residence_time_millis` | Histogram | Time in milliseconds a message spent buffered in-process, from broker ingestion until a worker pulled it for processing. Measures the async delay introduced by the system (queue time). Always registered. |
+| `llm_d_async_async_dispatch_budget` | Gauge | Current dispatch budget [0.0–1.0] returned by the queue's gate; the fraction of system capacity available for new requests (0.0 = gate fully closed). Useful for diagnosing why throughput is throttled. |
+| `llm_d_async_async_pool_worker_limit` | Gauge | Configured worker concurrency limit for a pool (carries only the `pool_name` label). Compare against `llm_d_async_async_inflight_requests` to compute worker utilization. |
+| `llm_d_async_async_gate_decisions_total` | Counter | Count of gate decisions that prevented a message from being dispatched, by `reason`: `gate_closed` (no dispatch budget), `quota_exhausted` (per-attribute quota overflow), `dropped` (gate permanently rejected the request), `error` (gate evaluation failed). |
 
 **Labels:**
 
@@ -524,6 +544,8 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 |-------|-------------|
 | `queue_id` | Transport-level queue identifier |
 | `queue_name` | Logical queue name from the queue configuration |
+| `pool_name` | Worker pool the queue routes to (`async_pool_worker_limit` carries only this label) |
+| `reason` | Gate-decision reason (only on `async_gate_decisions_total`): `gate_closed`, `quota_exhausted`, `dropped`, `error` |
 
 **Example PromQL queries:**
 
@@ -601,7 +623,11 @@ The configuration file when using the `redis.queues-config-file` flag should hav
        "igw_base_url": "http://localhost:30800",
        "worker_pool_id": "qwen-pool",
        "inference_objective": "some_inference_objective",
-       "request_path_url": "/v1/completions"
+       "request_path_url": "/v1/completions",
+       "labels": {
+          "env": "prod",
+          "team": "billing"
+       }
     },
     {
        "queue_name": "another_queue",
@@ -622,6 +648,7 @@ The configuration file when using the `redis.queues-config-file` flag should hav
 - `inference_objective`: The inference objective header value.
 - `igw_base_url` (required): Base URL of the inference gateway or target model server for this queue.
 - `request_path_url` (optional): Request path URL (e.g. `/v1/chat/completions`) for this queue.
+- `labels` (optional): A map of key-value string pairs injected as routing metadata (`Labels`) into the `InternalRequest` envelope at ingestion/pull time.
 
 ### GCP Pub/Sub
 
@@ -661,7 +688,11 @@ The configuration file when using the `pubsub.topics-config-file` flag should ha
        "igw_base_url": "http://localhost:80/",
        "request_path_url": "/v1/completions",
        "gate_type": "constant",
-       "gate_params": {}
+       "gate_params": {},
+       "labels": {
+          "env": "prod",
+          "team": "billing"
+       }
     },
     {
        "subscriber_id": "another_subscriber",
@@ -687,6 +718,7 @@ The configuration file when using the `pubsub.topics-config-file` flag should ha
 - `request_path_url` (required): Request path URL (e.g. `/v1/chat/completions`) for this topic.
 - `gate_type`: Required type of dispatch gate for this topic.
 - `gate_params` (optional): Parameters for the gate type (e.g., pool name, threshold for prometheus gates).
+- `labels` (optional): A map of key-value string pairs injected as routing metadata (`Labels`) into the `InternalRequest` envelope at ingestion/pull time.
 
 ## Development
 

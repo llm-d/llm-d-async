@@ -1,8 +1,14 @@
 suite: deployment
 templates:
   - templates/ap-deployments.yaml
+# Suite-level defaults satisfy the chart's fail-fast validation (igwBaseURL,
+# a Redis connection, and a Pub/Sub projectId) so positive tests render.
+# Individual tests override these to exercise the validation guards.
 set:
   ap.redis.enabled: true
+  ap.redis.secretName: "redis-creds"
+  ap.igwBaseURL: "http://igw:80"
+  ap.gcpPubSub.projectId: "test-project"
 tests:
   - it: should render a Deployment
     asserts:
@@ -179,16 +185,57 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --pubsub.project-id=my-project
 
-  - it: should not render --pubsub.project-id when projectId is unset
+  - it: should fail when gcp-pubsub is enabled without a projectId
     set:
       ap.redis.enabled: false
       ap.gcpPubSub.enabled: true
+      ap.gcpPubSub.projectId: ""
       ap.gcpPubSub.requestSubscriberId: "test-sub"
       ap.gcpPubSub.resultTopicId: "test-topic"
     asserts:
-      - notContains:
+      - failedTemplate:
+          errorMessage: "ap.gcpPubSub is enabled but ap.gcpPubSub.projectId is empty: the GCP Pub/Sub backend requires a project ID (the process panics on startup without it)."
+
+  - it: should fail when redis is enabled with no url and no secretName
+    set:
+      ap.redis.enabled: true
+      ap.redis.url: ""
+      ap.redis.secretName: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "ap.redis is enabled but no connection is configured: set ap.redis.url, or set ap.redis.secretName/ap.redis.secretKey to reference an existing Secret."
+
+  - it: should fail when igwBaseURL is empty in single-queue redis mode
+    set:
+      ap.redis.enabled: true
+      ap.igwBaseURL: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-queue igw_base_url entries via ap.redis.queuesConfig."
+
+  - it: should fail when igwBaseURL is empty in single-topic gcp-pubsub mode
+    set:
+      ap.redis.enabled: false
+      ap.gcpPubSub.enabled: true
+      ap.igwBaseURL: ""
+      ap.gcpPubSub.resultTopicId: "test-topic"
+    asserts:
+      - failedTemplate:
+          errorMessage: "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-topic igw_base_url entries via ap.gcpPubSub.topicsConfig."
+
+  - it: should not require igwBaseURL when redis queuesConfig is set
+    set:
+      ap.redis.enabled: true
+      ap.messageQueueImpl: "redis-sortedset"
+      ap.igwBaseURL: ""
+      ap.redis.queuesConfig:
+        - queue_name: "queue-1"
+          igw_base_url: "http://igw-1:80"
+          request_path_url: "/v1/completions"
+    asserts:
+      - contains:
           path: spec.template.spec.containers[0].args
-          content: --pubsub.project-id=
+          content: --redis.ss.queues-config
 
   - it: should inject OTel env vars when endpoint is set
     set:

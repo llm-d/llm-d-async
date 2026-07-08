@@ -13,6 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
 
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -61,15 +62,16 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 }
 
 type queueConfig struct {
-	ID                 string    `json:"id,omitempty"`
-	QueueName          string    `json:"queue_name,omitempty"`
-	ResultQueueName    string    `json:"result_queue_name,omitempty"`
-	WorkerPoolID       string    `json:"worker_pool_id"`
-	InferenceObjective string    `json:"inference_objective"`
-	RequestPathURL     string    `json:"request_path_url"`
-	IGWBaseURL         string    `json:"igw_base_url"`
-	GateType           string    `json:"gate_type"`
-	GateParams         StringMap `json:"gate_params,omitempty"`
+	ID                 string            `json:"id,omitempty"`
+	QueueName          string            `json:"queue_name,omitempty"`
+	ResultQueueName    string            `json:"result_queue_name,omitempty"`
+	WorkerPoolID       string            `json:"worker_pool_id"`
+	InferenceObjective string            `json:"inference_objective"`
+	RequestPathURL     string            `json:"request_path_url"`
+	IGWBaseURL         string            `json:"igw_base_url"`
+	GateType           string            `json:"gate_type"`
+	GateParams         StringMap         `json:"gate_params,omitempty"`
+	Labels             map[string]string `json:"labels,omitempty"`
 }
 
 type requestChannelData struct {
@@ -404,6 +406,11 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 	currentTime := float64(time.Now().Unix())
 
 	budget := gate.Budget(ctx)
+	poolName := ""
+	if cfg, ok := r.configMap[queueID]; ok {
+		poolName = cfg.WorkerPoolID
+	}
+	metrics.SetDispatchBudget(budget, queueID, queueName, poolName)
 	batchSize := int(math.Floor(float64(r.batchSize) * budget))
 
 	for i := 0; i < batchSize; i++ {
@@ -438,11 +445,21 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		if ir.QueueID == "" {
 			ir.QueueID = queueID
 		}
+		if cfg, ok := r.configMap[queueID]; ok && len(cfg.Labels) > 0 {
+			if ir.Labels == nil {
+				ir.Labels = make(map[string]string, len(cfg.Labels))
+			}
+			for k, v := range cfg.Labels {
+				ir.Labels[k] = v
+			}
+		}
 
 		// Apply gate
-		verdict, err := gate.Apply(ctx, ir)
+		var releases []pipeline.GateReleaseFunc
+		verdict, err := gate.Apply(ctx, ir, &releases)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
+			metrics.RecordGateDecision(metrics.ReasonError, queueID, queueName, poolName)
 			// Re-enqueue the message on gating failure
 			member, _ := json.Marshal(ir)
 			r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
@@ -450,6 +467,11 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 
 		if verdict.Action == pipeline.ActionRefuse {
+			reason := metrics.ReasonGateClosed
+			if ir.GetClassification() == api.ClassificationOverflow {
+				reason = metrics.ReasonQuotaExhausted
+			}
+			metrics.RecordGateDecision(reason, queueID, queueName, poolName)
 			// Re-enqueue the message (wait for capacity or quota)
 			member, _ := json.Marshal(ir)
 			r.rdb.ZAdd(ctx, queueName, redis.Z{Score: deadline, Member: string(member)})
@@ -457,6 +479,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 
 		if verdict.Action == pipeline.ActionDrop {
+			metrics.RecordGateDecision(metrics.ReasonDropped, queueID, queueName, poolName)
 			if verdict.Result != nil {
 				r.resultChannel <- *verdict.Result
 			} else {
@@ -468,8 +491,8 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			continue
 		}
 
-		if len(ir.Releases()) > 0 {
-			r.activeReleases.Store(rview.ReqID(), ir)
+		if len(releases) > 0 {
+			r.activeReleases.Store(rview.ReqID(), releases)
 		}
 
 		// Stamp ingestion time as the message enters the in-process buffer so the
@@ -488,7 +511,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			}); err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to re-queue message on shutdown", "id", rview.ReqID())
 			}
-			ir.Release()
+			pipeline.ReleaseGateReleases(releases)
 			return
 		}
 	}
@@ -589,11 +612,10 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 func (r *RedisSortedSetFlow) resultWorker(ctx context.Context) {
 	processMsg := func(flushCtx context.Context, msg api.ResultMessage) {
 		batch := drainBatch(msg, r.resultChannel, maxBatchSize)
-		// Release quota for all messages in the batch
 		for _, m := range batch {
 			if val, ok := r.activeReleases.LoadAndDelete(m.ID); ok {
-				if ir, ok := val.(*api.InternalRequest); ok {
-					ir.Release()
+				if rels, ok := val.([]pipeline.GateReleaseFunc); ok {
+					pipeline.ReleaseGateReleases(rels)
 				}
 			}
 		}
