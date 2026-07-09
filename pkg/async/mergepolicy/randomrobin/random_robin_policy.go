@@ -1,6 +1,7 @@
-package async
+package randomrobin
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -8,15 +9,31 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
+	"github.com/llm-d-incubation/llm-d-async/pkg/plugins"
 )
 
-func NewRandomRobinPolicy() pipeline.RequestMergePolicy {
-	return &RandomRobinPolicy{}
+func init() {
+	plugins.MustRegister("random-robin", func(name string, parameters json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
+		return NewRandomRobinPolicy(name), nil
+	})
+}
+
+func NewRandomRobinPolicy(name string) *RandomRobinPolicy {
+	return &RandomRobinPolicy{name: name}
 }
 
 var _ pipeline.RequestMergePolicy = (*RandomRobinPolicy)(nil)
+var _ plugins.Plugin = (*RandomRobinPolicy)(nil)
 
 type RandomRobinPolicy struct {
+	name string
+}
+
+func (r *RandomRobinPolicy) TypedName() plugins.TypedName {
+	return plugins.TypedName{
+		Type: "random-robin",
+		Name: r.name,
+	}
 }
 
 func (r *RandomRobinPolicy) MergeRequestChannels(channels []pipeline.RequestChannel, pools map[string]pipeline.WorkerPoolConfig) pipeline.PoolDispatch {

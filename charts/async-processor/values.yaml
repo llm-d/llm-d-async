@@ -47,6 +47,9 @@ ap:
   #       parameters:
   #         providers: ["whisper"]
   transformConfig: {}
+  # Request merge policy configuration. When set, rendered to a config file and passed
+  # via --request-merge-policy-config.
+  requestMergePolicyConfig: {}
   otel:
     # OTLP gRPC endpoint for trace collection. Examples:
     #   Dev (Jaeger all-in-one):     "http://jaeger.default.svc.cluster.local:4317"

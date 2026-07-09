@@ -131,6 +131,27 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 
 		return NewWaitOnRefuseGate(innerGate), nil
 
+	case "tier-priority-admission":
+		satGateType := paramString(params, "saturation_gate", "")
+		if satGateType == "" {
+			return nil, fmt.Errorf("tier-priority-admission gate requires a 'saturation_gate' parameter")
+		}
+		satGateParams, err := paramMapAny(params, "saturation_gate_params")
+		if err != nil {
+			return nil, fmt.Errorf("tier-priority-admission gate failed to parse 'saturation_gate_params': %w", err)
+		}
+
+		satGate, err := f.CreateGate(pipeline.GateConfig{
+			GateType:   satGateType,
+			GateParams: satGateParams,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("tier-priority-admission gate failed to create saturation gate %q: %w", satGateType, err)
+		}
+
+		tierLabel := paramString(params, "tier_label", "tier")
+		return NewTierPriorityAdmissionGate(satGate, tierLabel), nil
+
 	case "constant":
 		return ConstOpenGate(), nil
 
@@ -547,4 +568,33 @@ func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
 		return NewCachedMetricSource(s, ttl)
 	}
 	return s
+}
+
+// paramMapAny extracts a map[string]any from params.
+func paramMapAny(params map[string]any, key string) (map[string]any, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	switch val := v.(type) {
+	case string:
+		if val == "" {
+			return nil, nil
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(val), &m); err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", key, err)
+		}
+		return m, nil
+	case map[string]any:
+		return val, nil
+	case map[string]string:
+		m := make(map[string]any, len(val))
+		for k, valStr := range val {
+			m[k] = valStr
+		}
+		return m, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %T for key %q", v, key)
+	}
 }

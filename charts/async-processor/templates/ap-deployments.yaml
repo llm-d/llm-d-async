@@ -117,6 +117,9 @@ spec:
           {{- if .Values.ap.transformConfig }}
           - --transform-config-file=/etc/async-processor/config/transform-config.json
           {{- end }}
+          {{- if .Values.ap.requestMergePolicyConfig }}
+          - --request-merge-policy-config=/etc/async-processor/config/request-merge-policy.json
+          {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 8 }}
           - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
           - --health-port={{ .Values.ap.health.port | default 8081 }}
@@ -209,9 +212,9 @@ spec:
         resources:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.tls.secretName }}
+        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig .Values.ap.tls.secretName }}
         volumeMounts:
-          {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig }}
+          {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
           - name: ap-config
             mountPath: /etc/async-processor/config
             readOnly: true
@@ -224,9 +227,9 @@ spec:
         {{- end }}
       serviceAccountName: {{ include "async-processor.fullname" . }}
       terminationGracePeriodSeconds: 130
-      {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.tls.secretName }}
+      {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig .Values.ap.tls.secretName }}
       volumes:
-        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig }}
+        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
         - name: ap-config
           configMap:
             name: {{ include "async-processor.fullname" . }}-config

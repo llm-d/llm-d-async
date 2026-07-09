@@ -86,7 +86,7 @@ make deploy-ap-on-k8s
 
 ## Command line parameters
 - `concurrency`: The number of concurrent workers (per pool if unspecified), default is 8.
-- `request-merge-policy`: Currently only supporting <u>random-robin</u> policy.
+- `request-merge-policy-config`: Path to the JSON configuration file containing the request merge policy specification (`type` and `parameters`). If not specified, defaults to the `random-robin` policy.
 - `message-queue-impl`: Implementation of the queueing system. Options are <u>gcp-pubsub</u> for GCP PubSub, <u>gcp-pubsub-gated</u> for GCP PubSub with per-topic gating, <u>redis-sortedset</u> for Redis Sorted Set (persisted and sorted), and <u>redis-pubsub</u> for ephemeral Redis-based implementation.
 - `pool-config-file`: Path to the JSON configuration file containing the worker pool definitions. If omitted, a single `"default"` worker pool is created with concurrency determined by the global `concurrency` flag.
 
@@ -147,6 +147,7 @@ For more fine-grained control, configure gates per queue in your configuration f
 - `prometheus-budget`: Computes a dispatch budget D using a cascade of two Prometheus metric sources. Both sources compute `max_SYS = ready_pods × max_concurrency` dynamically. The primary source uses the EPP flow control queue size: `D = 1 − (queue_size / max_SYS)`. If the primary is unavailable, it falls back to a secondary source using vLLM and pool metrics: `D = 1 − (running_requests / max_SYS)`. The gate closes when D ≤ B (baseline); callers compute `N = max_SYS × (D − B)`. See [docs/dispatch-budget.md](docs/dispatch-budget.md) for details.
 - `prometheus-query`: Evaluates an arbitrary user-supplied PromQL expression as the dispatch budget. The expression must resolve to an instant vector with a single sample whose value is in [0, 1]. Unlike `prometheus-saturation` and `prometheus-budget`, this gate does not construct queries internally — the user provides the complete PromQL expression. Values outside [0, 1] are clamped.
 - `endpoint-scrape`: Scrapes a raw Prometheus `/metrics` endpoint directly (no Prometheus server required). Extracts a named metric, computes saturation, and returns the available budget. Supports two modes: **direct saturation** (metric value is already in [0, 1], e.g., from the EPP) and **computed saturation** (raw count divided by `max_count_per_pod`, e.g., `vllm:num_requests_waiting`). Optionally scrapes a second endpoint for dynamic pod count.
+- `tier-priority-admission`: Implements a three-way admission verdict based on saturation, queue tier, and reservation classification. Saturation is determined by evaluating an inner gate: if the inner gate returns `ActionRefuse`, the pool is considered saturated. If the pool is saturated: (1) returns `ActionWait` if classification is `reserved` (parking worker threads cleanly); (2) drops immediately with a `429` status payload if tier is `interactive` and classification is `overflow`; (3) returns `ActionRefuse` to place back in the queue if tier is `async` or `batch` and classification is `overflow`. If not saturated, returns `ActionContinue`.
 
 **Example Configuration with Per-Queue Gates:**
 
@@ -322,6 +323,11 @@ For more fine-grained control, configure gates per queue in your configuration f
   deployments without a dedicated Prometheus instance. Use `max_count_per_pod` with `pods_url`/`pods_metric`
   for dynamic scaling, or set `max_count_per_pod` to a static value for single-pod setups.
 
+- `tier-priority-admission`:
+  - `saturation_gate` (**required**): The type string of the inner gate used to evaluate pool saturation (e.g. `"prometheus-query"`).
+  - `saturation_gate_params` (optional): JSON-serialized string of parameters for the inner saturation gate.
+  - `tier_label` (optional): The label key to check the queue's SLA tier. Default is `"tier"`.
+
 ## Request Messages and Consumption
 
 The async processor expects request messages to have the following format:
@@ -368,7 +374,27 @@ Instead of performing a single global merge, the policy groups input channels by
 
 This per-pool topology provides complete backpressure and queue-level isolation: a slow or saturated pool will block only its own merged channel, leaving other pools completely unaffected and free to process requests.
 
-Currently the only policy supported is `Random Robin Policy` which randomly picks messages from all queues configured for a given pool.
+#### Configuration
+
+The merge policy is configured using the `--request-merge-policy-config` CLI flag. It points to a JSON configuration file specifying the policy `type` and optional custom `parameters`:
+
+```json
+{
+  "type": "tier-priority",
+  "parameters": {
+    "priority_header": "x-gateway-priority"
+  }
+}
+```
+
+#### Supported Policies
+
+1. **`random-robin`**: Randomly picks messages from all queues configured for a given pool. This is the default policy and accepts no parameters.
+2. **`tier-priority`**: Buckets requests into 6 strict priority lanes using routing tags (`(classification, tier)`). Within each bucket, it round-robins across different client channels and stamps the chosen priority header (`x-gateway-priority` by default).
+   - **Note**: The `tier-priority` merge policy assumes that all messages within a single queue share the same priority. Message classification relies on the FIFO order of an individual queue, and a message's classification does not change after it is pulled off the queue.
+   - **Parameters**:
+     - `priority_header` (optional, string): The HTTP header name used to pass the priority value downstream to the inference scheduler. Default is `"x-gateway-priority"`.
+     - `tier_label` (optional, string): The label name on `InternalRequest.Labels` used to look up the request's priority tier. Default is `"tier"`.
 
 ## Request Body Transforms
 

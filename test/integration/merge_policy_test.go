@@ -9,7 +9,7 @@ import (
 
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	ap "github.com/llm-d-incubation/llm-d-async/pkg/async"
+	"github.com/llm-d-incubation/llm-d-async/pkg/async/mergepolicy/randomrobin"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -39,7 +39,7 @@ func TestRandomRobinPolicy_ConcurrentProducers(t *testing.T) {
 		},
 	}
 
-	policy := ap.NewRandomRobinPolicy()
+	policy := randomrobin.NewRandomRobinPolicy("test")
 	dispatch := policy.MergeRequestChannels(channels, pools)
 	mergedChan := dispatch.Channels["test-pool"]
 
