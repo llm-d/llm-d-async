@@ -10,6 +10,7 @@ the rare ones load tests never hit (concurrent admits, pod crashes mid-flight).
 | [`GateQuota.tla`](GateQuota.tla) | the `redis-quota` concurrency gate: acquire / dispatch / release across many workers, plus crash-induced leaks and TTL reclaim | **all properties hold** |
 | [`GateQuotaRace.tla`](GateQuotaRace.tla) | the same gate with a **non-atomic** acquire (check-then-increment in two steps) | **NoOverAdmission violated** (TLC prints the trace) |
 | [`MsgLifecycle.tla`](MsgLifecycle.tla) | the Pub/Sub message → dispatch → result → ack flow, where completion is correlated through a process-global map keyed by `msg.ID`, under at-least-once redelivery | **current design: `AckIntegrity` and `NoStuckCallback` both violated.** A corrected design (flip one constant) holds. |
+| [`GateThrottle.tla`](GateThrottle.tla) | issue [#304](https://github.com/llm-d-incubation/llm-d-async/issues/304): a worker-pool gate that makes a **binary** admit decision (`observed < threshold`) across N parallel workers on a **lagging** scrape | **current design: `RespectsThreshold` violated** — TLC finds `inflight = |Workers| > Threshold`. The budget-throttled variant (flip one constant) holds. |
 
 ## Why this gate
 
@@ -126,6 +127,36 @@ at-least-once delivery means **duplicate dispatch is inherent**; the fix removes
 *mis-correlation and the leak*, but genuine end-to-end dedup still needs an
 idempotency key downstream.
 
+## What the throttle model found (issue #304)
+
+`GateThrottle.tla` models the reported overshoot: a **worker-pool** gate does not
+respect its saturation threshold. Every pool worker evaluates the gate as a
+*binary* verdict (`ActionContinue`/`ActionWait`) against the last Prometheus
+scrape, which lags the real in-flight count. While that reading is stale, many
+idle workers all pass the check and dispatch at once, so real saturation bursts
+past the threshold before the next scrape catches up (the benchmark's average
+saturation 1.73 vs the configured 0.8).
+
+The model has `|Workers|` workers, an `inflight` count (true saturation), an
+`observed` reading refreshed only by a `scraper` process (the lag), and one
+`Threshold`. Flip the `Proportional` constant:
+
+- **`FALSE`** — the current worker-pool gate: admit while `observed < Threshold`.
+  TLC finds a 3-step trace where, with `observed` still `0`, all three workers
+  admit and `inflight` reaches `3 > Threshold = 2` — **`RespectsThreshold`
+  violated**. The overshoot grows with the worker count.
+- **`TRUE`** — admission bounded by the *real* remaining budget (the proposed
+  fix: throttle the number of active workers by `Budget()`, mirroring the queue
+  gate's `batchSize * budget`): admit only while `inflight < Threshold`. TLC
+  reports **no error** — `inflight` never exceeds `Threshold`.
+
+This is the formal statement of #304: the binary pool gate cannot hold the
+threshold under scrape lag, whereas budget-proportional admission can. (The model
+idealizes the single serialized queue worker's scrape+admit as atomic, so the fix
+holds `Threshold` exactly; real scrape lag still leaves the queue path a small,
+*bounded* residual overshoot — the benchmark's 0.8118 — while the pool path's
+overshoot scales with the worker count.)
+
 ## Running TLC
 
 You need Java and `tla2tools.jar`
@@ -156,6 +187,14 @@ java -cp tla2tools.jar tlc2.TLC -deadlock -config MsgLifecycle_buggy.cfg MsgLife
 java -cp tla2tools.jar tlc2.TLC -deadlock -config MsgLifecycle_buggy_live.cfg MsgLifecycle.tla
 # corrected design -> "No error has been found."
 java -cp tla2tools.jar tlc2.TLC -deadlock -config MsgLifecycle_fixed.cfg MsgLifecycle.tla
+
+# the worker-pool overshoot model (issue #304)
+java -cp tla2tools.jar pcal.trans GateThrottle.tla
+
+# current worker-pool gate -> RespectsThreshold violated (3-state burst trace)
+java -cp tla2tools.jar tlc2.TLC -config GateThrottle_binary.cfg GateThrottle.tla
+# budget-throttled admission (the fix) -> "No error has been found."
+java -cp tla2tools.jar tlc2.TLC -config GateThrottle_proportional.cfg GateThrottle.tla
 ```
 
 (The buggy run uses two configs only because TLC stops at the first invariant
