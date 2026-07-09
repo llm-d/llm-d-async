@@ -332,6 +332,7 @@ func applyManifests() {
 		{"prometheus-query", helmValuesDir + "/prometheus-query.yaml"},
 		{"endpoint-scrape", helmValuesDir + "/endpoint-scrape.yaml"},
 		{"short-drain", helmValuesDir + "/short-drain.yaml"},
+		{"multitenant", helmValuesDir + "/multitenant.yaml"},
 	} {
 		helmInstall(r.name, r.values, map[string]string{
 			"ap.image.repository": imageRepo,
@@ -559,6 +560,7 @@ func doRedeployEPPWithFlowControl() {
 		"prometheus-query-async-processor",
 		"endpoint-scrape-async-processor",
 		"short-drain-async-processor",
+		"multitenant-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
@@ -576,6 +578,7 @@ func doRedeployEPPWithFlowControl() {
 		"prometheus-query-async-processor",
 		"endpoint-scrape-async-processor",
 		"short-drain-async-processor",
+		"multitenant-async-processor",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")

@@ -1,0 +1,78 @@
+# Multi-tenant scenario from docs/guides/multitenant on the Redis SortedSet
+# backend: three teams (premium/standard/batch), each with its own queue, worker
+# pool, per-team quota, and priority tier — the guide's two-level gating model:
+#
+#   - QUEUE-level gate (per team): redis-quota, keyed on the request metadata
+#     "team" attribute. premium is ungated; standard limit 2; batch limit 1.
+#   - POOL-level gate (batch): wait-on-refuse(prometheus-query) — under inference
+#     saturation the batch workers PARK (ActionWait) while premium keeps flowing.
+#
+# The guide's pool query is over vllm:num_requests_running; here it is over the
+# EPP saturation metric the e2e harness can drive (setSimWaitingRequests →
+# inference_extension_flow_control_pool_saturation), the same metric the e2e
+# prometheus-query.yaml overlay uses.
+ap:
+  imagePullPolicy: Never
+  messageQueueImpl: "redis-sortedset"
+  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  prometheusURL: "http://prometheus.e2e-integration.svc.cluster.local:9090"
+  prometheusCacheTTL: "0s"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    enabled: true
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
+    resultQueueName: "mt-default-result-list"
+    pollIntervalMs: 500
+    batchSize: 10
+    queuesConfig:
+      # premium: highest priority — no queue quota, no pool saturation gate.
+      - queue_name: "mt-premium-request-sortedset"
+        worker_pool_id: "premium"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+        result_queue_name: "mt-premium-result-list"
+
+      # standard: per-team concurrency quota of 2.
+      - queue_name: "mt-standard-request-sortedset"
+        worker_pool_id: "standard"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+        result_queue_name: "mt-standard-result-list"
+        gate_type: "redis-quota"
+        gate_params:
+          address: "redis.e2e-integration.svc.cluster.local:6379"
+          attribute: "team"
+          mode: "concurrency"
+          limit: "2"
+
+      # batch: tight concurrency quota (1) AND the least saturation tolerance.
+      - queue_name: "mt-batch-request-sortedset"
+        worker_pool_id: "batch"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+        result_queue_name: "mt-batch-result-list"
+        gate_type: "redis-quota"
+        gate_params:
+          address: "redis.e2e-integration.svc.cluster.local:6379"
+          attribute: "team"
+          mode: "concurrency"
+          limit: "1"
+
+  workerPools:
+    - id: "premium"
+      workers: 4
+    - id: "standard"
+      workers: 2
+    # batch parks under saturation: wait-on-refuse converts the prometheus-query
+    # refuse into ActionWait. Budget hits 0 (gate closes) once saturation >= 0.5.
+    - id: "batch"
+      workers: 2
+      gate_type: "wait-on-refuse"
+      gate_params:
+        gate: |
+          {"gate_type":"prometheus-query","gate_params":{"query":"clamp(1 - inference_extension_flow_control_pool_saturation{inference_pool=\"e2e-pool\"}/0.5, 0, 1)","fallback":"1"}}
+  modelServerMonitor:
+    enabled: false
