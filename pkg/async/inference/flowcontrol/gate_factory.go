@@ -349,20 +349,26 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 	}
 }
 
-// paramString extracts a string value from params, returning defaultVal if the key is absent or empty.
+// paramString extracts a string value from params, returning defaultVal if the key is absent or nil.
+// Scalar types (string, float64, bool) are accepted; non-scalar types return defaultVal.
 func paramString(params map[string]any, key, defaultVal string) string {
 	v, ok := params[key]
 	if !ok || v == nil {
 		return defaultVal
 	}
-	s, ok := v.(string)
-	if !ok {
-		return fmt.Sprintf("%v", v)
-	}
-	if s == "" {
+	switch val := v.(type) {
+	case string:
+		if val == "" {
+			return defaultVal
+		}
+		return val
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(val)
+	default:
 		return defaultVal
 	}
-	return s
 }
 
 // paramFloat extracts a float64 value from params. Accepts float64, int, or string representations.
