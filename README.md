@@ -391,8 +391,10 @@ The merge policy is configured using the `--request-merge-policy-config` CLI fla
 
 1. **`random-robin`**: Randomly picks messages from all queues configured for a given pool. This is the default policy and accepts no parameters.
 2. **`tier-priority`**: Buckets requests into 6 strict priority lanes using routing tags (`(classification, tier)`). Within each bucket, it round-robins across different client channels and stamps the chosen priority header (`x-gateway-priority` by default).
+   - **Note**: The `tier-priority` merge policy assumes that all messages within a single queue share the same priority. Message classification relies on the FIFO order of an individual queue, and a message's classification does not change after it is pulled off the queue.
    - **Parameters**:
      - `priority_header` (optional, string): The HTTP header name used to pass the priority value downstream to the inference scheduler. Default is `"x-gateway-priority"`.
+     - `tier_label` (optional, string): The label name on `InternalRequest.Labels` used to look up the request's priority tier. Default is `"tier"`.
 
 ## Request Body Transforms
 
