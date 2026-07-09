@@ -25,10 +25,10 @@ func NewHTTPInferenceClient(client *http.Client) *HTTPInferenceClient {
 }
 
 // SendRequest implements InferenceClient for HTTP-based inference requests.
-func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, headers map[string]string, payload []byte) ([]byte, int, error) {
+func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, headers map[string]string, payload []byte) (*asyncapi.InferenceResponse, error) {
 	request, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
 	if err != nil {
-		return nil, 0, &asyncapi.ClientError{
+		return nil, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryInvalidReq,
 			Message:       "failed to create request",
 			RawError:      err,
@@ -41,7 +41,7 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	result, err := h.client.Do(request)
 	if err != nil {
-		return nil, 0, &asyncapi.ClientError{
+		return nil, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryUnknown,
 			Message:       "failed to send request",
 			RawError:      err,
@@ -51,7 +51,7 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
-		return nil, result.StatusCode, &asyncapi.ClientError{
+		return &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body}, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       "failed to read response",
 			RawError:      err,
@@ -59,39 +59,35 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 		}
 	}
 
-	// Check for rate limiting / load shedding (429)
+	resp := &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body}
+
 	if result.StatusCode == 429 {
 		retryAfter, _ := parseRetryAfter(result.Header.Get("Retry-After"))
-		return body, result.StatusCode, &asyncapi.ClientError{
+		return resp, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryRateLimit,
 			Message:       fmt.Sprintf("rate limited: status code %d", result.StatusCode),
-			RawError:      nil,
 			RetryAfter:    retryAfter,
 			StatusCode:    result.StatusCode,
 		}
 	}
 
-	// Check for client errors (4xx, non-429)
 	if result.StatusCode >= 400 && result.StatusCode < 500 {
-		return body, result.StatusCode, &asyncapi.ClientError{
+		return resp, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryInvalidReq,
 			Message:       fmt.Sprintf("client error: status code %d", result.StatusCode),
-			RawError:      nil,
 			StatusCode:    result.StatusCode,
 		}
 	}
 
-	// Check for server errors (5xx)
 	if result.StatusCode >= 500 && result.StatusCode < 600 {
-		return body, result.StatusCode, &asyncapi.ClientError{
+		return resp, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       fmt.Sprintf("server error: status code %d", result.StatusCode),
-			RawError:      nil,
 			StatusCode:    result.StatusCode,
 		}
 	}
 
-	return body, result.StatusCode, nil
+	return resp, nil
 }
 
 // parseRetryAfter parses a Retry-After header value, which can be either

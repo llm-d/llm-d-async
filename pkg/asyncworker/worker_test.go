@@ -63,7 +63,7 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(-10 * time.Second).Unix(),
 	}, "", map[string]string{})
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 0, nil)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 	if len(retryChannel) > 0 {
 		t.Errorf("Message that its deadline passed should not be retried. Got a message in the retry channel")
 		return
@@ -99,7 +99,7 @@ func TestRetryMessage_retry(t *testing.T) {
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(10 * time.Second).Unix(),
 	}, "", map[string]string{})
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 0, nil)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 	if len(resultChannel) > 0 {
 		t.Errorf("Should not have any messages in the result channel")
 		return
@@ -448,7 +448,7 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 		Created:  now,
 		Deadline: now, // same second → no time left to retry
 	}, "", nil)
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 0, nil)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 	if len(retryChannel) > 0 {
 		t.Errorf("secondsToDeadline==0 should not produce a retry")
 	}
@@ -509,7 +509,7 @@ func TestRetryMessage_retryAfterHonored(t *testing.T) {
 
 	// Server says wait 30s; expBackoff for retry 1 would be ~[1,2) seconds,
 	// so the Retry-After value should win.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, 0, nil)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, asyncapi.InferenceResponse{})
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -530,7 +530,7 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 
 	// Server says wait 1s, but expBackoff at retry 5 is much larger.
 	// expBackoff should win.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 1*time.Second, 0, nil)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 1*time.Second, asyncapi.InferenceResponse{})
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -550,7 +550,7 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	}, "", nil)
 
 	// Server says wait 30s, but deadline is only 5s away → deadline exceeded.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, 0, nil)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, asyncapi.InferenceResponse{})
 	if len(retryChannel) > 0 {
 		t.Errorf("should not retry when Retry-After exceeds deadline")
 	}
@@ -575,7 +575,7 @@ func TestRetryMessage_deadlineExhaustedPreservesHTTPResponse(t *testing.T) {
 	}, "", nil)
 
 	lastBody := []byte(`{"error":"too many requests"}`)
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, 429, lastBody)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{StatusCode: 429, Body: lastBody})
 	if len(retryChannel) > 0 {
 		t.Errorf("should not retry past deadline")
 	}
@@ -679,7 +679,7 @@ func TestRetryMessage_cancelledCtxDoesNotBlock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		retryMessage(ctx, msg, retryChannel, resultChannel, 0, 0, nil)
+		retryMessage(ctx, msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 		close(done)
 	}()
 
@@ -1857,6 +1857,130 @@ func TestWorker_DrainWithCancelledRequestCtx(t *testing.T) {
 	}
 }
 
+type blockingPoolGate struct {
+	unblock chan struct{}
+}
+
+func (g *blockingPoolGate) Budget(ctx context.Context) float64 {
+	return 1.0
+}
+
+func (g *blockingPoolGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	select {
+	case <-ctx.Done():
+		return pipeline.Verdict{}, ctx.Err()
+	case <-g.unblock:
+		return pipeline.Continue(), nil
+	}
+}
+
+type waitingPoolGate struct{}
+
+func (g *waitingPoolGate) Budget(ctx context.Context) float64 {
+	return 1.0
+}
+
+func (g *waitingPoolGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	return pipeline.Wait(), nil
+}
+
+func TestWorker_PoolGateShutdownReenqueues(t *testing.T) {
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	gate := &blockingPoolGate{unblock: make(chan struct{})}
+
+	done := make(chan struct{})
+	go func() {
+		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+		close(done)
+	}()
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "gate-shutdown-test",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	// Let the worker block in poolGate.Apply, then cancel (simulating shutdown).
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker did not exit after shutdown cancel")
+	}
+
+	if len(resultChannel) > 0 {
+		t.Errorf("expected no result (should re-enqueue on shutdown), got a result")
+	}
+	if len(retryChannel) != 1 {
+		t.Fatalf("expected message to be re-enqueued, retry channel len = %d", len(retryChannel))
+	}
+	retryMsg := <-retryChannel
+	if retryMsg.PublicRequest.ReqID() != "gate-shutdown-test" {
+		t.Errorf("re-enqueued wrong message: got ID %q", retryMsg.PublicRequest.ReqID())
+	}
+}
+
+func TestWorker_PoolGateActionWaitShutdownReenqueues(t *testing.T) {
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gate := &waitingPoolGate{}
+
+	done := make(chan struct{})
+	go func() {
+		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+		close(done)
+	}()
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "gate-wait-shutdown-test",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	// Let the worker enter the ActionWait polling loop, then cancel (simulating shutdown).
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker did not exit after ActionWait shutdown cancel")
+	}
+
+	if len(resultChannel) > 0 {
+		t.Errorf("expected no result (should re-enqueue on shutdown), got a result")
+	}
+	if len(retryChannel) != 1 {
+		t.Fatalf("expected message to be re-enqueued, retry channel len = %d", len(retryChannel))
+	}
+	retryMsg := <-retryChannel
+	if retryMsg.PublicRequest.ReqID() != "gate-wait-shutdown-test" {
+		t.Errorf("re-enqueued wrong message: got ID %q", retryMsg.PublicRequest.ReqID())
+	}
+}
+
 type raceMockPoolGate struct {
 	releaseCalled *int32
 }
@@ -1934,8 +2058,14 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 	}()
 	wg.Wait()
 
-	// Wait for worker goroutine poolReleases to finish executing
-	time.Sleep(50 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&queueReleaseCalled) < 1 || atomic.LoadInt32(&poolReleaseCalled) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for releases: queue=%d pool=%d",
+				atomic.LoadInt32(&queueReleaseCalled), atomic.LoadInt32(&poolReleaseCalled))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	if atomic.LoadInt32(&queueReleaseCalled) != 1 {
 		t.Errorf("expected queue release to be called exactly once, got %d", queueReleaseCalled)

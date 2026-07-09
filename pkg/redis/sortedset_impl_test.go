@@ -480,7 +480,19 @@ func TestSortedSetFlow_ResultStructuredFields(t *testing.T) {
 	}
 
 	go flow.resultWorker(ctx)
-	time.Sleep(200 * time.Millisecond)
+
+	timeout := time.After(2 * time.Second)
+	for {
+		n, err := rdb.LLen(ctx, queue).Result()
+		if err == nil && n >= int64(len(messages)) {
+			break
+		}
+		select {
+		case <-timeout:
+			t.Fatalf("timeout waiting for %d results to be pushed", len(messages))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 
 	for _, want := range messages {
 		raw, err := rdb.RPop(ctx, queue).Result()

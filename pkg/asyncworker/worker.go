@@ -110,6 +110,13 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						verdict, err = poolGate.Apply(gateCtx, msg.InternalRequest, &poolReleases)
 						if err != nil {
 							if errors.Is(err, context.DeadlineExceeded) || gateCtx.Err() != nil {
+								if requestCtx.Err() != nil && !errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+									retryChannel <- pipeline.RetryMessage{
+										EmbelishedRequestMessage: msg,
+										BackoffDurationSeconds:   0,
+									}
+									return
+								}
 								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 								select {
 								case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
@@ -157,6 +164,13 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						if verdict.Action == pipeline.ActionWait {
 							select {
 							case <-gateCtx.Done():
+								if requestCtx.Err() != nil && !errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+									retryChannel <- pipeline.RetryMessage{
+										EmbelishedRequestMessage: msg,
+										BackoffDurationSeconds:   0,
+									}
+									return
+								}
 								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 								select {
 								case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
@@ -226,19 +240,13 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 
 					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
 					inferenceStart := time.Now()
-					responseBody, statusCode, err := client.SendRequest(reqCtx, msg.RequestURL, sendHeaders, sendPayload)
+					resp, err := client.SendRequest(reqCtx, msg.RequestURL, sendHeaders, sendPayload)
 					metrics.RecordInferenceLatency(float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
 
 					if err == nil {
 						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)
 						select {
-						case resultChannel <- asyncapi.ResultMessage{
-							ID:         msg.PublicRequest.ReqID(),
-							StatusCode: statusCode,
-							Payload:    string(responseBody),
-							Routing:    msg.InternalRouting,
-							Metadata:   msg.PublicRequest.ReqMetadata(),
-						}:
+						case resultChannel <- asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, resp.StatusCode, resp.Body):
 						case <-requestCtx.Done():
 						}
 						return
@@ -263,8 +271,8 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 
 						var resultMsg asyncapi.ResultMessage
-						if statusCode > 0 {
-							resultMsg = asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, statusCode, responseBody)
+						if resp != nil && resp.StatusCode > 0 {
+							resultMsg = asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, resp.StatusCode, resp.Body)
 						} else {
 							resultMsg = asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting,
 								asyncapi.ErrCodeInferenceError,
@@ -286,7 +294,11 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					if errors.As(err, &clientErr) {
 						retryAfter = clientErr.RetryAfter
 					}
-					retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, statusCode, responseBody)
+					var lastResp asyncapi.InferenceResponse
+					if resp != nil {
+						lastResp = *resp
+					}
+					retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, lastResp)
 				}
 				sendInferenceRequest()
 			}
@@ -350,10 +362,10 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 // retryMessage re-enqueues the request for another attempt, or emits a final
 // result if the deadline cannot accommodate another retry.
 //
-// lastStatusCode and lastResponseBody carry the most recent HTTP response (if any)
-// so that when retries are exhausted the actual HTTP status/body is surfaced
-// rather than a generic "deadline exceeded" non-HTTP error.
-func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastStatusCode int, lastResponseBody []byte) {
+// lastResp carries the most recent HTTP response (if any) so that when retries
+// are exhausted the actual HTTP status/body is surfaced rather than a generic
+// "deadline exceeded" non-HTTP error.
+func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastResp asyncapi.InferenceResponse) {
 	if msg.PublicRequest == nil {
 		return
 	}
@@ -364,7 +376,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	if secondsToDeadline <= 0 {
 		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- deadlineExhaustedResult(msg, lastStatusCode, lastResponseBody):
+		case resultChannel <- deadlineExhaustedResult(msg, lastResp):
 		case <-ctx.Done():
 		}
 		return
@@ -380,7 +392,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	if finalDuration >= float64(secondsToDeadline) {
 		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 		select {
-		case resultChannel <- deadlineExhaustedResult(msg, lastStatusCode, lastResponseBody):
+		case resultChannel <- deadlineExhaustedResult(msg, lastResp):
 		case <-ctx.Done():
 		}
 		return
@@ -400,9 +412,9 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 // deadlineExhaustedResult returns the appropriate result message when retries
 // are exhausted. If we have a last HTTP response, surface it (preserving the
 // actual status/body). Otherwise emit a non-HTTP deadline-exceeded error.
-func deadlineExhaustedResult(msg pipeline.EmbelishedRequestMessage, lastStatusCode int, lastResponseBody []byte) asyncapi.ResultMessage {
-	if lastStatusCode > 0 {
-		return asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, lastStatusCode, lastResponseBody)
+func deadlineExhaustedResult(msg pipeline.EmbelishedRequestMessage, lastResp asyncapi.InferenceResponse) asyncapi.ResultMessage {
+	if lastResp.StatusCode > 0 {
+		return asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, lastResp.StatusCode, lastResp.Body)
 	}
 	return asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting)
 }

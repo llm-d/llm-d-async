@@ -481,7 +481,9 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		if verdict.Action == pipeline.ActionDrop {
 			metrics.RecordGateDecision(metrics.ReasonDropped, queueID, queueName, poolName)
 			if verdict.Result != nil {
-				r.resultChannel <- *verdict.Result
+				resultMsg := *verdict.Result
+				resultMsg.Routing = ir.InternalRouting
+				r.resultChannel <- resultMsg
 			} else {
 				r.resultChannel <- api.NewGateDroppedResult(rview, ir.InternalRouting)
 			}
