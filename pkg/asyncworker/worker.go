@@ -89,7 +89,9 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					metrics.RecordAsyncReq(queueID, queueName, msg.WorkerPoolID)
 				}
 
-				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
+				var nextCancellationCheck time.Time
+
+				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
 					return
 				}
 
@@ -115,13 +117,9 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 
 					var verdict pipeline.Verdict
 					var err error
-					nextCancellationCheck := time.Now().Add(cancellationCheckPollInterval)
 					for {
-						if time.Now().After(nextCancellationCheck) {
-							if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
-								return
-							}
-							nextCancellationCheck = time.Now().Add(cancellationCheckPollInterval)
+						if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
+							return
 						}
 
 						verdict, err = poolGate.Apply(gateCtx, msg.InternalRequest, &poolReleases)
@@ -201,7 +199,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					}
 				}
 
-				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
+				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
 					return
 				}
 
@@ -259,7 +257,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						sendHeaders = headersWithContentType(msg.HttpHeaders, contentType)
 					}
 
-					if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
+					if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
 						return
 					}
 
@@ -470,8 +468,13 @@ func emitCancelledResultIfNeeded(
 	retryChannel chan pipeline.RetryMessage,
 	resultChannel chan asyncapi.ResultMessage,
 	msg pipeline.EmbelishedRequestMessage,
+	nextCheck *time.Time,
 ) bool {
 	if msg.PublicRequest == nil {
+		return false
+	}
+	now := time.Now()
+	if nextCheck != nil && !nextCheck.IsZero() && now.Before(*nextCheck) {
 		return false
 	}
 	checker := cancellationCheckerFromContext(ctx)
@@ -479,6 +482,9 @@ func emitCancelledResultIfNeeded(
 		return false
 	}
 	cancelled, err := checker.IsCancelled(ctx, msg.PublicRequest.ReqID(), msg.RequestToken)
+	if nextCheck != nil {
+		*nextCheck = now.Add(cancellationCheckPollInterval)
+	}
 	if err != nil {
 		logger.Error(err, "Failed to check request cancellation", "id", msg.PublicRequest.ReqID())
 		select {

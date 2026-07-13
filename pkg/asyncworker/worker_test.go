@@ -405,6 +405,53 @@ func TestWorker_CancellationCheckErrorRequeuesRequest(t *testing.T) {
 	}
 }
 
+func TestWorker_FastPathChecksCancellationOnce(t *testing.T) {
+	msgID := "fast-path-cancel-check"
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader([]byte(`{"ok":true}`))),
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	requestToken := "token-fast-path-cancel-check"
+	checker := &stubCancellationChecker{cancelled: map[string]bool{}}
+	ctx := WithCancellationChecker(context.Background(), checker)
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
+		ID:       msgID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	select {
+	case <-retryChannel:
+		t.Fatal("request should not be retried")
+	case result := <-resultChannel:
+		if result.ID != msgID {
+			t.Fatalf("expected result ID %q, got %q", msgID, result.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for successful result")
+	}
+
+	if got := checker.checkCount(); got != 1 {
+		t.Fatalf("expected exactly 1 cancellation check on fast path, got %d", got)
+	}
+	if called.Load() != 1 {
+		t.Fatalf("expected exactly 1 inference call, got %d", called.Load())
+	}
+}
+
 func TestWorker_PoolGateActionWaitThrottlesCancellationChecks(t *testing.T) {
 	var called atomic.Int32
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
@@ -447,7 +494,7 @@ func TestWorker_PoolGateActionWaitThrottlesCancellationChecks(t *testing.T) {
 		t.Fatal("expected request to be re-enqueued after shutdown")
 	}
 
-	if got := checker.checkCount(); got > 2 {
+	if got := checker.checkCount(); got > 1 {
 		t.Fatalf("expected throttled cancellation checks during ActionWait, got %d", got)
 	}
 	if called.Load() != 0 {
@@ -2266,6 +2313,7 @@ func TestWorker_PoolGateActionWaitHonorsCancellation(t *testing.T) {
 	}
 
 	checker.setCancelled(msgID, requestToken, true)
+	time.Sleep(cancellationCheckPollInterval + 100*time.Millisecond)
 
 	select {
 	case <-retryChannel:
@@ -2277,7 +2325,7 @@ func TestWorker_PoolGateActionWaitHonorsCancellation(t *testing.T) {
 		if result.ErrorCode != asyncapi.ErrCodeCancelled {
 			t.Fatalf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeCancelled, result.ErrorCode)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for cancelled result")
 	}
 
@@ -2323,6 +2371,7 @@ func TestWorker_RechecksCancellationAfterGateContinue(t *testing.T) {
 	}
 
 	checker.setCancelled(msgID, requestToken, true)
+	time.Sleep(cancellationCheckPollInterval + 100*time.Millisecond)
 	close(gate.release)
 
 	select {
@@ -2335,7 +2384,7 @@ func TestWorker_RechecksCancellationAfterGateContinue(t *testing.T) {
 		if result.ErrorCode != asyncapi.ErrCodeCancelled {
 			t.Fatalf("expected ErrorCode %q, got %q", asyncapi.ErrCodeCancelled, result.ErrorCode)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for cancelled result after gate continue")
 	}
 
@@ -2381,6 +2430,7 @@ func TestWorker_RechecksCancellationImmediatelyBeforeSend(t *testing.T) {
 	}
 
 	checker.setCancelled(msgID, requestToken, true)
+	time.Sleep(cancellationCheckPollInterval + 100*time.Millisecond)
 	close(xform.release)
 
 	select {
@@ -2393,7 +2443,7 @@ func TestWorker_RechecksCancellationImmediatelyBeforeSend(t *testing.T) {
 		if result.ErrorCode != asyncapi.ErrCodeCancelled {
 			t.Fatalf("expected ErrorCode %q, got %q", asyncapi.ErrCodeCancelled, result.ErrorCode)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for cancelled result before send")
 	}
 
