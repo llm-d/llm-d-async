@@ -128,6 +128,9 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 
 	drainCtx, drainCancel := context.WithCancel(baseCtx)
 	defer drainCancel()
+	if provider, ok := flow.(pipeline.CancellationCheckerProvider); ok {
+		drainCtx = asyncworker.WithCancellationChecker(drainCtx, provider.CancellationChecker())
+	}
 
 	dispatch := policy.MergeRequestChannels(flow.RequestChannels(), poolsMap)
 

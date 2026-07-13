@@ -34,6 +34,7 @@ const (
 type InternalRouting struct {
 	RetryCount             int    `json:"retry_count,omitempty"`
 	QueueID                string `json:"queue_id,omitempty"`
+	RequestToken           string `json:"request_token,omitempty"`
 	RequestQueueName       string `json:"request_queue_name,omitempty"`
 	ResultQueueName        string `json:"result_queue_name,omitempty"`
 	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`

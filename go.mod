@@ -4,9 +4,13 @@ go 1.25.8
 
 require github.com/llm-d-incubation/llm-d-async/api v0.7.2
 
+require github.com/llm-d-incubation/llm-d-async/producer v0.7.2
+
 require github.com/llm-d-incubation/llm-d-async/pipeline v0.7.2
 
 replace github.com/llm-d-incubation/llm-d-async/api => ./api
+
+replace github.com/llm-d-incubation/llm-d-async/producer => ./producer
 
 replace github.com/llm-d-incubation/llm-d-async/pipeline => ./pipeline
 

@@ -22,6 +22,20 @@ func noopGate() pipeline.Gate {
 	return pipeline.ConstOpenGate()
 }
 
+type stubFlowCancellationChecker struct {
+	cancelled bool
+	err       error
+	onCheck   func()
+}
+
+func (s *stubFlowCancellationChecker) IsCancelled(ctx context.Context, requestID, requestToken string) (bool, error) {
+	if s.onCheck != nil {
+		s.onCheck()
+		s.onCheck = nil
+	}
+	return s.cancelled, s.err
+}
+
 // Test helper to create test flow and Redis
 func setupTest(t *testing.T) (*miniredis.Miniredis, *redis.Client, context.Context, context.CancelFunc) {
 	s := miniredis.RunT(t)
@@ -254,6 +268,140 @@ func TestSortedSetFlow_ExpiredMessages(t *testing.T) {
 	}
 }
 
+func TestSortedSetFlow_ExpiredMessagesCleanupRequestState(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "expired-cleanup-queue"
+	token := "expired-token"
+	requestID := "expired-cleanup"
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{{
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest)},
+			queueName: queue,
+		}},
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+	}
+
+	ir := api.NewInternalRequest(api.InternalRouting{RequestToken: token}, &api.RequestMessage{
+		ID:       requestID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Unix() - 100,
+	})
+	msgBytes, _ := json.Marshal(ir)
+	rdb.Set(ctx, api.RequestActiveTokenKey(requestID), token, time.Hour)
+	rdb.Set(ctx, api.RequestCancellationKey(requestID), token, time.Hour)
+	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix() - 100), Member: string(msgBytes)})
+
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+
+	time.Sleep(300 * time.Millisecond)
+
+	if count, _ := rdb.ZCard(ctx, queue).Result(); count != 0 {
+		t.Fatalf("Expected expired message to be removed from queue, got count=%d", count)
+	}
+	if exists, _ := rdb.Exists(ctx, api.RequestActiveTokenKey(requestID)).Result(); exists != 0 {
+		t.Fatalf("expected expired request active token for %q to be cleaned up", requestID)
+	}
+	if exists, _ := rdb.Exists(ctx, api.RequestCancellationKey(requestID)).Result(); exists != 0 {
+		t.Fatalf("expected expired request cancellation marker for %q to be cleaned up", requestID)
+	}
+}
+
+func TestSortedSetFlow_CancelledMessageProducesCancelledResult(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "cancelled-queue"
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{{
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 1)},
+			queueName: queue,
+		}},
+		resultChannel: make(chan api.ResultMessage, 1),
+		pollInterval:  50 * time.Millisecond,
+		batchSize:     10,
+		gate:          noopGate(),
+	}
+
+	requestToken := "cancel-token"
+	ir := api.NewInternalRequest(api.InternalRouting{RequestToken: requestToken}, &api.RequestMessage{
+		ID: "cancelled-msg", Created: time.Now().Unix(), Deadline: 9999999999,
+	})
+	msgBytes, _ := json.Marshal(ir)
+	rdb.Set(ctx, api.RequestCancellationKey(ir.PublicRequest.ReqID()), requestToken, time.Hour)
+	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: string(msgBytes)})
+
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+
+	select {
+	case result := <-flow.resultChannel:
+		if result.ID != ir.PublicRequest.ReqID() {
+			t.Fatalf("Expected cancelled result for %q, got %q", ir.PublicRequest.ReqID(), result.ID)
+		}
+		if result.ErrorCode != api.ErrCodeCancelled {
+			t.Fatalf("Expected ErrorCode %q, got %q", api.ErrCodeCancelled, result.ErrorCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for cancelled result")
+	}
+
+	select {
+	case msg := <-flow.requestChannels[0].channel.Channel:
+		t.Fatalf("Cancelled message should not reach worker channel: %s", msg.PublicRequest.ReqID())
+	default:
+	}
+}
+
+func TestSortedSetFlow_CancellationCheckErrorLeavesMessageDispatchable(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "cancel-check-error-queue"
+	flow := &RedisSortedSetFlow{
+		rdb: rdb,
+		requestChannels: []requestChannelData{{
+			channel:   pipeline.RequestChannel{Channel: make(chan *api.InternalRequest, 1)},
+			queueName: queue,
+		}},
+		resultChannel:       make(chan api.ResultMessage, 1),
+		pollInterval:        50 * time.Millisecond,
+		batchSize:           10,
+		gate:                noopGate(),
+		cancellationChecker: &stubFlowCancellationChecker{err: fmt.Errorf("redis unavailable")},
+	}
+
+	requestToken := "cancel-check-error-token"
+	ir := api.NewInternalRequest(api.InternalRouting{RequestToken: requestToken}, &api.RequestMessage{
+		ID: "cancel-check-error-msg", Created: time.Now().Unix(), Deadline: 9999999999,
+	})
+	msgBytes, _ := json.Marshal(ir)
+	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: string(msgBytes)})
+
+	go flow.requestWorker(ctx, flow.requestChannels[0].channel.Channel, queue, "")
+
+	select {
+	case msg := <-flow.requestChannels[0].channel.Channel:
+		if msg.PublicRequest.ReqID() != ir.PublicRequest.ReqID() {
+			t.Fatalf("expected message %q to remain dispatchable, got %q", ir.PublicRequest.ReqID(), msg.PublicRequest.ReqID())
+		}
+	case result := <-flow.resultChannel:
+		t.Fatalf("message should not emit a result on cancellation check error: %+v", result)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for message to reach worker channel")
+	}
+}
+
 func TestSortedSetFlow_MalformedMessages(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()
@@ -447,6 +595,98 @@ func TestSortedSetFlow_ResultStructuredFields(t *testing.T) {
 		if got.ErrorMessage != want.ErrorMessage {
 			t.Errorf("[%s] ErrorMessage = %q, want %q", want.ID, got.ErrorMessage, want.ErrorMessage)
 		}
+	}
+}
+
+func TestSortedSetFlow_ResultBatchClearsCancellationMarkers(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "cancel-cleanup-result-queue"
+	cancelledID := "cancel-cleanup"
+	requestToken := "cleanup-token"
+	rdb.Set(ctx, api.RequestActiveTokenKey(cancelledID), requestToken, time.Hour)
+	rdb.Set(ctx, api.RequestCancellationKey(cancelledID), requestToken, time.Hour)
+
+	flow := &RedisSortedSetFlow{
+		defaultResultQueueName: queue,
+		rdb:                    rdb,
+		resultChannel:          make(chan api.ResultMessage, 1),
+		pollInterval:           50 * time.Millisecond,
+		batchSize:              10,
+		gate:                   noopGate(),
+	}
+
+	go flow.resultWorker(ctx)
+	flow.resultChannel <- api.NewCancelledResult(&api.RequestMessage{ID: cancelledID}, api.InternalRouting{RequestToken: requestToken})
+
+	timeout := time.After(2 * time.Second)
+	for {
+		n, err := rdb.LLen(ctx, queue).Result()
+		if err == nil && n == 1 {
+			break
+		}
+		select {
+		case <-timeout:
+			t.Fatal("timeout waiting for cancelled result to be pushed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	if exists, _ := rdb.Exists(ctx, api.RequestCancellationKey(cancelledID)).Result(); exists != 0 {
+		t.Fatalf("expected cancellation marker for %q to be cleared after result flush", cancelledID)
+	}
+	if exists, _ := rdb.Exists(ctx, api.RequestActiveTokenKey(cancelledID)).Result(); exists != 0 {
+		t.Fatalf("expected active token for %q to be cleared after result flush", cancelledID)
+	}
+}
+
+func TestSortedSetFlow_OldResultDoesNotClearNewGenerationCancellation(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "cancel-generation-result-queue"
+	requestID := "reused-request-id"
+	oldToken := "old-token"
+	newToken := "new-token"
+
+	rdb.Set(ctx, api.RequestActiveTokenKey(requestID), newToken, time.Hour)
+	rdb.Set(ctx, api.RequestCancellationKey(requestID), newToken, time.Hour)
+
+	flow := &RedisSortedSetFlow{
+		defaultResultQueueName: queue,
+		rdb:                    rdb,
+		resultChannel:          make(chan api.ResultMessage, 1),
+		pollInterval:           50 * time.Millisecond,
+		batchSize:              10,
+		gate:                   noopGate(),
+	}
+
+	go flow.resultWorker(ctx)
+	flow.resultChannel <- api.NewCancelledResult(&api.RequestMessage{ID: requestID}, api.InternalRouting{RequestToken: oldToken})
+
+	timeout := time.After(2 * time.Second)
+	for {
+		n, err := rdb.LLen(ctx, queue).Result()
+		if err == nil && n == 1 {
+			break
+		}
+		select {
+		case <-timeout:
+			t.Fatal("timeout waiting for old-generation result to be pushed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	if got, _ := rdb.Get(ctx, api.RequestCancellationKey(requestID)).Result(); got != newToken {
+		t.Fatalf("expected new generation cancellation marker %q to remain, got %q", newToken, got)
+	}
+	if got, _ := rdb.Get(ctx, api.RequestActiveTokenKey(requestID)).Result(); got != newToken {
+		t.Fatalf("expected new generation active token %q to remain, got %q", newToken, got)
 	}
 }
 

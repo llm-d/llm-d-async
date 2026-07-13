@@ -54,12 +54,28 @@ type requestChannelData struct {
 }
 
 var (
-	_ pipeline.Flow          = (*RedisSortedSetFlow)(nil)
-	_ pipeline.HealthChecker = (*RedisSortedSetFlow)(nil)
+	_ pipeline.Flow                        = (*RedisSortedSetFlow)(nil)
+	_ pipeline.HealthChecker               = (*RedisSortedSetFlow)(nil)
+	_ pipeline.CancellationCheckerProvider = (*RedisSortedSetFlow)(nil)
 )
+
+var cleanupRequestStateScript = redis.NewScript(`
+local token = ARGV[1]
+if token == "" then
+  return 0
+end
+if redis.call("GET", KEYS[1]) == token then
+  redis.call("DEL", KEYS[1])
+end
+if redis.call("GET", KEYS[2]) == token then
+  redis.call("DEL", KEYS[2])
+end
+return 1
+`)
 
 type RedisSortedSetFlow struct {
 	rdb                     *redis.Client
+	cancellationChecker     api.CancellationChecker
 	requestChannels         []requestChannelData
 	retryChannel            chan pipeline.RetryMessage
 	resultChannel           chan api.ResultMessage
@@ -77,6 +93,24 @@ type RedisSortedSetFlow struct {
 	drainCancel             context.CancelFunc
 	drainWg                 sync.WaitGroup
 	enableTracing           bool
+}
+
+type redisCancellationChecker struct {
+	rdb *redis.Client
+}
+
+func (c *redisCancellationChecker) IsCancelled(ctx context.Context, requestID, requestToken string) (bool, error) {
+	if requestID == "" || requestToken == "" {
+		return false, nil
+	}
+	token, err := c.rdb.Get(ctx, api.RequestCancellationKey(requestID)).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return token == requestToken, nil
 }
 
 // SortedSetOption is a functional option for configuring RedisSortedSetFlow
@@ -341,6 +375,13 @@ func (r *RedisSortedSetFlow) ResultChannel() chan api.ResultMessage {
 	return r.resultChannel
 }
 
+func (r *RedisSortedSetFlow) CancellationChecker() api.CancellationChecker {
+	if r.cancellationChecker != nil {
+		return r.cancellationChecker
+	}
+	return &redisCancellationChecker{rdb: r.rdb}
+}
+
 func (r *RedisSortedSetFlow) HealthCheck(ctx context.Context) error {
 	return r.rdb.Ping(ctx).Err()
 }
@@ -411,6 +452,9 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 		if deadline < currentTime {
 			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", rview.ReqID())
+			if err := r.cleanupRequestStateByIDAndToken(ctx, rview.ReqID(), ir.RequestToken); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to cleanup expired request state", "id", rview.ReqID())
+			}
 			continue
 		}
 
@@ -427,6 +471,20 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			for k, v := range cfg.Labels {
 				ir.Labels[k] = v
 			}
+		}
+
+		cancelled, err := r.CancellationChecker().IsCancelled(ctx, rview.ReqID(), ir.RequestToken)
+		if err != nil {
+			// Best-effort at dequeue time only. The worker path performs the
+			// authoritative pre-dispatch cancellation check and fails closed.
+			logger.V(logutil.DEFAULT).Error(err, "Failed to check request cancellation", "id", rview.ReqID())
+		} else if cancelled {
+			select {
+			case r.resultChannel <- api.NewCancelledResult(rview, ir.InternalRouting):
+			case <-ctx.Done():
+				return
+			}
+			continue
 		}
 
 		// Apply gate
@@ -637,8 +695,30 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 		_, err := pipe.Exec(ctx)
 		return err
 	}); err == nil {
+		for _, result := range batch {
+			if err := r.cleanupRequestState(ctx, result); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to cleanup request state after result flush", "id", result.ID)
+			}
+		}
 		logger.V(logutil.DEBUG).Info("Pushed result batch", "batchSize", len(batch))
 	}
+}
+
+func (r *RedisSortedSetFlow) cleanupRequestState(ctx context.Context, result api.ResultMessage) error {
+	return r.cleanupRequestStateByIDAndToken(ctx, result.ID, result.Routing.RequestToken)
+}
+
+func (r *RedisSortedSetFlow) cleanupRequestStateByIDAndToken(ctx context.Context, requestID, requestToken string) error {
+	if requestID == "" || requestToken == "" {
+		return nil
+	}
+	_, err := cleanupRequestStateScript.Run(
+		ctx,
+		r.rdb,
+		[]string{api.RequestActiveTokenKey(requestID), api.RequestCancellationKey(requestID)},
+		requestToken,
+	).Result()
+	return err
 }
 
 func (r *RedisSortedSetFlow) marshalResult(msg api.ResultMessage) string {

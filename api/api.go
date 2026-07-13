@@ -1,6 +1,9 @@
 package api
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Request is the public interface for submitting requests to the async queue.
 // It exposes only the caller-visible fields. Concrete types like RequestMessage,
@@ -81,11 +84,27 @@ type ResultMessage struct {
 // These are result-level codes describing why a request could not be completed.
 const (
 	ErrCodeDeadlineExceeded = "DEADLINE_EXCEEDED"
+	ErrCodeCancelled        = "CANCELLED"
 	ErrCodeGateDropped      = "GATE_DROPPED"
 	ErrCodeGateError        = "GATE_ERROR"
 	ErrCodeInferenceError   = "INFERENCE_ERROR"
 	ErrCodeInvalidRequest   = "INVALID_REQUEST"
 )
+
+// CancellationChecker reports whether a specific request generation has been cancelled.
+type CancellationChecker interface {
+	IsCancelled(ctx context.Context, requestID, requestToken string) (bool, error)
+}
+
+// RequestCancellationKey returns the Redis key used for per-request cancellation markers.
+func RequestCancellationKey(requestID string) string {
+	return "request-cancel:" + requestID
+}
+
+// RequestActiveTokenKey returns the Redis key tracking the currently active request generation.
+func RequestActiveTokenKey(requestID string) string {
+	return "request-active:" + requestID
+}
 
 // NewErrorResult builds a non-HTTP error ResultMessage.
 // errorCode must be one of the ErrCode* constants; errMsg is a human-readable description.
@@ -127,4 +146,9 @@ func NewGateDroppedResult(req Request, routing InternalRouting) ResultMessage {
 // NewDeadlineExceededResult builds a ResultMessage for deadline expiry.
 func NewDeadlineExceededResult(req Request, routing InternalRouting) ResultMessage {
 	return NewErrorResult(req, routing, ErrCodeDeadlineExceeded, "deadline exceeded")
+}
+
+// NewCancelledResult builds a ResultMessage for a cancelled request.
+func NewCancelledResult(req Request, routing InternalRouting) ResultMessage {
+	return NewErrorResult(req, routing, ErrCodeCancelled, "cancelled")
 }

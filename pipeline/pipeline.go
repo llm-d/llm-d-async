@@ -47,6 +47,12 @@ type BacklogReporter interface {
 	QueueBacklog(ctx context.Context) ([]QueueBacklogStat, error)
 }
 
+// CancellationCheckerProvider is an optional capability for flows that can
+// surface per-request cancellation state to workers.
+type CancellationCheckerProvider interface {
+	CancellationChecker() api.CancellationChecker
+}
+
 type RequestChannel struct {
 	Channel            chan *api.InternalRequest
 	IGWBaseURL         string

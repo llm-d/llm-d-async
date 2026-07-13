@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/go-logr/logr"
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
@@ -26,6 +27,10 @@ import (
 const (
 	baseDelaySeconds = 2
 	maxDelaySeconds  = 60
+
+	gateWaitPollInterval              = 50 * time.Millisecond
+	cancellationCheckPollInterval     = 1 * time.Second
+	cancellationCheckRetryAfterSecond = 1.0
 )
 
 func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
@@ -84,6 +89,10 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					metrics.RecordAsyncReq(queueID, queueName, msg.WorkerPoolID)
 				}
 
+				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
+					return
+				}
+
 				payloadBytes := validateAndMarshal(requestCtx, resultChannel, msg, transforms)
 				if payloadBytes == nil {
 					return
@@ -106,7 +115,15 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 
 					var verdict pipeline.Verdict
 					var err error
+					nextCancellationCheck := time.Now().Add(cancellationCheckPollInterval)
 					for {
+						if time.Now().After(nextCancellationCheck) {
+							if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
+								return
+							}
+							nextCancellationCheck = time.Now().Add(cancellationCheckPollInterval)
+						}
+
 						verdict, err = poolGate.Apply(gateCtx, msg.InternalRequest, &poolReleases)
 						if err != nil {
 							if errors.Is(err, context.DeadlineExceeded) || gateCtx.Err() != nil {
@@ -177,11 +194,15 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 								case <-requestCtx.Done():
 								}
 								return
-							case <-time.After(50 * time.Millisecond):
+							case <-time.After(gateWaitPollInterval):
 								// poll again
 							}
 						}
 					}
+				}
+
+				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
+					return
 				}
 
 				metrics.IncInflight(queueID, queueName, msg.WorkerPoolID)
@@ -236,6 +257,10 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					} else if handled {
 						sendPayload = body
 						sendHeaders = headersWithContentType(msg.HttpHeaders, contentType)
+					}
+
+					if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg) {
+						return
 					}
 
 					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
@@ -437,6 +462,42 @@ func inferenceErrorCategory(err error) string {
 		return string(inferenceErr.Category())
 	}
 	return string(asyncapi.ErrCategoryUnknown)
+}
+
+func emitCancelledResultIfNeeded(
+	ctx context.Context,
+	logger logr.Logger,
+	retryChannel chan pipeline.RetryMessage,
+	resultChannel chan asyncapi.ResultMessage,
+	msg pipeline.EmbelishedRequestMessage,
+) bool {
+	if msg.PublicRequest == nil {
+		return false
+	}
+	checker := cancellationCheckerFromContext(ctx)
+	if checker == nil {
+		return false
+	}
+	cancelled, err := checker.IsCancelled(ctx, msg.PublicRequest.ReqID(), msg.RequestToken)
+	if err != nil {
+		logger.Error(err, "Failed to check request cancellation", "id", msg.PublicRequest.ReqID())
+		select {
+		case retryChannel <- pipeline.RetryMessage{
+			EmbelishedRequestMessage: msg,
+			BackoffDurationSeconds:   cancellationCheckRetryAfterSecond,
+		}:
+		case <-ctx.Done():
+		}
+		return true
+	}
+	if !cancelled {
+		return false
+	}
+	select {
+	case resultChannel <- asyncapi.NewCancelledResult(msg.PublicRequest, msg.InternalRouting):
+	case <-ctx.Done():
+	}
+	return true
 }
 
 // https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
