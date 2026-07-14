@@ -14,3 +14,7 @@ MsgLifecycle.cfg
 GateCancelGen.cfg
 MergePriority.cfg
 ResultCorrelation.cfg
+GateReservationLeak.cfg
+GateShutdownDrain.cfg
+GateQuotaTTL.cfg
+GateSyncGateway.cfg

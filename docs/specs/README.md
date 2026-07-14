@@ -17,6 +17,7 @@ the rare ones load tests never hit (concurrent admits, pod crashes mid-flight).
 | [`GateReservationLeak.tla`](GateReservationLeak.tla) | the per-queue gate capacity reservation: acquired on `ActionContinue`, released **only** on a `ResultMessage`, but every retry re-enqueues without releasing (`activeReleases.Store` also overwrites) | **current code: `AccountingExact` and `EventuallyServed` both violated** — leaked slots ratchet `inFlight` up until `Budget()=0` wedges the queue. Releasing on retry (flip one constant) holds. |
 | [`GateShutdownDrain.tla`](GateShutdownDrain.tla) | the two-phase graceful shutdown: workers drain their backlog with **bare, unguarded** `retryChannel <-` sends; `flow.Shutdown()` (which stops the retry worker) runs only after `wg.Wait()` | **current code: all properties hold** — TLC proves the retry worker outlives every async worker, so the bare sends never wedge. A reordered variant (flip one constant) violates `NoStuckWorker`. |
 | [`GateQuotaTTL.tla`](GateQuotaTTL.tla) | the `redis-quota` concurrency counter, whose `EXPIRE` is armed only on the 0→1 `INCR` and never refreshed — so the whole key can expire while reserved holders are still in flight | **current code: `NoOverAdmission` violated** — a mid-flight expiry lets new acquires re-admit up to `Limit` again (real concurrency `2 > Limit`). Reclaiming only leaked slots (flip one constant) holds. |
+| [`GateSyncGateway.tla`](GateSyncGateway.tla) | **design-time** (issue [#308](https://github.com/llm-d-incubation/llm-d-async/issues/308)): the proposed synchronous OpenAI gateway correlating a per-request result queue, when queue names are recycled and results can arrive late (after a client timeout) | **name-only correlation with recycled names: `CorrectResponse` violated** — a late result on a recycled queue is returned to the wrong caller. Unique never-reused names, or a per-submission token (flip a constant), hold. |
 
 ## Why this gate
 
@@ -354,6 +355,34 @@ in **shipping code** (the earlier `GateQuota.tla` idealized the TTL as an
 orphan-only reaper, which hid it) — worth filing with a regression test, and pairing
 with a lease/refresh or leak-scoped reclaim rather than a blind whole-key TTL.
 
+## What the sync-gateway model informs (a design, before it is built)
+
+`GateSyncGateway.tla` is the only **design-time** spec here: it models the proposed
+synchronous OpenAI gateway (issue #308), which submits each HTTP request via the
+producer and blocks on the correlated result. The point is to de-risk the correlation
+design *before* the code exists. #308 recommends **option A** — a per-request result
+queue — but notes two facts that make it subtle: result-queue names are short-lived
+keys a real gateway will **recycle**, and on client disconnect the gateway abandons
+the wait while an already-dispatched request still produces a **late** result.
+
+Two constants (`Recycle`, `TokenGuard`) give three design points, checked against
+`CorrectResponse` (a handler only ever returns its own request's result):
+
+- **unique names** (`Recycle=FALSE`) → holds. Each request gets a globally-unique,
+  never-reused queue name (UUID-style), cleaned by TTL.
+- **recycled names, name-only correlation** (`Recycle=TRUE, TokenGuard=FALSE`) →
+  `CorrectResponse` violated in a 6-step trace: `r1` acquires queue `q`, the backend
+  writes `r1`'s result to `q`, `r1` times out and releases `q`, `r2` acquires the
+  recycled `q`, and `r2`'s `BRPOP` returns **`r1`'s result** to the wrong caller.
+- **recycled names + per-submission token** (`Recycle=TRUE, TokenGuard=TRUE`) → holds:
+  the handler rejects a result whose token isn't its own and keeps waiting.
+
+Design takeaway for #308: option A is correct **only** with never-reused queue names
+(UUID + TTL cleanup); the moment names are recycled — or option B's shared queue +
+in-memory demux keyed by request id is adopted — result correlation needs a
+per-submission **token**, not the id/name alone (the same lesson as `MsgLifecycle` and
+the #307 cancellation model). Cheap to bake in now; expensive to retrofit.
+
 ## Running TLC
 
 You need Java and `tla2tools.jar`
@@ -439,6 +468,15 @@ java -cp tla2tools.jar pcal.trans GateQuotaTTL.tla
 java -cp tla2tools.jar tlc2.TLC -deadlock -config GateQuotaTTL_blind.cfg GateQuotaTTL.tla
 # leak-scoped reclaim (the fix) -> "No error has been found."
 java -cp tla2tools.jar tlc2.TLC -deadlock -config GateQuotaTTL_scoped.cfg GateQuotaTTL.tla
+
+# the design-time sync-gateway (#308) correlation model
+java -cp tla2tools.jar pcal.trans GateSyncGateway.tla
+# unique per-request queue names -> "No error has been found."
+java -cp tla2tools.jar tlc2.TLC -deadlock -config GateSyncGateway_unique.cfg GateSyncGateway.tla
+# recycled names, name-only correlation -> CorrectResponse violated (late result to wrong caller)
+java -cp tla2tools.jar tlc2.TLC -deadlock -config GateSyncGateway_recycle.cfg GateSyncGateway.tla
+# recycled names + per-submission token -> "No error has been found."
+java -cp tla2tools.jar tlc2.TLC -deadlock -config GateSyncGateway_recycle_token.cfg GateSyncGateway.tla
 ```
 
 (A buggy model with two counter-examples uses two configs only because TLC stops at
