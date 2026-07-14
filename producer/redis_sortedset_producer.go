@@ -2,6 +2,8 @@ package producer
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,17 @@ type RedisSortedSetProducer struct {
 	requestQueueName string
 	resultQueueName  string
 }
+
+const cancellationMarkerTTL = 7 * 24 * time.Hour
+
+var markRequestCancelledScript = redis.NewScript(`
+local active = redis.call("GET", KEYS[1])
+if not active then
+  return 0
+end
+redis.call("SET", KEYS[2], active, "EX", ARGV[1])
+return 1
+`)
 
 // ProducerOption is a functional option for NewRedisSortedSetProducer.
 type ProducerOption func(*RedisSortedSetProducer) error
@@ -171,10 +184,6 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 		return errors.New("deadline is required and must be a positive Unix timestamp")
 	}
 
-	if deadline <= time.Now().Unix() {
-		return errors.New("deadline has already expired")
-	}
-
 	// Apply producer-level defaults for queue routing if not set by caller
 	if ir.ResultQueueName == "" {
 		ir.ResultQueueName = p.resultQueueName
@@ -183,23 +192,68 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	if ir.RequestQueueName == "" {
 		ir.RequestQueueName = p.requestQueueName
 	}
+	token, err := newRequestToken()
+	if err != nil {
+		return fmt.Errorf("failed to create request token: %w", err)
+	}
+	ir.RequestToken = token
 
 	msgBytes, err := json.Marshal(ir)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Add to sorted set with deadline as score
+	// Clear any stale cancellation marker for this request ID before enqueue.
+	// This prevents a previously cancelled/completed request ID from poisoning
+	// a later submission that legitimately reuses the same ID.
 	targetQueue := ir.RequestQueueName
 	score := float64(deadline)
-	if err := p.client.ZAdd(ctx, targetQueue, redis.Z{
+	activeTTL := time.Until(time.Unix(deadline, 0))
+	if activeTTL <= 0 {
+		return errors.New("deadline has already expired")
+	}
+	pipe := p.client.TxPipeline()
+	pipe.Del(ctx, api.RequestCancellationKey(r.ReqID()))
+	pipe.Set(ctx, api.RequestActiveTokenKey(r.ReqID()), ir.RequestToken, activeTTL)
+	pipe.ZAdd(ctx, targetQueue, redis.Z{
 		Score:  score,
 		Member: string(msgBytes),
-	}).Err(); err != nil {
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("failed to add request to queue: %w", err)
 	}
 
 	return nil
+}
+
+// CancelRequests marks request IDs as cancelled so dequeue/dispatch paths can drop them.
+func (p *RedisSortedSetProducer) CancelRequests(ctx context.Context, requestIDs []string) error {
+	if len(requestIDs) == 0 {
+		return nil
+	}
+
+	for _, requestID := range requestIDs {
+		if requestID == "" {
+			continue
+		}
+		if _, err := markRequestCancelledScript.Run(
+			ctx,
+			p.client,
+			[]string{api.RequestActiveTokenKey(requestID), api.RequestCancellationKey(requestID)},
+			int(cancellationMarkerTTL/time.Second),
+		).Result(); err != nil {
+			return fmt.Errorf("failed to mark request %q as cancelled: %w", requestID, err)
+		}
+	}
+	return nil
+}
+
+func newRequestToken() (string, error) {
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(token), nil
 }
 
 // GetResult retrieves a result from the Redis list, blocking until one is available.

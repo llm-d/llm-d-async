@@ -130,6 +130,54 @@ func TestMarshalResultMessage_Fallback(t *testing.T) {
 	}
 }
 
+func TestMarshalResultMessage_StructuredFields(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  api.ResultMessage
+	}{
+		{
+			name: "HTTP success preserves status_code",
+			msg:  api.ResultMessage{ID: "http-ok", StatusCode: 200, Payload: `{"result":"ok"}`},
+		},
+		{
+			name: "HTTP error preserves status_code and body",
+			msg:  api.ResultMessage{ID: "http-err", StatusCode: 429, Payload: `{"error":"rate limited"}`},
+		},
+		{
+			name: "non-HTTP error preserves error_code and error_message",
+			msg:  api.ResultMessage{ID: "non-http", Payload: `{"error":"deadline exceeded"}`, ErrorCode: api.ErrCodeDeadlineExceeded, ErrorMessage: "deadline exceeded"},
+		},
+		{
+			name: "gate drop preserves error_code",
+			msg:  api.ResultMessage{ID: "dropped", Payload: `{"error":"Pool gating dropped request"}`, ErrorCode: api.ErrCodeGateDropped, ErrorMessage: "Pool gating dropped request"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serialized := marshalResultMessage(tt.msg)
+			var got api.ResultMessage
+			if err := json.Unmarshal([]byte(serialized), &got); err != nil {
+				t.Fatalf("Failed to unmarshal: %v", err)
+			}
+			if got.ID != tt.msg.ID {
+				t.Errorf("ID = %q, want %q", got.ID, tt.msg.ID)
+			}
+			if got.StatusCode != tt.msg.StatusCode {
+				t.Errorf("StatusCode = %d, want %d", got.StatusCode, tt.msg.StatusCode)
+			}
+			if got.Payload != tt.msg.Payload {
+				t.Errorf("Payload = %q, want %q", got.Payload, tt.msg.Payload)
+			}
+			if got.ErrorCode != tt.msg.ErrorCode {
+				t.Errorf("ErrorCode = %q, want %q", got.ErrorCode, tt.msg.ErrorCode)
+			}
+			if got.ErrorMessage != tt.msg.ErrorMessage {
+				t.Errorf("ErrorMessage = %q, want %q", got.ErrorMessage, tt.msg.ErrorMessage)
+			}
+		})
+	}
+}
+
 func TestPubsubResultWorker_ContextCancellation(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()

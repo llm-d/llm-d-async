@@ -262,6 +262,9 @@ func assertRouting(t *testing.T, got, want InternalRouting) {
 	if got.RequestQueueName != want.RequestQueueName {
 		t.Errorf("RequestQueueName = %q, want %q", got.RequestQueueName, want.RequestQueueName)
 	}
+	if got.RequestToken != want.RequestToken {
+		t.Errorf("RequestToken = %q, want %q", got.RequestToken, want.RequestToken)
+	}
 	if got.ResultQueueName != want.ResultQueueName {
 		t.Errorf("ResultQueueName = %q, want %q", got.ResultQueueName, want.ResultQueueName)
 	}

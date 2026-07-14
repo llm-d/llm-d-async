@@ -13,6 +13,14 @@ type Producer interface {
 	// Returns error if submission fails.
 	SubmitRequest(ctx context.Context, req api.Request) error
 
+	// CancelRequests marks previously submitted requests as cancelled.
+	// Implementations guarantee best-effort cancellation before dispatch
+	// (during dequeue and worker pre-dispatch checks), but do not guarantee
+	// aborting requests that are already in flight to the inference backend
+	// or forcing already-dispatched requests to return a CANCELLED result.
+	// Cancellation is idempotent: unknown or already-completed request IDs are a no-op.
+	CancelRequests(ctx context.Context, requestIDs []string) error
+
 	// GetResult retrieves a result from the result queue.
 	// Blocks until a result is available or context is cancelled.
 	// Use context.WithTimeout for timeout-based retrieval.

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/llm-d-incubation/llm-d-async/api"
+	producerpkg "github.com/llm-d-incubation/llm-d-async/producer"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
@@ -391,5 +393,46 @@ var _ = ginkgo.Describe("Redis Dispatch Gate E2E", func() {
 		gomega.Eventually(func() int64 {
 			return getResultCount(ctx, rdb, redisGateResultQueue)
 		}, 60*time.Second, 1*time.Second).Should(gomega.BeNumerically(">=", 3))
+	})
+
+	ginkgo.It("returns a cancelled result after producer-side cancellation", func() {
+		setDispatchGateBudget(ctx, rdb, "0.0")
+
+		producer, err := producerpkg.NewRedisSortedSetProducer(producerpkg.RedisSortedSetConfig{
+			RedisURL:         "redis://localhost:" + redisPort,
+			RequestQueueName: redisGateRequestQueue,
+			ResultQueueName:  redisGateResultQueue,
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(func() {
+			gomega.Expect(producer.Close()).To(gomega.Succeed())
+		})
+
+		requestID := "producer-cancel-e2e"
+		gomega.Expect(producer.SubmitRequest(ctx, &api.RequestMessage{
+			ID:       requestID,
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Payload:  map[string]any{"model": "test-model", "prompt": "cancel me"},
+		})).To(gomega.Succeed())
+
+		gomega.Eventually(func() int64 {
+			return rdb.ZCard(ctx, redisGateRequestQueue).Val()
+		}, 10*time.Second, 500*time.Millisecond).Should(gomega.Equal(int64(1)))
+
+		gomega.Expect(producer.CancelRequests(ctx, []string{requestID})).To(gomega.Succeed())
+
+		setDispatchGateBudget(ctx, rdb, "1.0")
+
+		resultCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+
+		result, err := producer.GetResult(resultCtx)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(result).NotTo(gomega.BeNil())
+		gomega.Expect(result.ID).To(gomega.Equal(requestID))
+		gomega.Expect(result.ErrorCode).To(gomega.Equal(api.ErrCodeCancelled))
+		gomega.Expect(result.ErrorMessage).To(gomega.Equal("cancelled"))
+		gomega.Expect(result.StatusCode).To(gomega.Equal(0))
 	})
 })

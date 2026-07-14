@@ -25,7 +25,11 @@ ap:
     # image stays in sync with the chart). Set explicitly to pin a different tag.
     tag: ""
   imagePullPolicy: Always
-  concurrency: 8
+  # Global worker concurrency (in-flight requests per pool). The processor is
+  # I/O-bound, so by Little's Law this caps throughput; the default of 8 left
+  # real inference pools mostly idle. Tune to your backend's latency/throughput
+  # target — see the Async Processor Operations Guide.
+  concurrency: 64
   drainTimeout: "2m"
   prometheusURL: ""
   prometheusCacheTTL: ""
@@ -47,6 +51,9 @@ ap:
   #       parameters:
   #         providers: ["whisper"]
   transformConfig: {}
+  # Request merge policy configuration. When set, rendered to a config file and passed
+  # via --request-merge-policy-config.
+  requestMergePolicyConfig: {}
   otel:
     # OTLP gRPC endpoint for trace collection. Examples:
     #   Dev (Jaeger all-in-one):     "http://jaeger.default.svc.cluster.local:4317"

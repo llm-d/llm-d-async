@@ -8,9 +8,10 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
-# Local replace directives (./api, ./pipeline) must exist before go mod download.
+# Local replace directives (./api, ./pipeline, ./producer) must exist before go mod download.
 COPY api/ api/
 COPY pipeline/ pipeline/
+COPY producer/ producer/
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download

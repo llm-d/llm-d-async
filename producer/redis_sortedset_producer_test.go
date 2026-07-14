@@ -221,6 +221,53 @@ func TestSubmitRequest_Validation(t *testing.T) {
 	}
 }
 
+func TestCancelRequests(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx := context.Background()
+	mr.Set(api.RequestActiveTokenKey("req-1"), "token-1")
+	mr.Set(api.RequestActiveTokenKey("req-2"), "token-2")
+	err := producer.CancelRequests(ctx, []string{"req-1", "", "req-2"})
+	require.NoError(t, err)
+
+	got1, err := mr.Get(api.RequestCancellationKey("req-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "token-1", got1)
+	got2, err := mr.Get(api.RequestCancellationKey("req-2"))
+	require.NoError(t, err)
+	assert.Equal(t, "token-2", got2)
+	assert.False(t, mr.Exists(api.RequestCancellationKey("")))
+}
+
+func TestCancelRequests_UnknownRequestIDIsNoOp(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx := context.Background()
+	err := producer.CancelRequests(ctx, []string{"unknown-request"})
+	require.NoError(t, err)
+
+	assert.False(t, mr.Exists(api.RequestActiveTokenKey("unknown-request")))
+	assert.False(t, mr.Exists(api.RequestCancellationKey("unknown-request")))
+}
+
+func TestSubmitRequest_ClearsStaleCancellationMarker(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx := context.Background()
+	requestID := "reused-id"
+	mr.Set(api.RequestCancellationKey(requestID), "1")
+
+	err := producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID:       requestID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  map[string]any{"model": "test"},
+	})
+	require.NoError(t, err)
+	assert.False(t, mr.Exists(api.RequestCancellationKey(requestID)))
+	assert.True(t, mr.Exists(api.RequestActiveTokenKey(requestID)))
+}
+
 func TestGetResult(t *testing.T) {
 	producer, mr := setupTestProducer(t)
 

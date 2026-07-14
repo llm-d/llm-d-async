@@ -55,3 +55,9 @@ repos:
         language: system
         pass_filenames: false
         files: \.go$
+      - id: release-notes-lint
+        name: release-note fragments
+        entry: ./hack/lint-release-notes.sh
+        language: system
+        pass_filenames: false
+        files: ^release-notes\.d/unreleased/.*\.md$

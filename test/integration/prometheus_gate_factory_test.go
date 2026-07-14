@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,11 +39,11 @@ func TestGateFactory_PrometheusSaturation_EndToEnd(t *testing.T) {
 
 	factory := flowcontrol.NewGateFactoryWithCacheTTL(server.URL, 200*time.Millisecond)
 
-	gate, err := factory.CreateGate("prometheus-saturation", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "prometheus-saturation", GateParams: map[string]any{
 		"pool":      "my-pool",
-		"threshold": "0.8",
-		"fallback":  "0.0",
-	})
+		"threshold": 0.8,
+		"fallback":  0.0,
+	}})
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -83,12 +84,12 @@ func TestGateFactory_PrometheusBudget_EndToEnd(t *testing.T) {
 
 	factory := flowcontrol.NewGateFactoryWithCacheTTL(server.URL, 100*time.Millisecond)
 
-	gate, err := factory.CreateGate("prometheus-budget", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "prometheus-budget", GateParams: map[string]any{
 		"pool":            "my-pool",
-		"max_concurrency": "100",
-		"baseline":        "0.05",
-		"fallback":        "0.0",
-	})
+		"max_concurrency": 100.0,
+		"baseline":        0.05,
+		"fallback":        0.0,
+	}})
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -113,15 +114,15 @@ func TestGateFactory_PrometheusSaturation_MissingParams(t *testing.T) {
 	factory := flowcontrol.NewGateFactory("")
 
 	// Missing prometheusURL.
-	_, err := factory.CreateGate("prometheus-saturation", map[string]string{
+	_, err := factory.CreateGate(pipeline.GateConfig{GateType: "prometheus-saturation", GateParams: map[string]any{
 		"pool": "my-pool",
-	})
+	}})
 	assert.Error(t, err, "Should fail when prometheus URL is empty")
 
 	factory2 := flowcontrol.NewGateFactory("http://localhost:9090")
 
 	// Missing pool param.
-	_, err = factory2.CreateGate("prometheus-saturation", map[string]string{})
+	_, err = factory2.CreateGate(pipeline.GateConfig{GateType: "prometheus-saturation", GateParams: map[string]any{}})
 	assert.Error(t, err, "Should fail when pool is missing")
 }
 
@@ -146,10 +147,10 @@ func TestGateFactory_PrometheusQuery_EndToEnd(t *testing.T) {
 
 	factory := flowcontrol.NewGateFactoryWithCacheTTL(server.URL, 200*time.Millisecond)
 
-	gate, err := factory.CreateGate("prometheus-query", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "prometheus-query", GateParams: map[string]any{
 		"query":    promQL,
-		"fallback": "0.0",
-	})
+		"fallback": 0.0,
+	}})
 	require.NoError(t, err)
 
 	ctx := context.Background()

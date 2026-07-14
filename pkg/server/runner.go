@@ -15,8 +15,8 @@ import (
 	"github.com/llm-d-incubation/llm-d-async/internal/logging"
 	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	"github.com/llm-d-incubation/llm-d-async/pkg/async"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
+	"github.com/llm-d-incubation/llm-d-async/pkg/async/mergepolicy"
 	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker"
 	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker/transform"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
@@ -95,7 +95,7 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 
 	gateFactory = flowcontrol.NewGateFactoryWithCacheTTL(opts.Prometheus.URL, opts.Prometheus.CacheTTL)
 
-	policy, err := loadRequestMergePolicy(opts.Queue.MergePolicy)
+	policy, err := loadRequestMergePolicy(opts.Queue.MergePolicyConfigFile, ctx)
 	if err != nil {
 		return err
 	}
@@ -128,13 +128,16 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 
 	drainCtx, drainCancel := context.WithCancel(baseCtx)
 	defer drainCancel()
+	if provider, ok := flow.(pipeline.CancellationCheckerProvider); ok {
+		drainCtx = asyncworker.WithCancellationChecker(drainCtx, provider.CancellationChecker())
+	}
 
 	dispatch := policy.MergeRequestChannels(flow.RequestChannels(), poolsMap)
 
 	poolGates := make(map[string]pipeline.Gate)
 	for poolID, pool := range poolsMap {
 		if pool.GateType != "" {
-			gate, err := gateFactory.CreateGate(pool.GateType, pool.GateParams)
+			gate, err := gateFactory.CreateGate(pipeline.GateConfig{GateType: pool.GateType, GateParams: pool.GateParams})
 			if err != nil {
 				setupLog.Error(err, "Failed to create pool gate", "poolID", poolID, "gateType", pool.GateType)
 				os.Exit(1)
@@ -230,13 +233,36 @@ func loadWorkerPools(workerConfig WorkerConfig, setupLog logr.Logger) (poolsMap 
 
 }
 
-func loadRequestMergePolicy(name string) (pipeline.RequestMergePolicy, error) {
-	switch name {
-	case "random-robin":
-		return async.NewRandomRobinPolicy(), nil
-	default:
-		return nil, fmt.Errorf("unknown request merge policy: %s", name)
+func loadRequestMergePolicy(configPath string, ctx context.Context) (pipeline.RequestMergePolicy, error) {
+	var spec mergepolicy.MergePolicySpec
+	if configPath != "" {
+		var err error
+		spec, err = mergepolicy.LoadMergePolicyConfig(configPath)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		spec = mergepolicy.MergePolicySpec{
+			Type: "random-robin",
+		}
 	}
+
+	factory, ok := plugins.Lookup(spec.Type)
+	if !ok {
+		return nil, fmt.Errorf("unknown request merge policy type: %s", spec.Type)
+	}
+
+	plugin, err := factory("default", spec.Parameters, plugins.NewHandle(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request merge policy %q: %w", spec.Type, err)
+	}
+
+	policy, ok := plugin.(pipeline.RequestMergePolicy)
+	if !ok {
+		return nil, fmt.Errorf("plugin type %q does not implement RequestMergePolicy", spec.Type)
+	}
+
+	return policy, nil
 }
 
 func loadFlow(opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[string]pipeline.WorkerPoolConfig) (pipeline.Flow, error) {

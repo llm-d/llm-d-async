@@ -32,14 +32,13 @@ var resultChannels sync.Map
 const quotaExceededNackDelay = 10 * time.Second
 
 type TopicConfig struct {
-	SubscriberID       string            `json:"subscriber_id"`
-	WorkerPoolID       string            `json:"worker_pool_id"`
-	InferenceObjective string            `json:"inference_objective"`
-	RequestPathURL     string            `json:"request_path_url"`
-	IGWBaseURL         string            `json:"igw_base_url"`
-	GateType           string            `json:"gate_type"`
-	GateParams         map[string]string `json:"gate_params,omitempty"`
-	Labels             map[string]string `json:"labels,omitempty"`
+	SubscriberID       string `json:"subscriber_id"`
+	WorkerPoolID       string `json:"worker_pool_id"`
+	InferenceObjective string `json:"inference_objective"`
+	RequestPathURL     string `json:"request_path_url"`
+	IGWBaseURL         string `json:"igw_base_url"`
+	pipeline.GateConfig
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 var _ pipeline.Flow = (*PubSubMQFlow)(nil)
@@ -183,7 +182,7 @@ func NewGCPPubSubMQFlow(pubsubOpts Options, fns ...PubSubOption) (*PubSubMQFlow,
 		var gate pipeline.Gate
 		if p.gateFactory != nil && cfg.GateType != "" {
 			// Use factory to create per-topic gate
-			gate, err = p.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
+			gate, err = p.gateFactory.CreateGate(cfg.GateConfig)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create gate for topic subscriber %q (gate_type=%q): %w", cfg.SubscriberID, cfg.GateType, err)
 			}
@@ -644,13 +643,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			var resultMsg api.ResultMessage
 			if verdict.Result != nil {
 				resultMsg = *verdict.Result
+				resultMsg.Routing = ir.InternalRouting
 			} else {
-				resultMsg = api.ResultMessage{
-					ID:      body.ID,
-					Payload: `{"status": "dropped"}`,
-				}
+				resultMsg = api.NewGateDroppedResult(&body, ir.InternalRouting)
 			}
-			resultMsg.Routing = ir.InternalRouting
 			r.resultChannel <- resultMsg
 
 			// Wait for the result worker to finish publishing and signal true

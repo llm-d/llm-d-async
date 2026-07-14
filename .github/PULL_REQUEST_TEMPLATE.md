@@ -24,3 +24,15 @@
 ## Related Issues
 
 <!-- Link to related issues: Fixes #123, Related to #456 -->
+
+## Release note
+
+<!--
+Summarize any user-facing change in one entry, or write `NONE` if there is none.
+For a user-facing change, ALSO add a fragment file
+`release-notes.d/unreleased/<PR-number>.md` (see CONTRIBUTING.md → Release notes).
+Prefix breaking changes with `Breaking:` and note the deprecation window.
+-->
+```release-note
+NONE
+```

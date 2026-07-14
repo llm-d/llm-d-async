@@ -16,7 +16,9 @@ import (
 	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
 	uotel "github.com/llm-d-incubation/llm-d-async/internal/otel"
 	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker/transform"
 	"github.com/llm-d-incubation/llm-d-async/pkg/metrics"
+	"github.com/llm-d-incubation/llm-d-async/pkg/plugins"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -63,7 +65,7 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(-10 * time.Second).Unix(),
 	}, "", map[string]string{})
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 	if len(retryChannel) > 0 {
 		t.Errorf("Message that its deadline passed should not be retried. Got a message in the retry channel")
 		return
@@ -74,6 +76,15 @@ func TestRetryMessage_deadlinePassed(t *testing.T) {
 
 	}
 	result := <-resultChannel
+	if result.StatusCode != 0 {
+		t.Errorf("Expected StatusCode 0 for deadline exceeded, got %d", result.StatusCode)
+	}
+	if result.ErrorCode != asyncapi.ErrCodeDeadlineExceeded {
+		t.Errorf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeDeadlineExceeded, result.ErrorCode)
+	}
+	if result.ErrorMessage != "deadline exceeded" {
+		t.Errorf("Expected ErrorMessage 'deadline exceeded', got %q", result.ErrorMessage)
+	}
 	var resultMap map[string]any
 	json.Unmarshal([]byte(result.Payload), &resultMap) // nolint:errcheck
 	if resultMap["error"] != "deadline exceeded" {
@@ -90,7 +101,7 @@ func TestRetryMessage_retry(t *testing.T) {
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(10 * time.Second).Unix(),
 	}, "", map[string]string{})
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 	if len(resultChannel) > 0 {
 		t.Errorf("Should not have any messages in the result channel")
 		return
@@ -190,8 +201,305 @@ func TestSuccessfulRequest(t *testing.T) {
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
+		if r.StatusCode != http.StatusOK {
+			t.Errorf("Expected StatusCode %d, got %d", http.StatusOK, r.StatusCode)
+		}
 	}
 
+}
+
+func TestSuccessfulRequest_PreservesActualStatusCode(t *testing.T) {
+	msgId := "201-created"
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"id":"new-resource"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	select {
+	case <-retryChannel:
+		t.Errorf("should not retry a 2xx response")
+	case r := <-resultChannel:
+		if r.ID != msgId {
+			t.Errorf("Expected result ID %s, got %s", msgId, r.ID)
+		}
+		if r.StatusCode != http.StatusCreated {
+			t.Errorf("Expected StatusCode %d (201 Created), got %d", http.StatusCreated, r.StatusCode)
+		}
+		if r.Payload != `{"id":"new-resource"}` {
+			t.Errorf("Expected body preserved, got %q", r.Payload)
+		}
+	}
+}
+
+type stubCancellationChecker struct {
+	mu        sync.RWMutex
+	cancelled map[string]bool
+	err       error
+	checks    int
+}
+
+func (s *stubCancellationChecker) IsCancelled(ctx context.Context, requestID, requestToken string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checks++
+	if s.err != nil {
+		return false, s.err
+	}
+	return s.cancelled[requestID+"|"+requestToken], nil
+}
+
+func (s *stubCancellationChecker) setCancelled(requestID, requestToken string, cancelled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancelled == nil {
+		s.cancelled = make(map[string]bool)
+	}
+	s.cancelled[requestID+"|"+requestToken] = cancelled
+}
+
+func (s *stubCancellationChecker) checkCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.checks
+}
+
+type blockingTransform struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (t *blockingTransform) TypedName() plugins.TypedName {
+	return plugins.TypedName{Name: "blocking", Type: "test"}
+}
+
+func (t *blockingTransform) Validate(payload []byte, metadata map[string]string, reqDeadline int64) error {
+	return nil
+}
+
+func (t *blockingTransform) Transform(payload []byte, metadata map[string]string) ([]byte, string, bool, error) {
+	t.once.Do(func() {
+		if t.started != nil {
+			close(t.started)
+		}
+	})
+	if t.release != nil {
+		<-t.release
+	}
+	return nil, "", false, nil
+}
+
+func TestWorker_CancelledRequestSkipsInference(t *testing.T) {
+	msgID := "cancelled-before-send"
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       nil,
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	requestToken := "token-cancelled-before-send"
+	ctx := WithCancellationChecker(context.Background(), &stubCancellationChecker{
+		cancelled: map[string]bool{msgID + "|" + requestToken: true},
+	})
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
+		ID:       msgID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	select {
+	case <-retryChannel:
+		t.Fatal("cancelled request should not be retried")
+	case r := <-resultChannel:
+		if r.ID != msgID {
+			t.Errorf("Expected result message id %s, got %s", msgID, r.ID)
+		}
+		if r.ErrorCode != asyncapi.ErrCodeCancelled {
+			t.Errorf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeCancelled, r.ErrorCode)
+		}
+		if r.ErrorMessage != "cancelled" {
+			t.Errorf("Expected ErrorMessage 'cancelled', got %q", r.ErrorMessage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for cancelled result")
+	}
+
+	if called.Load() != 0 {
+		t.Fatalf("expected inference client to be skipped, got %d calls", called.Load())
+	}
+}
+
+func TestWorker_CancellationCheckErrorRequeuesRequest(t *testing.T) {
+	msgID := "cancel-check-error"
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       nil,
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	requestToken := "token-cancel-check-error"
+	ctx := WithCancellationChecker(context.Background(), &stubCancellationChecker{
+		err: fmt.Errorf("redis unavailable"),
+	})
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
+		ID:       msgID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	select {
+	case retryMsg := <-retryChannel:
+		if retryMsg.PublicRequest.ReqID() != msgID {
+			t.Fatalf("expected retry for %q, got %q", msgID, retryMsg.PublicRequest.ReqID())
+		}
+		if retryMsg.BackoffDurationSeconds != cancellationCheckRetryAfterSecond {
+			t.Fatalf("expected backoff %f, got %f", cancellationCheckRetryAfterSecond, retryMsg.BackoffDurationSeconds)
+		}
+	case result := <-resultChannel:
+		t.Fatalf("expected requeue on cancellation check failure, got result %+v", result)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for re-enqueued request")
+	}
+
+	if called.Load() != 0 {
+		t.Fatalf("expected inference client to be skipped, got %d calls", called.Load())
+	}
+}
+
+func TestWorker_FastPathChecksCancellationOnce(t *testing.T) {
+	msgID := "fast-path-cancel-check"
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader([]byte(`{"ok":true}`))),
+			Header:     make(http.Header),
+		}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	requestToken := "token-fast-path-cancel-check"
+	checker := &stubCancellationChecker{cancelled: map[string]bool{}}
+	ctx := WithCancellationChecker(context.Background(), checker)
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
+		ID:       msgID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	select {
+	case <-retryChannel:
+		t.Fatal("request should not be retried")
+	case result := <-resultChannel:
+		if result.ID != msgID {
+			t.Fatalf("expected result ID %q, got %q", msgID, result.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for successful result")
+	}
+
+	if got := checker.checkCount(); got != 1 {
+		t.Fatalf("expected exactly 1 cancellation check on fast path, got %d", got)
+	}
+	if called.Load() != 1 {
+		t.Fatalf("expected exactly 1 inference call, got %d", called.Load())
+	}
+}
+
+func TestWorker_PoolGateActionWaitThrottlesCancellationChecks(t *testing.T) {
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	checker := &stubCancellationChecker{cancelled: map[string]bool{}}
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	ctx := WithCancellationChecker(requestCtx, checker)
+	gate := &notifyingWaitGate{applied: make(chan struct{})}
+
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: "token-gate-wait-throttled"}, asyncapi.RequestMessage{
+		ID:       "gate-wait-throttled",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-gate.applied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never entered ActionWait")
+	}
+
+	time.Sleep(220 * time.Millisecond)
+	cancelRequest()
+
+	select {
+	case <-retryChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected request to be re-enqueued after shutdown")
+	}
+
+	if got := checker.checkCount(); got > 1 {
+		t.Fatalf("expected throttled cancellation checks during ActionWait, got %d", got)
+	}
+	if called.Load() != 0 {
+		t.Fatalf("expected inference client to be skipped, got %d calls", called.Load())
+	}
 }
 
 func TestFatalError_NoRetry(t *testing.T) {
@@ -223,6 +531,15 @@ func TestFatalError_NoRetry(t *testing.T) {
 	case r := <-resultChannel:
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
+		}
+		if r.StatusCode != 0 {
+			t.Errorf("Expected StatusCode 0 for non-HTTP error, got %d", r.StatusCode)
+		}
+		if r.ErrorCode != asyncapi.ErrCodeInferenceError {
+			t.Errorf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeInferenceError, r.ErrorCode)
+		}
+		if r.ErrorMessage == "" {
+			t.Errorf("Expected non-empty ErrorMessage for non-HTTP error")
 		}
 		var resultMap map[string]any
 		err := json.Unmarshal([]byte(r.Payload), &resultMap)
@@ -387,7 +704,7 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 		Created:  now,
 		Deadline: now, // same second → no time left to retry
 	}, "", nil)
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 	if len(retryChannel) > 0 {
 		t.Errorf("secondsToDeadline==0 should not produce a retry")
 	}
@@ -448,7 +765,7 @@ func TestRetryMessage_retryAfterHonored(t *testing.T) {
 
 	// Server says wait 30s; expBackoff for retry 1 would be ~[1,2) seconds,
 	// so the Retry-After value should win.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, asyncapi.InferenceResponse{})
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -469,7 +786,7 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 
 	// Server says wait 1s, but expBackoff at retry 5 is much larger.
 	// expBackoff should win.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 1*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 1*time.Second, asyncapi.InferenceResponse{})
 	if len(retryChannel) != 1 {
 		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
@@ -489,7 +806,7 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	}, "", nil)
 
 	// Server says wait 30s, but deadline is only 5s away → deadline exceeded.
-	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, asyncapi.InferenceResponse{})
 	if len(retryChannel) > 0 {
 		t.Errorf("should not retry when Retry-After exceeds deadline")
 	}
@@ -501,6 +818,35 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 	json.Unmarshal([]byte(result.Payload), &resultMap) // nolint:errcheck
 	if resultMap["error"] != "deadline exceeded" {
 		t.Errorf("expected 'deadline exceeded', got: %s", resultMap["error"])
+	}
+}
+
+func TestRetryMessage_deadlineExhaustedPreservesHTTPResponse(t *testing.T) {
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	msg := newEmb(asyncapi.RequestMessage{
+		ID:       "retry-exhausted-http",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(-1 * time.Second).Unix(),
+	}, "", nil)
+
+	lastBody := []byte(`{"error":"too many requests"}`)
+	retryMessage(context.Background(), msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{StatusCode: 429, Body: lastBody})
+	if len(retryChannel) > 0 {
+		t.Errorf("should not retry past deadline")
+	}
+	if len(resultChannel) != 1 {
+		t.Fatalf("expected one result, got %d", len(resultChannel))
+	}
+	result := <-resultChannel
+	if result.StatusCode != 429 {
+		t.Errorf("StatusCode = %d, want 429", result.StatusCode)
+	}
+	if result.Payload != string(lastBody) {
+		t.Errorf("Payload = %q, want %q", result.Payload, string(lastBody))
+	}
+	if result.ErrorCode != "" {
+		t.Errorf("ErrorCode should be empty for HTTP error result, got %q", result.ErrorCode)
 	}
 }
 
@@ -589,7 +935,7 @@ func TestRetryMessage_cancelledCtxDoesNotBlock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		retryMessage(ctx, msg, retryChannel, resultChannel, 0)
+		retryMessage(ctx, msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
 		close(done)
 	}()
 
@@ -676,9 +1022,14 @@ func TestClientError_NoRetry(t *testing.T) {
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
-		expectedPayload := `{"error":"Failed to send request to inference: INVALID_REQ: client error: status code 400"}`
-		if r.Payload != expectedPayload {
-			t.Errorf("Expected payload to be %s, got %s", expectedPayload, r.Payload)
+		if r.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected StatusCode 400, got %d", r.StatusCode)
+		}
+		if r.Payload != errorBody {
+			t.Errorf("Expected payload to be response body %q, got %q", errorBody, r.Payload)
+		}
+		if r.ErrorCode != "" {
+			t.Errorf("Expected empty ErrorCode for HTTP error, got %q", r.ErrorCode)
 		}
 	case <-time.After(time.Second):
 		t.Errorf("Timeout waiting for result")
@@ -1762,6 +2113,345 @@ func TestWorker_DrainWithCancelledRequestCtx(t *testing.T) {
 	}
 }
 
+type blockingPoolGate struct {
+	unblock chan struct{}
+}
+
+func (g *blockingPoolGate) Budget(ctx context.Context) float64 {
+	return 1.0
+}
+
+func (g *blockingPoolGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	select {
+	case <-ctx.Done():
+		return pipeline.Verdict{}, ctx.Err()
+	case <-g.unblock:
+		return pipeline.Continue(), nil
+	}
+}
+
+type waitingPoolGate struct{}
+
+func (g *waitingPoolGate) Budget(ctx context.Context) float64 {
+	return 1.0
+}
+
+func (g *waitingPoolGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	return pipeline.Wait(), nil
+}
+
+type notifyingWaitGate struct {
+	applied  chan struct{}
+	notified atomic.Bool
+}
+
+func (g *notifyingWaitGate) Budget(ctx context.Context) float64 {
+	return 1.0
+}
+
+func (g *notifyingWaitGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	if g.applied != nil && !g.notified.Swap(true) {
+		close(g.applied)
+	}
+	return pipeline.Wait(), nil
+}
+
+type signalContinueGate struct {
+	applied chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *signalContinueGate) Budget(ctx context.Context) float64 {
+	return 1.0
+}
+
+func (g *signalContinueGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	g.once.Do(func() {
+		if g.applied != nil {
+			close(g.applied)
+		}
+	})
+	if g.release != nil {
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return pipeline.Verdict{}, ctx.Err()
+		}
+	}
+	return pipeline.Continue(), nil
+}
+
+func TestWorker_PoolGateShutdownReenqueues(t *testing.T) {
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	gate := &blockingPoolGate{unblock: make(chan struct{})}
+
+	done := make(chan struct{})
+	go func() {
+		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+		close(done)
+	}()
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "gate-shutdown-test",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	// Let the worker block in poolGate.Apply, then cancel (simulating shutdown).
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker did not exit after shutdown cancel")
+	}
+
+	if len(resultChannel) > 0 {
+		t.Errorf("expected no result (should re-enqueue on shutdown), got a result")
+	}
+	if len(retryChannel) != 1 {
+		t.Fatalf("expected message to be re-enqueued, retry channel len = %d", len(retryChannel))
+	}
+	retryMsg := <-retryChannel
+	if retryMsg.PublicRequest.ReqID() != "gate-shutdown-test" {
+		t.Errorf("re-enqueued wrong message: got ID %q", retryMsg.PublicRequest.ReqID())
+	}
+}
+
+func TestWorker_PoolGateActionWaitShutdownReenqueues(t *testing.T) {
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gate := &waitingPoolGate{}
+
+	done := make(chan struct{})
+	go func() {
+		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+		close(done)
+	}()
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "gate-wait-shutdown-test",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	// Let the worker enter the ActionWait polling loop, then cancel (simulating shutdown).
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker did not exit after ActionWait shutdown cancel")
+	}
+
+	if len(resultChannel) > 0 {
+		t.Errorf("expected no result (should re-enqueue on shutdown), got a result")
+	}
+	if len(retryChannel) != 1 {
+		t.Fatalf("expected message to be re-enqueued, retry channel len = %d", len(retryChannel))
+	}
+	retryMsg := <-retryChannel
+	if retryMsg.PublicRequest.ReqID() != "gate-wait-shutdown-test" {
+		t.Errorf("re-enqueued wrong message: got ID %q", retryMsg.PublicRequest.ReqID())
+	}
+}
+
+func TestWorker_PoolGateActionWaitHonorsCancellation(t *testing.T) {
+	msgID := "gate-wait-cancelled"
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	checker := &stubCancellationChecker{cancelled: map[string]bool{}}
+	ctx := WithCancellationChecker(context.Background(), checker)
+	gate := &notifyingWaitGate{applied: make(chan struct{})}
+	requestToken := "token-gate-wait-cancelled"
+
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
+		ID:       msgID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-gate.applied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never entered ActionWait")
+	}
+
+	checker.setCancelled(msgID, requestToken, true)
+	time.Sleep(cancellationCheckPollInterval + 100*time.Millisecond)
+
+	select {
+	case <-retryChannel:
+		t.Fatal("cancelled request should not be retried")
+	case result := <-resultChannel:
+		if result.ID != msgID {
+			t.Fatalf("Expected result ID %q, got %q", msgID, result.ID)
+		}
+		if result.ErrorCode != asyncapi.ErrCodeCancelled {
+			t.Fatalf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeCancelled, result.ErrorCode)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for cancelled result")
+	}
+
+	if called.Load() != 0 {
+		t.Fatalf("expected no inference call after cancellation during ActionWait, got %d", called.Load())
+	}
+}
+
+func TestWorker_RechecksCancellationAfterGateContinue(t *testing.T) {
+	msgID := "gate-continue-cancelled"
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	checker := &stubCancellationChecker{cancelled: map[string]bool{}}
+	ctx := WithCancellationChecker(context.Background(), checker)
+	gate := &signalContinueGate{
+		applied: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	requestToken := "token-gate-continue-cancelled"
+
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
+		ID:       msgID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-gate.applied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never reached pool gate")
+	}
+
+	checker.setCancelled(msgID, requestToken, true)
+	time.Sleep(cancellationCheckPollInterval + 100*time.Millisecond)
+	close(gate.release)
+
+	select {
+	case <-retryChannel:
+		t.Fatal("cancelled request should not be retried")
+	case result := <-resultChannel:
+		if result.ID != msgID {
+			t.Fatalf("expected result ID %q, got %q", msgID, result.ID)
+		}
+		if result.ErrorCode != asyncapi.ErrCodeCancelled {
+			t.Fatalf("expected ErrorCode %q, got %q", asyncapi.ErrCodeCancelled, result.ErrorCode)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for cancelled result after gate continue")
+	}
+
+	if called.Load() != 0 {
+		t.Fatalf("expected no inference call after cancellation post-gate, got %d", called.Load())
+	}
+}
+
+func TestWorker_RechecksCancellationImmediatelyBeforeSend(t *testing.T) {
+	msgID := "pre-send-cancelled"
+	var called atomic.Int32
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	checker := &stubCancellationChecker{cancelled: map[string]bool{}}
+	ctx := WithCancellationChecker(context.Background(), checker)
+	requestToken := "token-pre-send-cancelled"
+	xform := &blockingTransform{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	go Worker(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, transform.NewChain([]transform.RequestTransform{xform}))
+
+	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
+		ID:       msgID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-xform.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never entered transform phase")
+	}
+
+	checker.setCancelled(msgID, requestToken, true)
+	time.Sleep(cancellationCheckPollInterval + 100*time.Millisecond)
+	close(xform.release)
+
+	select {
+	case <-retryChannel:
+		t.Fatal("cancelled request should not be retried")
+	case result := <-resultChannel:
+		if result.ID != msgID {
+			t.Fatalf("expected result ID %q, got %q", msgID, result.ID)
+		}
+		if result.ErrorCode != asyncapi.ErrCodeCancelled {
+			t.Fatalf("expected ErrorCode %q, got %q", asyncapi.ErrCodeCancelled, result.ErrorCode)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for cancelled result before send")
+	}
+
+	if called.Load() != 0 {
+		t.Fatalf("expected no inference call after cancellation during transform, got %d", called.Load())
+	}
+}
+
 type raceMockPoolGate struct {
 	releaseCalled *int32
 }
@@ -1839,8 +2529,14 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 	}()
 	wg.Wait()
 
-	// Wait for worker goroutine poolReleases to finish executing
-	time.Sleep(50 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&queueReleaseCalled) < 1 || atomic.LoadInt32(&poolReleaseCalled) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for releases: queue=%d pool=%d",
+				atomic.LoadInt32(&queueReleaseCalled), atomic.LoadInt32(&poolReleaseCalled))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	if atomic.LoadInt32(&queueReleaseCalled) != 1 {
 		t.Errorf("expected queue release to be called exactly once, got %d", queueReleaseCalled)

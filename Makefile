@@ -194,7 +194,15 @@ check-dco: ## Check that all commits since main have a DCO Signed-off-by trailer
 	@scripts/check-dco.sh
 
 .PHONY: ci
-ci: fmt vet lint test ## Run all CI checks (fmt, vet, lint, test)
+ci: fmt vet lint release-notes-lint test ## Run all CI checks (fmt, vet, lint, test)
+
+.PHONY: release-notes-lint
+release-notes-lint: ## Validate release-note fragments in release-notes.d/unreleased.
+	./hack/lint-release-notes.sh
+
+.PHONY: release-notes
+release-notes: release-notes-lint ## Assemble fragments into RELEASE-NOTES.md (set VERSION=vX.Y.Z).
+	./hack/assemble-release-notes.sh $(VERSION)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

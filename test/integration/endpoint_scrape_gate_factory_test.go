@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d-incubation/llm-d-async/pipeline"
 	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,13 +36,13 @@ func TestGateFactory_EndpointScrape_StaticMaxCount(t *testing.T) {
 
 	factory := flowcontrol.NewGateFactoryWithCacheTTL("", 200*time.Millisecond)
 
-	gate, err := factory.CreateGate("endpoint-scrape", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: map[string]any{
 		"url":               server.URL,
 		"metric":            "vllm:num_requests_waiting",
-		"max_count_per_pod": "10",
-		"baseline":          "0.0",
-		"fallback":          "0.0",
-	})
+		"max_count_per_pod": 10.0,
+		"baseline":          0.0,
+		"fallback":          0.0,
+	}})
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -79,12 +80,12 @@ pool_saturation{name="pool-a"} 0.6
 	factory := flowcontrol.NewGateFactoryWithCacheTTL("", 0)
 
 	// No max_count_per_pod → metric value used directly as saturation
-	gate, err := factory.CreateGate("endpoint-scrape", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: map[string]any{
 		"url":      server.URL,
 		"metric":   "pool_saturation",
 		"labels":   `{"name":"pool-a"}`,
-		"baseline": "0.1",
-	})
+		"baseline": 0.1,
+	}})
 	require.NoError(t, err)
 
 	// saturation=0.6 → budget=1-0.6=0.4 → minus baseline 0.1 → 0.3
@@ -110,14 +111,14 @@ ready_pods{name="pool-a"} 3
 
 	factory := flowcontrol.NewGateFactoryWithCacheTTL("", 0)
 
-	gate, err := factory.CreateGate("endpoint-scrape", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: map[string]any{
 		"url":               simServer.URL,
 		"metric":            "vllm:num_requests_waiting",
-		"max_count_per_pod": "10",
+		"max_count_per_pod": 10.0,
 		"pods_url":          podsServer.URL,
 		"pods_metric":       "ready_pods",
 		"pods_labels":       `{"name":"pool-a"}`,
-	})
+	}})
 	require.NoError(t, err)
 
 	// value=6, pods=3, maxCountPerPod=10 → maxCount=30 → saturation=0.2 → budget=0.8
@@ -128,14 +129,14 @@ ready_pods{name="pool-a"} 3
 func TestGateFactory_EndpointScrape_MissingParams(t *testing.T) {
 	factory := flowcontrol.NewGateFactory("")
 
-	_, err := factory.CreateGate("endpoint-scrape", map[string]string{
+	_, err := factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: map[string]any{
 		"metric": "some_metric",
-	})
+	}})
 	assert.Error(t, err, "Should fail when url is missing")
 
-	_, err = factory.CreateGate("endpoint-scrape", map[string]string{
+	_, err = factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: map[string]any{
 		"url": "http://localhost:8000/metrics",
-	})
+	}})
 	assert.Error(t, err, "Should fail when metric is missing")
 }
 
@@ -147,11 +148,11 @@ func TestGateFactory_EndpointScrape_FallbackOnError(t *testing.T) {
 
 	factory := flowcontrol.NewGateFactoryWithCacheTTL("", 0)
 
-	gate, err := factory.CreateGate("endpoint-scrape", map[string]string{
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: map[string]any{
 		"url":      server.URL,
 		"metric":   "any",
-		"fallback": "0.5",
-	})
+		"fallback": 0.5,
+	}})
 	require.NoError(t, err)
 
 	budget := gate.Budget(context.Background())

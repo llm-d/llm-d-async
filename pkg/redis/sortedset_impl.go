@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -22,56 +21,29 @@ import (
 )
 
 // parseGateParams parses a JSON-encoded string (from --redis.ss.gate-params)
-// into a map[string]string for gate parameter configuration.
+// into a map[string]any for gate parameter configuration.
 // Used to pass gate parameters from CLI or YAML to the gate factory.
-func parseGateParams(s string) map[string]string {
-	m := map[string]string{}
+func parseGateParams(s string) (map[string]any, error) {
+	m := map[string]any{}
 	if s == "" || s == "{}" {
-		return m
+		return m, nil
 	}
-	_ = json.Unmarshal([]byte(s), &m)
-	return m
-}
-
-// StringMap is a map[string]string that tolerates non-string JSON values
-// by converting them to their string representation during unmarshaling.
-type StringMap map[string]string
-
-func (m *StringMap) UnmarshalJSON(data []byte) error {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, fmt.Errorf("failed to parse gate params JSON: %w", err)
 	}
-	result := make(map[string]string, len(raw))
-	for k, v := range raw {
-		switch val := v.(type) {
-		case string:
-			result[k] = val
-		case float64:
-			result[k] = strconv.FormatFloat(val, 'f', -1, 64)
-		case bool:
-			result[k] = strconv.FormatBool(val)
-		case nil:
-			result[k] = ""
-		default:
-			return fmt.Errorf("gate_params key %q: unsupported value type %T (only strings, numbers, and booleans are allowed)", k, v)
-		}
-	}
-	*m = result
-	return nil
+	return m, nil
 }
 
 type queueConfig struct {
-	ID                 string            `json:"id,omitempty"`
-	QueueName          string            `json:"queue_name,omitempty"`
-	ResultQueueName    string            `json:"result_queue_name,omitempty"`
-	WorkerPoolID       string            `json:"worker_pool_id"`
-	InferenceObjective string            `json:"inference_objective"`
-	RequestPathURL     string            `json:"request_path_url"`
-	IGWBaseURL         string            `json:"igw_base_url"`
-	GateType           string            `json:"gate_type"`
-	GateParams         StringMap         `json:"gate_params,omitempty"`
-	Labels             map[string]string `json:"labels,omitempty"`
+	ID                 string `json:"id,omitempty"`
+	QueueName          string `json:"queue_name,omitempty"`
+	ResultQueueName    string `json:"result_queue_name,omitempty"`
+	WorkerPoolID       string `json:"worker_pool_id"`
+	InferenceObjective string `json:"inference_objective"`
+	RequestPathURL     string `json:"request_path_url"`
+	IGWBaseURL         string `json:"igw_base_url"`
+	pipeline.GateConfig
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type requestChannelData struct {
@@ -82,12 +54,28 @@ type requestChannelData struct {
 }
 
 var (
-	_ pipeline.Flow          = (*RedisSortedSetFlow)(nil)
-	_ pipeline.HealthChecker = (*RedisSortedSetFlow)(nil)
+	_ pipeline.Flow                        = (*RedisSortedSetFlow)(nil)
+	_ pipeline.HealthChecker               = (*RedisSortedSetFlow)(nil)
+	_ pipeline.CancellationCheckerProvider = (*RedisSortedSetFlow)(nil)
 )
+
+var cleanupRequestStateScript = redis.NewScript(`
+local token = ARGV[1]
+if token == "" then
+  return 0
+end
+if redis.call("GET", KEYS[1]) == token then
+  redis.call("DEL", KEYS[1])
+end
+if redis.call("GET", KEYS[2]) == token then
+  redis.call("DEL", KEYS[2])
+end
+return 1
+`)
 
 type RedisSortedSetFlow struct {
 	rdb                     *redis.Client
+	cancellationChecker     api.CancellationChecker
 	requestChannels         []requestChannelData
 	retryChannel            chan pipeline.RetryMessage
 	resultChannel           chan api.ResultMessage
@@ -105,6 +93,24 @@ type RedisSortedSetFlow struct {
 	drainCancel             context.CancelFunc
 	drainWg                 sync.WaitGroup
 	enableTracing           bool
+}
+
+type redisCancellationChecker struct {
+	rdb *redis.Client
+}
+
+func (c *redisCancellationChecker) IsCancelled(ctx context.Context, requestID, requestToken string) (bool, error) {
+	if requestID == "" || requestToken == "" {
+		return false, nil
+	}
+	token, err := c.rdb.Get(ctx, api.RequestCancellationKey(requestID)).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return token == requestToken, nil
 }
 
 // SortedSetOption is a functional option for configuring RedisSortedSetFlow
@@ -167,7 +173,7 @@ func NewRedisSortedSetFlow(flowOpts SortedSetFlowOptions, connOpts ConnectionOpt
 	for _, cfg := range configs {
 		var gate pipeline.Gate
 		if r.gateFactory != nil && cfg.GateType != "" {
-			gate, err = r.gateFactory.CreateGate(cfg.GateType, cfg.GateParams)
+			gate, err = r.gateFactory.CreateGate(cfg.GateConfig)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create gate for queue %q (gate_type=%q): %w", cfg.QueueName, cfg.GateType, err)
 			}
@@ -253,13 +259,16 @@ func loadQueueConfigs(opts SortedSetFlowOptions) ([]queueConfig, error) {
 			return nil, err
 		}
 	} else {
+		gateParams, err := parseGateParams(opts.GateParamsJSON)
+		if err != nil {
+			return nil, err
+		}
 		configs = []queueConfig{{
 			QueueName:          opts.RequestQueueName,
 			InferenceObjective: opts.InferenceObjective,
 			IGWBaseURL:         opts.IGWBaseURL,
 			RequestPathURL:     opts.RequestPathURL,
-			GateType:           opts.GateType,
-			GateParams:         parseGateParams(opts.GateParamsJSON),
+			GateConfig:         pipeline.GateConfig{GateType: opts.GateType, GateParams: gateParams},
 			WorkerPoolID:       "default",
 		}}
 	}
@@ -366,6 +375,13 @@ func (r *RedisSortedSetFlow) ResultChannel() chan api.ResultMessage {
 	return r.resultChannel
 }
 
+func (r *RedisSortedSetFlow) CancellationChecker() api.CancellationChecker {
+	if r.cancellationChecker != nil {
+		return r.cancellationChecker
+	}
+	return &redisCancellationChecker{rdb: r.rdb}
+}
+
 func (r *RedisSortedSetFlow) HealthCheck(ctx context.Context) error {
 	return r.rdb.Ping(ctx).Err()
 }
@@ -436,6 +452,9 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 		if deadline < currentTime {
 			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", rview.ReqID())
+			if err := r.cleanupRequestStateByIDAndToken(ctx, rview.ReqID(), ir.RequestToken); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to cleanup expired request state", "id", rview.ReqID())
+			}
 			continue
 		}
 
@@ -452,6 +471,20 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			for k, v := range cfg.Labels {
 				ir.Labels[k] = v
 			}
+		}
+
+		cancelled, err := r.CancellationChecker().IsCancelled(ctx, rview.ReqID(), ir.RequestToken)
+		if err != nil {
+			// Best-effort at dequeue time only. The worker path performs the
+			// authoritative pre-dispatch cancellation check and fails closed.
+			logger.V(logutil.DEFAULT).Error(err, "Failed to check request cancellation", "id", rview.ReqID())
+		} else if cancelled {
+			select {
+			case r.resultChannel <- api.NewCancelledResult(rview, ir.InternalRouting):
+			case <-ctx.Done():
+				return
+			}
+			continue
 		}
 
 		// Apply gate
@@ -481,12 +514,11 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		if verdict.Action == pipeline.ActionDrop {
 			metrics.RecordGateDecision(metrics.ReasonDropped, queueID, queueName, poolName)
 			if verdict.Result != nil {
-				r.resultChannel <- *verdict.Result
+				resultMsg := *verdict.Result
+				resultMsg.Routing = ir.InternalRouting
+				r.resultChannel <- resultMsg
 			} else {
-				r.resultChannel <- api.ResultMessage{
-					ID:      rview.ReqID(),
-					Payload: `{"status": "dropped"}`,
-				}
+				r.resultChannel <- api.NewGateDroppedResult(rview, ir.InternalRouting)
 			}
 			continue
 		}
@@ -663,8 +695,30 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 		_, err := pipe.Exec(ctx)
 		return err
 	}); err == nil {
+		for _, result := range batch {
+			if err := r.cleanupRequestState(ctx, result); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to cleanup request state after result flush", "id", result.ID)
+			}
+		}
 		logger.V(logutil.DEBUG).Info("Pushed result batch", "batchSize", len(batch))
 	}
+}
+
+func (r *RedisSortedSetFlow) cleanupRequestState(ctx context.Context, result api.ResultMessage) error {
+	return r.cleanupRequestStateByIDAndToken(ctx, result.ID, result.Routing.RequestToken)
+}
+
+func (r *RedisSortedSetFlow) cleanupRequestStateByIDAndToken(ctx context.Context, requestID, requestToken string) error {
+	if requestID == "" || requestToken == "" {
+		return nil
+	}
+	_, err := cleanupRequestStateScript.Run(
+		ctx,
+		r.rdb,
+		[]string{api.RequestActiveTokenKey(requestID), api.RequestCancellationKey(requestID)},
+		requestToken,
+	).Result()
+	return err
 }
 
 func (r *RedisSortedSetFlow) marshalResult(msg api.ResultMessage) string {

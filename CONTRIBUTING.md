@@ -139,6 +139,35 @@ git push origin v0.8.0
 
 Go requires sub-module tags to carry the directory prefix — see [Managing module source](https://go.dev/doc/modules/managing-source) for details.
 
+## Release notes
+
+User-facing changes are recorded as **per-PR fragments** and assembled into
+[`RELEASE-NOTES.md`](RELEASE-NOTES.md) at each release. One fragment file per PR
+keeps this conflict-free.
+
+1. Fill the `release-note` block in the PR description (write `NONE` if there is
+   no user-facing impact).
+2. For a user-facing change, add a fragment at
+   `release-notes.d/unreleased/<PR-number>.md`:
+
+   ```markdown
+   ---
+   pr: 123
+   url: https://github.com/llm-d-incubation/llm-d-async/pull/123
+   author: your-handle
+   date: 2026-07-09
+   ---
+   Short description of the change. Prefix breaking changes with `Breaking:`.
+   ```
+
+3. `make release-notes-lint` validates fragment format (also enforced in CI via
+   pre-commit).
+
+At release time — as part of [Preparing a release](#preparing-a-release) — a
+maintainer runs `make release-notes VERSION=vX.Y.Z`, which moves the unreleased
+fragments into a new `RELEASE vX.Y.Z <date>` section at the top of
+`RELEASE-NOTES.md` and deletes them. Commit the result with the release.
+
 ## Go Conventions
 
 These conventions are enforced by linters where possible (see `.golangci.yml`) and by code review otherwise.
@@ -158,3 +187,4 @@ See [SECURITY.md](SECURITY.md) for our vulnerability disclosure process.
 * **No breaking changes**: Once an API/protocol is in GA release, it cannot be removed or behavior changed
 * **Versioning**: All protocols and APIs should be versionable with clear compatibility requirements
 * **Documentation**: All APIs must have documented specs describing expected behavior
+* **Deprecation policy (N+2)**: A feature deprecated in release N must keep working — with no user-facing or configuration change required — through releases N and N+1, emitting a clear warning, and may be removed no earlier than release N+2. Record the deprecation (and any breaking change) in the PR's [release note](#release-notes).
