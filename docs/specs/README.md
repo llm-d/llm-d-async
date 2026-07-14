@@ -16,6 +16,7 @@ the rare ones load tests never hit (concurrent admits, pod crashes mid-flight).
 | [`ResultCorrelation.tla`](ResultCorrelation.tla) | issue [#308](https://github.com/llm-d-incubation/llm-d-async/issues/308): the producer's `GetResult` doing `BRPOP` on one **shared** result list with N concurrent callers | **current design: `EachCallerGetsOwnResult` violated** — a caller pops another caller's result. The per-request result queue (flip one constant) holds. |
 | [`GateReservationLeak.tla`](GateReservationLeak.tla) | the per-queue gate capacity reservation: acquired on `ActionContinue`, released **only** on a `ResultMessage`, but every retry re-enqueues without releasing (`activeReleases.Store` also overwrites) | **current code: `AccountingExact` and `EventuallyServed` both violated** — leaked slots ratchet `inFlight` up until `Budget()=0` wedges the queue. Releasing on retry (flip one constant) holds. |
 | [`GateShutdownDrain.tla`](GateShutdownDrain.tla) | the two-phase graceful shutdown: workers drain their backlog with **bare, unguarded** `retryChannel <-` sends; `flow.Shutdown()` (which stops the retry worker) runs only after `wg.Wait()` | **current code: all properties hold** — TLC proves the retry worker outlives every async worker, so the bare sends never wedge. A reordered variant (flip one constant) violates `NoStuckWorker`. |
+| [`GateQuotaTTL.tla`](GateQuotaTTL.tla) | the `redis-quota` concurrency counter, whose `EXPIRE` is armed only on the 0→1 `INCR` and never refreshed — so the whole key can expire while reserved holders are still in flight | **current code: `NoOverAdmission` violated** — a mid-flight expiry lets new acquires re-admit up to `Limit` again (real concurrency `2 > Limit`). Reclaiming only leaked slots (flip one constant) holds. |
 
 ## Why this gate
 
@@ -326,6 +327,33 @@ So this one is a **confidence result, not a discovery** — the ordering the cod
 on is race-free, and the model pins down exactly the reorder that would break it (and
 would make a good guard against a future refactor).
 
+## What the quota-TTL model found (a latent over-admission)
+
+`GateQuotaTTL.tla` models the `redis-quota` concurrency counter
+(`pkg/redis/quota_gate.go`, `acquireConcurrency`). The acquire Lua arms the key's
+`EXPIRE` **only** on the 0→1 `INCR` (`if tonumber(new_val) == 1 then ... EXPIRE`) and
+never refreshes it; release is a guarded `DECR`. A concurrency limiter has no natural
+time window, yet the key carries a TTL (the `window`, or a 300s default) anchored at
+the *first* acquire — so the whole counter can expire while reserved holders are still
+in flight.
+
+With `BlindTTL = TRUE` (current code), TLC finds a 4-step `NoOverAdmission` violation
+at `Limit = 1`:
+
+```
+w1 acquire        counter 0->1, key armed, w1 reserved (in flight)
+TTL fires         key expires -> counter = 0, key gone  (w1 STILL in flight)
+w2 acquire        key absent -> INCR -> counter = 1, w2 reserved (in flight)
+                  -> RealReserved = {w1, w2} = 2 > Limit = 1
+```
+
+The old holders' guarded `DECR` then decrements the *new* generation's counter,
+compounding the drift. With `BlindTTL = FALSE` (expiry reclaims only genuinely-leaked
+slots, not live ones) the property holds. Like `GateReservationLeak`, this is a defect
+in **shipping code** (the earlier `GateQuota.tla` idealized the TTL as an
+orphan-only reaper, which hid it) — worth filing with a regression test, and pairing
+with a lease/refresh or leak-scoped reclaim rather than a blind whole-key TTL.
+
 ## Running TLC
 
 You need Java and `tla2tools.jar`
@@ -404,6 +432,13 @@ java -cp tla2tools.jar pcal.trans GateShutdownDrain.tla
 java -cp tla2tools.jar tlc2.TLC -deadlock -config GateShutdownDrain_safe.cfg GateShutdownDrain.tla
 # reordered (retry worker stopped early) -> NoStuckWorker violated (worker wedges on bare send)
 java -cp tla2tools.jar tlc2.TLC -deadlock -config GateShutdownDrain_unsafe.cfg GateShutdownDrain.tla
+
+# the quota-counter TTL model (a latent over-admission in shipping code)
+java -cp tla2tools.jar pcal.trans GateQuotaTTL.tla
+# current code (whole-key EXPIRE) -> NoOverAdmission violated (mid-flight expiry re-admits)
+java -cp tla2tools.jar tlc2.TLC -deadlock -config GateQuotaTTL_blind.cfg GateQuotaTTL.tla
+# leak-scoped reclaim (the fix) -> "No error has been found."
+java -cp tla2tools.jar tlc2.TLC -deadlock -config GateQuotaTTL_scoped.cfg GateQuotaTTL.tla
 ```
 
 (A buggy model with two counter-examples uses two configs only because TLC stops at
