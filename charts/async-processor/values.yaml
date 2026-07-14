@@ -25,6 +25,13 @@ ap:
     # image stays in sync with the chart). Set explicitly to pin a different tag.
     tag: ""
   imagePullPolicy: Always
+  # imagePullSecrets is a list of references to secrets for pulling container
+  # images from private registries. Takes precedence over imagePullSecret.
+  # Example:
+  #   imagePullSecrets:
+  #     - name: registry-creds
+  #     - name: ghcr-token
+  imagePullSecrets: []
   # Global worker concurrency (in-flight requests per pool). The processor is
   # I/O-bound, so by Little's Law this caps throughput; the default of 8 left
   # real inference pools mostly idle. Tune to your backend's latency/throughput
