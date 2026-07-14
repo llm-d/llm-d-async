@@ -15,6 +15,7 @@ the rare ones load tests never hit (concurrent admits, pod crashes mid-flight).
 | [`MergePriority.tla`](MergePriority.tla) | PR [#294](https://github.com/llm-d-incubation/llm-d-async/pull/294): the tier-priority merge policy's strict-priority `Pop()` under sustained high-priority load | **current design: `NoStarvation` violated** — TLC finds a fair lasso where a low-priority lane is never served. A starvation-free policy (flip one constant) holds. |
 | [`ResultCorrelation.tla`](ResultCorrelation.tla) | issue [#308](https://github.com/llm-d-incubation/llm-d-async/issues/308): the producer's `GetResult` doing `BRPOP` on one **shared** result list with N concurrent callers | **current design: `EachCallerGetsOwnResult` violated** — a caller pops another caller's result. The per-request result queue (flip one constant) holds. |
 | [`GateReservationLeak.tla`](GateReservationLeak.tla) | the per-queue gate capacity reservation: acquired on `ActionContinue`, released **only** on a `ResultMessage`, but every retry re-enqueues without releasing (`activeReleases.Store` also overwrites) | **current code: `AccountingExact` and `EventuallyServed` both violated** — leaked slots ratchet `inFlight` up until `Budget()=0` wedges the queue. Releasing on retry (flip one constant) holds. |
+| [`GateShutdownDrain.tla`](GateShutdownDrain.tla) | the two-phase graceful shutdown: workers drain their backlog with **bare, unguarded** `retryChannel <-` sends; `flow.Shutdown()` (which stops the retry worker) runs only after `wg.Wait()` | **current code: all properties hold** — TLC proves the retry worker outlives every async worker, so the bare sends never wedge. A reordered variant (flip one constant) violates `NoStuckWorker`. |
 
 ## Why this gate
 
@@ -292,6 +293,39 @@ retry paths (or `LoadAndDelete` before re-`Store`, or carry the reservation acro
 retry). Unlike the other models here, this one describes a defect in **shipping
 code**, so it should be paired with a regression test, not just a green model.
 
+## What the shutdown model confirmed (a green result)
+
+`GateShutdownDrain.tla` was written to *hunt* for a bug in the two-phase graceful
+shutdown — the most-churned area of the code (fixes in #197, #236, #238, #245, #296) —
+and instead it **validated** the design. When the runner shuts down, each async worker
+drains its request backlog by re-enqueuing every message with a **bare, unguarded**
+send:
+
+```go
+retryChannel <- retryMsg   // worker.go:67 — no `select { case <-ctx.Done() }` escape
+```
+
+That send can only be safe if the retry worker is still receiving. The code relies on
+an ordering — `flow.Shutdown()` (which stops the retry worker) runs only *after*
+`wg.Wait()` — asserted in a comment ("retryWorker is guaranteed to outlive Workers")
+but never checked. Note the two *distinct* drain contexts: the runner's `drainCtx`
+(the workers' `requestCtx`, cancelled on a drain timeout) is not the flow's `drainCtx`
+(the retry worker's, cancelled only by `flow.Shutdown()`), so a drain timeout does not
+stop the retry worker.
+
+Flipping `SafeOrdering`:
+
+- **`TRUE`** (current code) → **all properties hold**: `NoStuckWorker`,
+  `AllBacklogFlushed`, `CleanShutdown`. TLC confirms across every interleaving —
+  including the drain-timeout path — that the retry worker outlives every async worker,
+  so no bare send ever wedges and no backlog is lost.
+- **`FALSE`** (a reorder that stops the retry worker before the workers finish) → TLC
+  finds a lasso violating `NoStuckWorker`: a worker blocks forever on its bare send.
+
+So this one is a **confidence result, not a discovery** — the ordering the code depends
+on is race-free, and the model pins down exactly the reorder that would break it (and
+would make a good guard against a future refactor).
+
 ## Running TLC
 
 You need Java and `tla2tools.jar`
@@ -363,6 +397,13 @@ java -cp tla2tools.jar tlc2.TLC -deadlock -config GateReservationLeak_buggy.cfg 
 java -cp tla2tools.jar tlc2.TLC -deadlock -config GateReservationLeak_buggy_live.cfg GateReservationLeak.tla
 # release-on-retry (the fix) -> "No error has been found."
 java -cp tla2tools.jar tlc2.TLC -deadlock -config GateReservationLeak_fixed.cfg GateReservationLeak.tla
+
+# the graceful-shutdown / drain model (validates the current ordering)
+java -cp tla2tools.jar pcal.trans GateShutdownDrain.tla
+# current code (Shutdown after wg.Wait) -> "No error has been found."
+java -cp tla2tools.jar tlc2.TLC -deadlock -config GateShutdownDrain_safe.cfg GateShutdownDrain.tla
+# reordered (retry worker stopped early) -> NoStuckWorker violated (worker wedges on bare send)
+java -cp tla2tools.jar tlc2.TLC -deadlock -config GateShutdownDrain_unsafe.cfg GateShutdownDrain.tla
 ```
 
 (A buggy model with two counter-examples uses two configs only because TLC stops at
