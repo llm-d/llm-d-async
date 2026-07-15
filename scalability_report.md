@@ -15,7 +15,7 @@ The Async Processor is built as a concurrent pipeline designed to handle high-th
 
 ### Interaction Dynamics:
 - **Strict Back-pressure:** The system primarily uses **unbuffered channels** for the request path. This ensures that the ingestion goroutines (`requestWorker`) cannot pull more messages from external queues than the `Worker Pool` can currently process.
-- **Worker Starvation/Saturation:** If the inference service (IGW) is slow, workers block on HTTP calls. This fills the `requestChannel`, which in turn blocks the `requestWorker`.
+- **Worker Starvation/Saturation:** If the downstream inference service (`llm-d-router` / IGW) is slow, workers block on HTTP calls. This fills the `requestChannel`, which in turn blocks the `requestWorker`.
 
 ## 3. Implementation Analysis
 

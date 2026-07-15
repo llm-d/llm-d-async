@@ -1,6 +1,6 @@
 # CLAUDE.md — llm-d-async
 
-Asynchronous dispatch processor for llm-d. Pulls batch requests from a message queue, gates dispatch based on system capacity, and forwards to an inference gateway.
+Asynchronous dispatch processor for llm-d. Pulls batch requests from a message queue, gates dispatch based on system capacity, and forwards requests to `llm-d-router` (or another inference gateway).
 
 ## General Principles
 

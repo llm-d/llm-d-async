@@ -6,7 +6,7 @@
 **The Value:** This component enables efficient processing of requests where latency is not the primary constraint (i.e., the magnitude of the required SLO is ≥ minutes). <br>
 By utilizing an asynchronous, queue-based approach, users can perform tasks such as product classification, bulk summarizations, summarizing forum discussion threads, or performing near-realtime sentiment analysis over large groups of social media tweets without blocking real-time traffic.
 
-**Architecture Summary:** The Async Processor is a composable component that provides services for managing these requests. It functions as an asynchronous worker that pulls jobs from a message queue and dispatches them to an inference gateway, decoupling job submission from immediate execution.
+**Architecture Summary:** The Async Processor is a composable component that provides services for managing these requests. It functions as an asynchronous worker that pulls jobs from a message queue and dispatches them to `llm-d-router` (or another inference gateway), decoupling job submission from immediate execution.
 
 ## When to Use
 • **Latency Insensitivity:** Suitable for workloads where immediate response is not required.
@@ -451,7 +451,7 @@ The Async Processor supports distributed tracing via [OpenTelemetry](https://ope
 | Span Name | Description |
 |-----------|-------------|
 | `process-request` | Per-request span covering validation, dispatch, and result routing |
-| `http-request` | Child span for the outgoing HTTP call to the inference gateway (via `otelhttp`) |
+| `http-request` | Child span for the outgoing HTTP call to `llm-d-router` (via `otelhttp`) |
 | `re-enqueue` | Linked span created when a request is re-enqueued during graceful shutdown |
 
 **Span attributes:**
@@ -479,7 +479,7 @@ Producers can inject W3C Trace Context (`traceparent`/`tracestate`) and Baggage 
 }
 ```
 
-The processor also injects trace context into outgoing inference requests via W3C headers, so the inference gateway can continue the trace.
+The processor also injects trace context into outgoing inference requests via W3C headers, so `llm-d-router` can continue the trace.
 
 **Configuration:**
 
@@ -522,7 +522,7 @@ The processor exports the following Prometheus metrics on the metrics port (defa
 | `llm_d_async_async_exceeded_deadline_requests_total` | Counter | Requests that exceeded their deadline |
 | `llm_d_async_async_shedded_requests_total` | Counter | Rate-limited/shed requests (429) |
 | `llm_d_async_async_message_latency_time_millis` | Histogram | Message latency (Pub/Sub only) |
-| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time spent calling the inference gateway (IGW), isolating model time from queue time |
+| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time spent calling `llm-d-router` (or other inference gateway), isolating model time from queue time |
 | `llm_d_async_async_queue_residence_time_millis` | Histogram | Time a message spent buffered in-process from broker ingestion until a worker pulled it |
 
 **Labels:**
@@ -558,7 +558,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `llm_d_async_async_exceeded_deadline_requests_total` | Counter | Requests that exceeded their deadline before completion |
 | `llm_d_async_async_request_retries_total` | Counter | Retry attempts |
 | `llm_d_async_async_message_latency_time_millis` | Histogram | End-to-end message latency in milliseconds (publish to successful processing). Only registered when the transport supports message latency (e.g., GCP Pub/Sub). |
-| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time in milliseconds spent calling the inference gateway (IGW), measured around each request attempt. Isolates "model time" from "queue time" and is always registered. |
+| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time in milliseconds spent calling `llm-d-router` (or other inference gateway), measured around each request attempt. Isolates "model time" from "queue time" and is always registered. |
 | `llm_d_async_async_queue_residence_time_millis` | Histogram | Time in milliseconds a message spent buffered in-process, from broker ingestion until a worker pulled it for processing. Measures the async delay introduced by the system (queue time). Always registered. |
 | `llm_d_async_async_dispatch_budget` | Gauge | Current dispatch budget [0.0–1.0] returned by the queue's gate; the fraction of system capacity available for new requests (0.0 = gate fully closed). Useful for diagnosing why throughput is throttled. |
 | `llm_d_async_async_pool_worker_limit` | Gauge | Configured worker concurrency limit for a pool (carries only the `pool_name` label). Compare against `llm_d_async_async_inflight_requests` to compute worker utilization. |
@@ -585,7 +585,7 @@ rate(llm_d_async_async_shedded_requests_total[5m])
 # Retry ratio by queue
 rate(llm_d_async_async_request_retries_total[5m]) / rate(llm_d_async_async_request_total[5m])
 
-# p95 inference gateway latency by queue (model time, excluding queue time)
+# p95 llm-d-router / inference gateway latency by queue (model time, excluding queue time)
 histogram_quantile(0.95, sum by (queue_name, le) (rate(llm_d_async_async_inference_latency_time_millis_bucket[5m])))
 
 # p95 queue residence time by queue (async delay, excluding model time)
@@ -672,7 +672,7 @@ The configuration file when using the `redis.queues-config-file` flag should hav
 - `queue_name`: The name of the Redis channel for this queue.
 - `worker_pool_id` (optional): The ID of the worker pool to route to (defined in the worker pools configuration file). Defaults to `"default"` if omitted.
 - `inference_objective`: The inference objective header value.
-- `igw_base_url` (required): Base URL of the inference gateway or target model server for this queue.
+- `igw_base_url` (required): Base URL of `llm-d-router`, an inference gateway, or target model server for this queue.
 - `request_path_url` (optional): Request path URL (e.g. `/v1/chat/completions`) for this queue.
 - `labels` (optional): A map of key-value string pairs injected as routing metadata (`Labels`) into the `InternalRequest` envelope at ingestion/pull time.
 
@@ -740,7 +740,7 @@ The configuration file when using the `pubsub.topics-config-file` flag should ha
 - `subscriber_id`: The GCP PubSub subscriber ID for this topic.
 - `worker_pool_id` (optional): The ID of the worker pool to route to (defined in the worker pools configuration file). Defaults to `"default"` if omitted.
 - `inference_objective`: The inference objective header value.
-- `igw_base_url` (required): Base URL of the inference gateway or target model server for this topic.
+- `igw_base_url` (required): Base URL of `llm-d-router`, an inference gateway, or target model server for this topic.
 - `request_path_url` (required): Request path URL (e.g. `/v1/chat/completions`) for this topic.
 - `gate_type`: Required type of dispatch gate for this topic.
 - `gate_params` (optional): Parameters for the gate type (e.g., pool name, threshold for prometheus gates).
