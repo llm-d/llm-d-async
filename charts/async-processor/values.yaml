@@ -20,7 +20,7 @@ ap:
       cpu: 500m
       memory: 512Mi
   image:
-    repository: ghcr.io/llm-d-incubation/llm-d-async
+    repository: ghcr.io/llm-d/llm-d-async
     # Image tag. Leave empty to track the chart's appVersion (recommended so the
     # image stays in sync with the chart). Set explicitly to pin a different tag.
     tag: ""

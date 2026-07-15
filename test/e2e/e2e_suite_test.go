@@ -56,7 +56,7 @@ var (
 	jaegerPort     string = env.GetEnvString("E2E_INTEGRATION_JAEGER_PORT", "30494", ginkgo.GinkgoLogr)
 
 	containerRuntime = detectContainerRuntime()
-	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d-incubation/async-processor:e2e-test", ginkgo.GinkgoLogr)
+	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/async-processor:e2e-test", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "registry.k8s.io/gateway-api-inference-extension/epp:v1.5.0", ginkgo.GinkgoLogr)
 	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.9.1", ginkgo.GinkgoLogr)
 	gaieRoot         = os.Getenv("GAIE_ROOT")

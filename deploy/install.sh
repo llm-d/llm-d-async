@@ -31,7 +31,7 @@ REDIS_NS=${REDIS_NS:-"redis"}
 PROMETHEUS_SECRET_NS=${PROMETHEUS_SECRET_NS:-$MONITORING_NAMESPACE}
 
 # AP Configuration
-AP_IMAGE_REPO=${AP_IMAGE_REPO:-"ghcr.io/llm-d-incubation/async-processor"}
+AP_IMAGE_REPO=${AP_IMAGE_REPO:-"ghcr.io/llm-d/async-processor"}
 AP_IMAGE_TAG=${AP_IMAGE_TAG:-"latest"}
 AP_IMAGE_PULL_POLICY=${AP_IMAGE_PULL_POLICY:-"Never"}
 AP_RELEASE_NAME=${AP_RELEASE_NAME:-"async-processor"}
