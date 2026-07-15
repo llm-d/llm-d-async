@@ -29,11 +29,11 @@ jobs:
           docker-file: Dockerfile
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.image-name }}
-          registry: ghcr.io/llm-d-incubation
+          registry: ghcr.io/llm-d
           github-token: ${{ secrets.GHCR_TOKEN }}
           prerelease: ${{ inputs.prerelease }}
 
       - name: Run Trivy scan on Async Processor image
         uses: ./.github/actions/trivy-scan
         with:
-          image: ghcr.io/llm-d-incubation/${{ inputs.image-name }}:${{ inputs.tag }}
+          image: ghcr.io/llm-d/${{ inputs.image-name }}:${{ inputs.tag }}

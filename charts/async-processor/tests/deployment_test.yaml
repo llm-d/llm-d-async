@@ -163,7 +163,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/llm-d-incubation/llm-d-async:0.7.0
+          value: ghcr.io/llm-d/llm-d-async:0.7.0
 
   - it: should honor an explicit image tag override
     set:
@@ -171,7 +171,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/llm-d-incubation/llm-d-async:v1.2.3
+          value: ghcr.io/llm-d/llm-d-async:v1.2.3
 
   - it: should render --pubsub.project-id when projectId is set
     set:

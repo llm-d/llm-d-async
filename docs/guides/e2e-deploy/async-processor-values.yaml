@@ -1,6 +1,6 @@
 ap:
   image:
-    repository: ghcr.io/llm-d-incubation/llm-d-async
+    repository: ghcr.io/llm-d/llm-d-async
     tag: "938cd44"
   imagePullPolicy: Always
   igwBaseURL: "http://llm-d-inference-gateway-istio:80"

@@ -7,7 +7,7 @@ export
 
 
 # Image URL to use all building/pushing image targets
-IMAGE_TAG_BASE ?= ghcr.io/llm-d-incubation
+IMAGE_TAG_BASE ?= ghcr.io/llm-d
 IMG_TAG ?= latest
 IMG ?= $(IMAGE_TAG_BASE)/async-processor:$(IMG_TAG)
 
@@ -401,7 +401,7 @@ set-version:
 	done
 
 ## Copied from https://github.com/llm-d-incubation/batch-gateway
-## publish-helm-chart: Patch chart for VERSION, package, append chart to SHA256SUMS, push to oci://ghcr.io/llm-d-incubation/charts (requires VERSION, yq, helm; GITHUB_TOKEN, GITHUB_ACTOR for push).
+## publish-helm-chart: Patch chart for VERSION, package, append chart to SHA256SUMS, push to oci://ghcr.io/llm-d/charts (requires VERSION, yq, helm; GITHUB_TOKEN, GITHUB_ACTOR for push).
 .PHONY: publish-helm-chart
 publish-helm-chart:
 	@if [ -z "$(VERSION)" ]; then \
