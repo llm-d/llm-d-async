@@ -9,7 +9,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/api"
 )
 
 // Validates the multi-tenant guide's reserved-vs-overflow priority model

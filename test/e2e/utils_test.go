@@ -15,7 +15,7 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/api"
 )
 
 const (

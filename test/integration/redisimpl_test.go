@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	randomrobin "github.com/llm-d-incubation/llm-d-async/pkg/async/mergepolicy/randomrobin"
+	randomrobin "github.com/llm-d/llm-d-async/pkg/async/mergepolicy/randomrobin"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/llm-d-incubation/llm-d-async/api"
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/redis"
 )
 
 func TestRedisImpl(t *testing.T) {

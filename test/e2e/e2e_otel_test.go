@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/api"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )

@@ -19,8 +19,8 @@ package flowcontrol
 import (
 	"context"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
-	pipeline "github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/api"
+	pipeline "github.com/llm-d/llm-d-async/pipeline"
 )
 
 var _ pipeline.Gate = (*CompositeGate)(nil)

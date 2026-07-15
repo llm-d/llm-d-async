@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	asyncapi "github.com/llm-d/llm-d-async/api"
 )
 
 var _ asyncapi.InferenceClient = (*HTTPInferenceClient)(nil)

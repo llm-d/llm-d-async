@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
 )
 
 func irID(id string) *api.InternalRequest {

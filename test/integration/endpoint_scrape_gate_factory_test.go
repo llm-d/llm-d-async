@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
+	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

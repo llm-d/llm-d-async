@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
 )
 
 var _ pipeline.Gate = (*WaitOnRefuseGate)(nil)

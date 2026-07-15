@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/llm-d-incubation/llm-d-async/pkg/plugins"
+	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
 
 var _ RequestTransform = (*fakeTransform)(nil)

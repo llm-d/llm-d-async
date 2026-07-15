@@ -25,9 +25,9 @@ import (
 	"strconv"
 	"time"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
-	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker/transform"
-	"github.com/llm-d-incubation/llm-d-async/pkg/plugins"
+	asyncapi "github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
+	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
 
 // PluginType is the registry key under which this plugin's factory is registered.

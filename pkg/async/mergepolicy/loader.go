@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	_ "github.com/llm-d-incubation/llm-d-async/pkg/async/mergepolicy/randomrobin"
-	_ "github.com/llm-d-incubation/llm-d-async/pkg/async/mergepolicy/tierpriority"
+	_ "github.com/llm-d/llm-d-async/pkg/async/mergepolicy/randomrobin"
+	_ "github.com/llm-d/llm-d-async/pkg/async/mergepolicy/tierpriority"
 )
 
 // MergePolicySpec represents the JSON configuration structure for a request merge policy.

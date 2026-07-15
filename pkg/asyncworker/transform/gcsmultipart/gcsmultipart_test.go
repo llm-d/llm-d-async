@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
-	"github.com/llm-d-incubation/llm-d-async/pkg/plugins"
+	asyncapi "github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
 
 // newPlugin builds a plugin instance for the given providers via the factory.

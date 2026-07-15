@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	"github.com/llm-d-incubation/llm-d-async/pkg/asyncworker/transform"
-	"github.com/llm-d-incubation/llm-d-async/pkg/plugins"
+	asyncapi "github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
+	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
 
 var _ transform.RequestTransform = (*testTransform)(nil)

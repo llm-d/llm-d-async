@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 

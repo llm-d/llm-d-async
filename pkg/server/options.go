@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/llm-d-incubation/llm-d-async/internal/logging"
-	"github.com/llm-d-incubation/llm-d-async/pkg/async/inference/flowcontrol"
-	"github.com/llm-d-incubation/llm-d-async/pkg/pubsub"
-	"github.com/llm-d-incubation/llm-d-async/pkg/redis"
+	"github.com/llm-d/llm-d-async/internal/logging"
+	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
+	"github.com/llm-d/llm-d-async/pkg/pubsub"
+	"github.com/llm-d/llm-d-async/pkg/redis"
 	"github.com/spf13/pflag"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )

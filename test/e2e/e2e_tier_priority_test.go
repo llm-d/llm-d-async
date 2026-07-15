@@ -7,7 +7,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/api"
 )
 
 var _ = ginkgo.Describe("Tier Priority Admission and Merge Policy E2E", ginkgo.Ordered, func() {

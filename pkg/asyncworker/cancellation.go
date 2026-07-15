@@ -3,7 +3,7 @@ package asyncworker
 import (
 	"context"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	asyncapi "github.com/llm-d/llm-d-async/api"
 )
 
 type cancellationCheckerKey struct{}

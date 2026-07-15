@@ -21,8 +21,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
-	pipeline "github.com/llm-d-incubation/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/api"
+	pipeline "github.com/llm-d/llm-d-async/pipeline"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/llm-d-incubation/llm-d-async/pkg/plugins"
+	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
 
 // PluginSpec is one entry in the transform configuration: a uniquely-named

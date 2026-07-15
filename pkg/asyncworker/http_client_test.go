@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	asyncapi "github.com/llm-d-incubation/llm-d-async/api"
+	asyncapi "github.com/llm-d/llm-d-async/api"
 )
 
 func TestSendRequest_success(t *testing.T) {

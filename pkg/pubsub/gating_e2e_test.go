@@ -10,8 +10,8 @@ import (
 
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/alicebob/miniredis/v2"
-	"github.com/llm-d-incubation/llm-d-async/api"
-	redisgate "github.com/llm-d-incubation/llm-d-async/pkg/redis"
+	"github.com/llm-d/llm-d-async/api"
+	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	"github.com/redis/go-redis/v9"
 )
 

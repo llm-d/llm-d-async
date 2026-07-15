@@ -3,7 +3,7 @@ package pipeline
 import (
 	"context"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/api"
 )
 
 type Flow interface {

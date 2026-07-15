@@ -9,7 +9,7 @@
 // are separate plugins that register a factory under their own type.
 package transform
 
-import "github.com/llm-d-incubation/llm-d-async/pkg/plugins"
+import "github.com/llm-d/llm-d-async/pkg/plugins"
 
 // RequestTransform is a dispatch-time body-transform plugin. The worker invokes
 // the configured chain after marshalling the request payload and before sending

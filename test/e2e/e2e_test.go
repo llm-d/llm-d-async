@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/llm-d-incubation/llm-d-async/api"
-	producerpkg "github.com/llm-d-incubation/llm-d-async/producer"
+	"github.com/llm-d/llm-d-async/api"
+	producerpkg "github.com/llm-d/llm-d-async/producer"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"

@@ -22,8 +22,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/llm-d-incubation/llm-d-async/pipeline"
-	redisgate "github.com/llm-d-incubation/llm-d-async/pkg/redis"
+	"github.com/llm-d/llm-d-async/pipeline"
+	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	promapi "github.com/prometheus/client_golang/api"
 	goredis "github.com/redis/go-redis/v9"
 )
