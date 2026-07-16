@@ -41,7 +41,10 @@ SKIP_TLS_VERIFY=${SKIP_TLS_VERIFY:-"false"}
 AP_LOG_LEVEL=${AP_LOG_LEVEL:-"info"}
 VALUES_FILE=${VALUES_FILE:-"$AP_PROJECT/charts/async-processor/values.yaml"}
 
-# Redis Configuration
+# Redis / Valkey Configuration
+# REDIS_CHART selects the Helm chart for the message queue backend.
+# Use "bitnami/valkey" (default) or "bitnami/redis".
+REDIS_CHART=${REDIS_CHART:-"bitnami/valkey"}
 REDIS_RELEASE_NAME=${REDIS_RELEASE_NAME:-"redis"}
 
 
@@ -422,15 +425,22 @@ deploy_ap_controller() {
 }
 
 deploy_redis() {
-    log_info "Deploying Redis..."
+    log_info "Deploying message queue backend ($REDIS_CHART)..."
     helm repo add bitnami https://charts.bitnami.com/bitnami
     helm repo update
 
-    helm upgrade -i "$REDIS_RELEASE_NAME" bitnami/redis -n $REDIS_NS --set auth.enabled=false
+    helm upgrade -i "$REDIS_RELEASE_NAME" "$REDIS_CHART" -n $REDIS_NS --set auth.enabled=false
 
-    # Create a secret with the Redis URL in the AP namespace so the async-processor can connect
-    local redis_url="redis://${REDIS_RELEASE_NAME}-master.${REDIS_NS}.svc.cluster.local:6379"
-    log_info "Creating Redis URL secret in $AP_NS namespace"
+    # Derive service name: bitnami/redis uses -master, bitnami/valkey uses -primary.
+    local svc
+    case "$REDIS_CHART" in
+      */valkey) svc="${REDIS_RELEASE_NAME}-primary" ;;
+      *)        svc="${REDIS_RELEASE_NAME}-master"  ;;
+    esac
+
+    # Create a secret with the Redis-protocol URL in the AP namespace so the async-processor can connect
+    local redis_url="redis://${svc}.${REDIS_NS}.svc.cluster.local:6379"
+    log_info "Creating message queue URL secret in $AP_NS namespace"
     kubectl create secret generic redis-creds \
         --from-literal=url="$redis_url" \
         -n "$AP_NS" --dry-run=client -o yaml | kubectl apply -f -
@@ -728,12 +738,12 @@ undeploy_ap_controller() {
 }
 
 undeploy_redis() {
-    log_info "Uninstalling Redis (release: $REDIS_RELEASE_NAME)..."
+    log_info "Uninstalling message queue backend (release: $REDIS_RELEASE_NAME)..."
 
     helm uninstall "$REDIS_RELEASE_NAME" -n $REDIS_NS 2>/dev/null || \
-        log_warning "Redis not found or already uninstalled"
+        log_warning "Message queue backend not found or already uninstalled"
 
-    log_success "Redis uninstalled"
+    log_success "Message queue backend uninstalled"
 }
 
 cleanup() {
@@ -885,11 +895,11 @@ main() {
     # Create namespaces
     create_namespaces
 
-    # Deploy Redis
+    # Deploy message queue backend (Redis/Valkey)
     if [ "$DEPLOY_REDIS" = "true" ]; then
         deploy_redis
     else
-        log_info "Skipping Redis deployment (DEPLOY_REDIS=false)"
+        log_info "Skipping message queue deployment (DEPLOY_REDIS=false)"
     fi
 
 

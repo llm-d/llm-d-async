@@ -59,6 +59,7 @@ var (
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/async-processor:e2e-test", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "registry.k8s.io/gateway-api-inference-extension/epp:v1.5.0", ginkgo.GinkgoLogr)
 	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0", ginkgo.GinkgoLogr)
+	redisImage       = env.GetEnvString("REDIS_IMAGE", "valkey/valkey:8-alpine", ginkgo.GinkgoLogr)
 	gaieRoot         = os.Getenv("GAIE_ROOT")
 	simRoot          = os.Getenv("SIM_ROOT")
 
@@ -222,8 +223,8 @@ func setupK8sCluster() {
 	kindLoadImage(eppImage)
 	kindLoadImage(simImage)
 
-	pullIfMissing("redis:7-alpine")
-	kindLoadImage("redis:7-alpine")
+	pullIfMissing(redisImage)
+	kindLoadImage(redisImage)
 
 	pullIfMissing("docker.io/envoyproxy/envoy:distroless-v1.33.2")
 	kindLoadImage("docker.io/envoyproxy/envoy:distroless-v1.33.2")
@@ -259,7 +260,19 @@ func kindLoadImage(image string) {
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 	} else {
-		command := exec.Command("kind", "load", "docker-image", image, "--name", kindClusterName)
+		// Pipe through ctr import WITHOUT --all-platforms. Kind's built-in
+		// "kind load docker-image" passes --all-platforms to ctr, which
+		// fails for multi-arch images when only one platform's layers are
+		// present locally (e.g. arm64-only pull on Apple Silicon).
+		//
+		// This applies to ALL images loaded into the cluster (not just the
+		// MQ image). It assumes a single-node Kind cluster with the default
+		// control-plane node name and overlayfs snapshotter.
+		node := kindClusterName + "-control-plane"
+		shell := fmt.Sprintf(
+			"docker save %s | docker exec -i %s ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -",
+			image, node)
+		command := exec.Command("bash", "-c", shell)
 		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
@@ -307,7 +320,7 @@ func applyManifests() {
 	}
 
 	ginkgo.By("Applying Redis manifest")
-	kubectlApplyFile(redisManifest, nil)
+	kubectlApplyFile(redisManifest, map[string]string{"${REDIS_IMAGE}": redisImage})
 
 	ginkgo.By("Applying sim manifest")
 	kubectlApplyFile(simManifest, nil)

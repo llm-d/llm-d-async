@@ -115,11 +115,22 @@ kubectl run --rm -i prom-check --image=curlimages/curl --restart=Never -n ${NAME
 
 Expected: `inference_pool_ready_pods{name="optimized-baseline"} = 1`
 
-## Step 8: Install Redis
+## Step 8: Install Redis (or Valkey)
+
+[Valkey](https://valkey.io/) is a BSD-licensed, Redis-compatible alternative that works as a drop-in replacement. All `redis.*` flags and configurations work unchanged with Valkey.
+
+**Option A — Redis:**
 
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm install redis bitnami/redis -n redis --create-namespace --set auth.enabled=false
+```
+
+**Option B — Valkey:**
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled=false
 ```
 
 ## Step 9: Deploy Async Processor with dispatch budget gate

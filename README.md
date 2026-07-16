@@ -32,6 +32,7 @@ The architecture adheres to the following core principles:
   - [When to Use](#when-to-use)
   - [Design Principles](#design-principles)
   - [Table of Contents](#table-of-contents)
+  - [Backend Compatibility](#backend-compatibility)
   - [Deployment](#deployment)
   - [Command line parameters](#command-line-parameters)
   - [Dispatch Gates](#dispatch-gates)
@@ -56,6 +57,14 @@ The architecture adheres to the following core principles:
       - [GCP PubSub Command line parameters](#gcp-pubsub-command-line-parameters)
       - [Multiple Topics Configuration File Syntax](#multiple-topics-configuration-file-syntax)
   - [Development](#development)
+
+## Backend Compatibility
+
+The Async Processor uses the Redis wire protocol for its message queue implementations (`redis-sortedset`, `redis-pubsub`) and dispatch gates (`redis`, `redis-quota`). Redis-protocol-compatible backends such as [Valkey](https://valkey.io/) can be used with the existing Redis configuration surface.
+
+All `--redis.*` CLI flags, Helm values, and environment variables (e.g. `REDIS_URL`) work unchanged with Valkey — point them at your Valkey endpoint the same way you would with Redis.
+
+> **Note:** CLI flags and Helm values retain the `redis.*` prefix because it refers to the wire protocol, not a specific product.
 
 ## Deployment
 
@@ -601,7 +610,7 @@ A persisted implementation based on Redis SortedSets.
 ![Async Processor - Redis Sorted Set architecture](/docs/images/redis_sortedset_architecture.png "AP - Redis SortedSet")
 
 #### Redis Sorted Set Command line parameters
-- `redis.url`: Redis URL (e.g. `redis://user:pass@host:port/db` or `rediss://...` for TLS). Can also be set via `REDIS_URL` env var.
+- `redis.url`: Redis/Valkey URL (e.g. `redis://user:pass@host:port/db` or `rediss://...` for TLS). Supports Redis-protocol-compatible backends such as Valkey. Can also be set via `REDIS_URL` env var.
 - `redis.ss.igw-base-url`: Base URL of the IGW (e.g. https://localhost:30800).<br> Mutually exclusive with `redis.ss.queues-config-file` flag.
 - `redis.ss.request-path-url`: Request path url (e.g.: "/v1/completions"). <br> Mutually exclusive with `redis.ss.queues-config-file` flag.")
 - `redis.ss.inference-objective`: InferenceObjective to use for requests (set as the HTTP header x-gateway-inference-objective if not empty).  <br> Mutually exclusive with `redis.ss.queues-config-file` flag.
@@ -629,7 +638,7 @@ An example implementation based on Redis channels is provided.
 
 #### Redis Channels Command line parameters
 
-- `redis.url`: Redis URL (e.g. `redis://user:pass@host:port/db` or `rediss://...` for TLS). Can also be set via `REDIS_URL` env var.
+- `redis.url`: Redis/Valkey URL (e.g. `redis://user:pass@host:port/db` or `rediss://...` for TLS). Supports Redis-protocol-compatible backends such as Valkey. Can also be set via `REDIS_URL` env var.
 - `redis.igw-base-url`: Base URL of the IGW (e.g. https://localhost:30800).<br> Mutually exclusive with `redis.queues-config-file` flag.
 - `redis.request-path-url`: Request path url (e.g.: "/v1/completions"). <br> Mutually exclusive with `redis.queues-config-file` flag.")
 - `redis.inference-objective`: InferenceObjective to use for requests (set as the HTTP header x-gateway-inference-objective if not empty).  <br> Mutually exclusive with `redis.queues-config-file` flag.

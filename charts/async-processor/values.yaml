@@ -78,8 +78,8 @@ ap:
     # Sampling ratio (0.0 to 1.0), used when sampler is "*traceidratio".
     # 1.0 = 100% (dev), 0.1 = 10% (production).
     samplerArg: "1.0"
-    # Enable per-command Redis tracing spans. Can produce high span volume —
-    # leave disabled unless actively debugging Redis.
+    # Enable per-command Redis/Valkey tracing spans. Can produce high span volume —
+    # leave disabled unless actively debugging Redis/Valkey.
     redisTracing: false
   health:
     port: 8081
@@ -138,6 +138,8 @@ ap:
     keyKey: ""
   redis:
     enabled: false
+    # Compatible with any Redis-protocol server including Valkey.
+    # All redis.* fields work unchanged when pointed at a Valkey endpoint.
     # Option 1: provide the URL directly — chart creates the Secret automatically.
     # WARNING: Helm values are retrievable via `helm get values` and may expose credentials.
     # For production or credentialed URLs, prefer Option 2 (secretName/secretKey).

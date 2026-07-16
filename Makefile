@@ -163,6 +163,7 @@ undeploy-ap-on-k8s:
 #   AP_IMAGE         — async-processor image tag        (default: $(IMAGE_TAG_BASE)/async-processor:e2e-test)
 #   EPP_IMAGE        — EPP image tag                    (default: registry.k8s.io/.../epp:v1.5.0)
 #   SIM_IMAGE        — inference-sim image tag          (default: ghcr.io/llm-d/llm-d-inference-sim:v0.0.0-test)
+#   REDIS_IMAGE      — Redis/Valkey image for E2E MQ    (default: valkey/valkey:8-alpine)
 #   CONTAINER_TOOL   — container runtime                (default: docker)
 #   E2E_SKIP_CLEANUP — set "true" to keep the Kind cluster after tests
 #
