@@ -10,8 +10,6 @@ require github.com/llm-d/llm-d-async/pipeline v0.7.4
 
 replace github.com/llm-d/llm-d-async/api => ./api
 
-replace github.com/llm-d/llm-d-async/producer => ./producer
-
 replace github.com/llm-d/llm-d-async/pipeline => ./pipeline
 
 require (
