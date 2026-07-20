@@ -40,7 +40,7 @@ linters:
         linters: [gochecknoglobals]
       - path: pkg/pubsub/pubsubimpl\.go
         linters: [gochecknoglobals]
-      - path: pkg/redis/redisimpl\.go
+      - path: pkg/redis/(redisimpl|sortedset_impl)\.go
         linters: [gochecknoglobals]
       - path: pkg/server/(options|runner)\.go
         linters: [gochecknoglobals]
