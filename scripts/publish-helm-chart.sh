@@ -11,7 +11,7 @@
 #
 # Requires: helm, yq (mikefarah). Run after make package-release so release/ exists.
 
-## Copied from https://github.com/llm-d-incubation/batch-gateway
+## Copied from https://github.com/llm-d/llm-d-batch-gateway
 
 
 set -euo pipefail

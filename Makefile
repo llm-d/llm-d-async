@@ -400,7 +400,7 @@ set-version:
 	  fi; \
 	done
 
-## Copied from https://github.com/llm-d-incubation/batch-gateway
+## Copied from https://github.com/llm-d/llm-d-batch-gateway
 ## publish-helm-chart: Patch chart for VERSION, package, append chart to SHA256SUMS, push to oci://ghcr.io/llm-d/charts (requires VERSION, yq, helm; GITHUB_TOKEN, GITHUB_ACTOR for push).
 .PHONY: publish-helm-chart
 publish-helm-chart:

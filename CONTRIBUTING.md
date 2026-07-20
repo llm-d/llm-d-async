@@ -153,7 +153,7 @@ keeps this conflict-free.
    ```markdown
    ---
    pr: 123
-   url: https://github.com/llm-d-incubation/llm-d-async/pull/123
+   url: https://github.com/llm-d/llm-d-async/pull/123
    author: your-handle
    date: 2026-07-09
    ---

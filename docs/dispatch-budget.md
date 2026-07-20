@@ -1,20 +1,20 @@
 # Dispatch Budget
 
 Related:
-- [Batch Dispatcher: Architecture](https://github.com/llm-d-incubation/batch-gateway/blob/main/docs/design/batch-dispatcher.md) (batch-gateway)
+- [Batch Dispatcher: Architecture](https://github.com/llm-d/llm-d-batch-gateway/blob/main/docs/design/batch-dispatcher.md) (batch-gateway)
 - [\[Public Doc\] Serving Online Batch via Inference Gateway](https://docs.google.com/document/d/1notkq9s0qOmWmUNonZ8CfI-5jtGtHA4PGMI-xz8sGRE/edit?tab=t.0#heading=h.i76kzr3j3swj)
 - [\[PUBLIC\] EPP Flow Controller for Priority, Fairness, and Queuing](https://docs.google.com/document/d/1VZL7opFWuwgWquvgiOzLlXAJ633qZ9U-A0ZixGjBgaI/edit?tab=t.0#heading=h.hfyow92z2d0t)
 - [\[PUBLIC\] Improved Flow Control Request Management](https://docs.google.com/document/d/1JxzJc8gNv2wKK5-a8ohb0btn78ymVKw9XMIb4-S-ncA/edit?tab=t.0#heading=h.rutawybt03nl)
 - [https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/)
 
 
-The **Async Processor** ([sometimes also called "Batch Dispatcher"](https://github.com/llm-d-incubation/batch-gateway/blob/main/docs/design/batch-dispatcher.md)) pulls requests from the Message Queue and decides whether to forward them to the IGW based on a **`DispatchGate`** — a pluggable policy component that returns a budget value in $[0, 1]$ representing current system capacity. When the gate is open, a proportional number of requests are forwarded; otherwise the Async Processor waits until the gate opens again.
+The **Async Processor** ([sometimes also called "Batch Dispatcher"](https://github.com/llm-d/llm-d-batch-gateway/blob/main/docs/design/batch-dispatcher.md)) pulls requests from the Message Queue and decides whether to forward them to `llm-d-router` (or the IGW) based on a **`DispatchGate`** — a pluggable policy component that returns a budget value in $[0, 1]$ representing current system capacity. When the gate is open, a proportional number of requests are forwarded; otherwise the Async Processor waits until the gate opens again.
 
-Several `DispatchGate` implementations are available (see [Dispatch Gates](https://github.com/llm-d-incubation/llm-d-async/blob/main/README.md#dispatch-gates)). This document describes the **Dispatch Budget**, a metric-based strategy for gating. Metric-based gates rely on a `MetricSource` (e.g., a PromQL query against Prometheus) to read inference pool state.
+Several `DispatchGate` implementations are available (see [Dispatch Gates](https://github.com/llm-d/llm-d-async/blob/main/README.md#dispatch-gates)). This document describes the **Dispatch Budget**, a metric-based strategy for gating. Metric-based gates rely on a `MetricSource` (e.g., a PromQL query against Prometheus) to read inference pool state.
 
 ## Dispatch Budget (`prometheus-budget`)
 
-The dispatcher computes a "**Dispatch Budget"**, to determine **the number of concurrent batch requests** allowed to enter the IGW at a given time.
+The dispatcher computes a "**Dispatch Budget"**, to determine **the number of concurrent batch requests** allowed to enter `llm-d-router` (or another inference gateway) at a given time.
 
 The **Dispatch Budget** $D$ is a measure of capacity of the gateway and the inference pool. In particular, depending on available metrics, $D$ could be:
 
@@ -71,6 +71,6 @@ $$F = 0.3, \quad B = 0.1$$
 ### Failure Modes
 
 * **Queue Consumer Failures:** If the Async Processor pod crashes, the messages remain in the persistent Message Queue (Redis/PubSub), ensuring no data loss.
-* **IGW Backpressure:** If the IGW returns an HTTP error indicating overload (e.g. HTTP 429\) despite the computed budget, then the **saturation is assumed to be close to 1**, and therefore a **dispatch budget close to 0\.** The Async Processor will not retry until a subsequent update from the metrics store will bring it back within the acceptable limits.
+* **Downstream Router/IGW Backpressure:** If `llm-d-router` (or another inference gateway) returns an HTTP error indicating overload (e.g. HTTP 429\) despite the computed budget, then the **saturation is assumed to be close to 1**, and therefore a **dispatch budget close to 0\.** The Async Processor will not retry until a subsequent update from the metrics store will bring it back within the acceptable limits.
   * This might happen if a sudden spike of traffic enters the gateway and the metrics did not update on-time.
 * **Unreadable Metrics:** In case of unreadable metrics, the Async Processor cannot take informed decisions, and therefore will assume a **dispatch budget of 0\.**
