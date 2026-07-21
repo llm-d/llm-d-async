@@ -100,8 +100,8 @@ var _ = ginkgo.Describe("OpenTelemetry tracing", ginkgo.Ordered, func() {
 
 		popResult(ctx, rdb, integrationResultQueue)
 
-		// Poll Jaeger for traces from async-processor instead of a fixed sleep
-		jaegerQueryURL := jaegerURL + "/api/traces?service=async-processor&limit=5&lookback=1m"
+		// Poll Jaeger for traces from llm-d-async instead of a fixed sleep
+		jaegerQueryURL := jaegerURL + "/api/traces?service=llm-d-async&limit=5&lookback=1m"
 		gomega.Eventually(func(g gomega.Gomega) {
 			resp, err := jaegerClient.Get(jaegerQueryURL)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -116,7 +116,7 @@ var _ = ginkgo.Describe("OpenTelemetry tracing", ginkgo.Ordered, func() {
 			}
 			g.Expect(json.Unmarshal(body, &result)).To(gomega.Succeed())
 			g.Expect(result.Data).NotTo(gomega.BeEmpty(),
-				"no traces from async-processor in Jaeger yet")
+				"no traces from llm-d-async in Jaeger yet")
 		}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
 
 		ginkgo.GinkgoLogr.Info("OTel export verified (no producer context)")
