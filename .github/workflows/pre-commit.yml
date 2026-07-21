@@ -27,6 +27,14 @@ jobs:
 
       - name: Install Helm
         uses: azure/setup-helm@v5
+        with:
+          # Pin Helm for a deterministic install. Unpinned, azure/setup-helm
+          # fetches "latest" and, on a failed fetch, silently falls back to
+          # v3.18.4 (Helm 3) -- which breaks the helm-unittest step below: Helm 3
+          # has no `helm plugin install --verify` flag, while Helm 4 defaults to
+          # verify-on and needs `--verify=false` for the unsigned plugin source.
+          # Pin to a known-good Helm 4 release matching the --verify=false usage.
+          version: v4.2.3
 
       - name: Install pre-commit tools
         run: make install-pre-commit-tools
