@@ -495,6 +495,59 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 	}
 }
 
+// TestSortedSetFlow_RetryReleasesReservation is a regression test for #311: a
+// retried request returns to the queue and is re-gated (re-reserved) on its next
+// dispatch, so the retry path must release its current queue-gate reservation.
+// Before the fix, only resultWorker released reservations, so every retry leaked
+// one — inFlight ratcheted up until Budget() hit 0 and the queue wedged.
+func TestSortedSetFlow_RetryReleasesReservation(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	const reqID = "retry-release-1"
+	queue := "retry-release-queue"
+
+	flow := &RedisSortedSetFlow{
+		rdb:          rdb,
+		retryChannel: make(chan pipeline.RetryMessage, 1),
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+	}
+
+	// Simulate a dispatched request holding a gate reservation (as the dequeue
+	// loop stores after gate.Apply).
+	releasedCh := make(chan struct{}, 1)
+	flow.activeReleases.Store(reqID, []pipeline.GateReleaseFunc{
+		func() { releasedCh <- struct{}{} },
+	})
+
+	go flow.retryWorker(ctx)
+
+	flow.retryChannel <- pipeline.RetryMessage{
+		EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
+			InternalRequest: api.NewInternalRequest(
+				api.InternalRouting{RetryCount: 1, RequestQueueName: queue},
+				&api.RequestMessage{ID: reqID, Created: time.Now().Unix(), Deadline: 9999999999},
+			),
+		},
+		BackoffDurationSeconds: 0,
+	}
+
+	select {
+	case <-releasedCh:
+		// Reservation released on the retry path — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry did not release the queue-gate reservation (#311 leak)")
+	}
+
+	if _, held := flow.activeReleases.Load(reqID); held {
+		t.Error("reservation still present in activeReleases after retry")
+	}
+}
+
 func TestSortedSetFlow_ResultFIFO(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

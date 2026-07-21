@@ -524,7 +524,13 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 
 		if len(releases) > 0 {
-			r.activeReleases.Store(rview.ReqID(), releases)
+			// Defensive: never orphan a lingering reservation for this id — release
+			// any prior closure instead of silently overwriting it (see #311).
+			if prev, loaded := r.activeReleases.Swap(rview.ReqID(), releases); loaded {
+				if rels, ok := prev.([]pipeline.GateReleaseFunc); ok {
+					pipeline.ReleaseGateReleases(rels)
+				}
+			}
 		}
 
 		// Stamp ingestion time as the message enters the in-process buffer so the
@@ -572,6 +578,23 @@ func (r *RedisSortedSetFlow) parseMessage(z redis.Z, logger logr.Logger) (*api.I
 func (r *RedisSortedSetFlow) retryWorker(ctx context.Context) {
 	processMsg := func(processCtx context.Context, msg pipeline.RetryMessage) {
 		batch := drainBatch(msg, r.retryChannel, maxBatchSize)
+		// #311: a retried request returns to the queue and is re-gated (and thus
+		// re-reserved) on its next dispatch, so its current gate reservation must
+		// be released here — otherwise inFlight ratchets up on every retry until
+		// Budget() reaches 0 and the queue stops dispatching entirely. Release
+		// BEFORE re-enqueue: a re-dispatch can only occur after flushRetryBatch's
+		// ZAdd, so releasing first prevents the reservation from being overwritten
+		// and orphaned.
+		for _, m := range batch {
+			if m.InternalRequest == nil || m.PublicRequest == nil {
+				continue
+			}
+			if val, ok := r.activeReleases.LoadAndDelete(m.PublicRequest.ReqID()); ok {
+				if rels, ok := val.([]pipeline.GateReleaseFunc); ok {
+					pipeline.ReleaseGateReleases(rels)
+				}
+			}
+		}
 		r.flushRetryBatch(processCtx, batch)
 	}
 
