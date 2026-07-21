@@ -17,9 +17,9 @@
 set -euo pipefail
 
 VERSION="${VERSION:?VERSION is required (e.g. v1.0.0)}"
-CHART_VERSION="${VERSION#v}"
+IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
 export VERSION
-export CHART_VERSION
+export IMAGE_TAG
 
 HELM_OCI_REGISTRY='oci://ghcr.io/llm-d/charts'
 
@@ -36,19 +36,16 @@ command -v helm >/dev/null 2>&1 || {
   exit 1
 }
 
-yq -i '.ap.image.tag = strenv(VERSION)' charts/llm-d-async/values.yaml
-# Chart version must be bare SemVer (OCI/Helm requirement), so it uses the
-# v-stripped CHART_VERSION. appVersion keeps the leading "v" to match the
-# published image tag (images are tagged with the git tag verbatim, e.g.
-# v0.7.1). This makes the recommended empty `ap.image.tag` default — which
-# falls back to .Chart.AppVersion — resolve to a tag that actually exists.
-yq -i '.version = strenv(CHART_VERSION) | .appVersion = strenv(VERSION)' charts/llm-d-async/Chart.yaml
+yq -i '.ap.image.tag = strenv(IMAGE_TAG)' charts/llm-d-async/values.yaml
+# Chart version matches VERSION directly, preserving leading "v" if present (following the llm-d-router pattern).
+# appVersion matches the image tag (IMAGE_TAG) so that any fallback to .Chart.AppVersion resolves to a container image tag that actually exists.
+yq -i '.version = strenv(VERSION) | .appVersion = strenv(IMAGE_TAG)' charts/llm-d-async/Chart.yaml
 
 helm package charts/llm-d-async -d release/
 
-(cd release && sha256sum "llm-d-async-${CHART_VERSION}.tgz" >> SHA256SUMS && cat SHA256SUMS)
+(cd release && sha256sum "llm-d-async-${VERSION}.tgz" >> SHA256SUMS && cat SHA256SUMS)
 
 printf '%s' "${GITHUB_TOKEN}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-helm push "release/llm-d-async-${CHART_VERSION}.tgz" "${HELM_OCI_REGISTRY}"
+helm push "release/llm-d-async-${VERSION}.tgz" "${HELM_OCI_REGISTRY}"
 
-echo "Helm chart published: ${HELM_OCI_REGISTRY}/llm-d-async:${CHART_VERSION}"
+echo "Helm chart published: ${HELM_OCI_REGISTRY}/llm-d-async:${VERSION}"

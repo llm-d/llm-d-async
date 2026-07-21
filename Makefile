@@ -409,6 +409,7 @@ publish-helm-chart:
 	  echo "VERSION is required (e.g. VERSION=v1.0.0 make publish-helm-chart)"; exit 1; \
 	fi
 	@export VERSION="$(VERSION)"; \
+	export IMAGE_TAG="$(IMAGE_TAG)"; \
 	export GITHUB_TOKEN="$(GITHUB_TOKEN)"; \
 	export GITHUB_ACTOR="$(GITHUB_ACTOR)"; \
 	./scripts/publish-helm-chart.sh
