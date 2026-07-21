@@ -90,18 +90,18 @@ help: ## Display this help.
 fmt: ## Run go fmt against root, api, and producer modules.
 	go fmt ./...
 	cd api && go fmt ./...
-	cd producer && go fmt ./...
+	cd producer && GOWORK=off go fmt ./...
 
 .PHONY: vet
 vet: ## Run go vet against root, api, and producer modules.
 	go vet ./...
 	cd api && go vet ./...
-	cd producer && go vet ./...
+	cd producer && GOWORK=off go vet ./...
 
 .PHONY: test
 test: fmt vet setup-envtest ## Run tests (root module and producer submodule).
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
-	cd producer && go test ./... -coverprofile=cover-producer.out
+	cd producer && GOWORK=off go test ./... -coverprofile=cover-producer.out
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
@@ -388,7 +388,7 @@ set-version:
 	@echo "Running go mod tidy..."
 	@go mod tidy
 	@for d in $(SUBMODULES); do \
-	  if [ -f "$$d/go.mod" ]; then (cd "$$d" && go mod tidy); fi; \
+	  if [ -f "$$d/go.mod" ]; then (cd "$$d" && GOWORK=off go mod tidy); fi; \
 	done
 	@echo "Updated cross-module versions:"
 	@printf "  %-20s %-12s %s\n" "SOURCE" "REQUIRES" "VERSION"
