@@ -40,7 +40,9 @@ spec:
           type: RuntimeDefault
       containers:
       - command:
-        - /llm-d-async
+        # Must match the binary produced by the Dockerfile (ENTRYPOINT /async-processor);
+        # the binary name is intentionally not renamed by the chart rename.
+        - /async-processor
         args:
           {{- if .Values.ap.redis.enabled }}
           {{- if eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset" }}
