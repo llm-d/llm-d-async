@@ -13,7 +13,7 @@ import (
 // endpoint directly (no Prometheus or EPP needed):
 //
 //	setSimWaitingRequests → sim reports vllm:num_requests_waiting on /metrics
-//	  → async-processor scrapes /metrics, computes saturation, gate opens/closes
+//	  → llm-d-async scrapes /metrics, computes saturation, gate opens/closes
 var _ = ginkgo.Describe("Endpoint Scrape Dispatch Gate E2E", ginkgo.Ordered, func() {
 	var ctx context.Context
 

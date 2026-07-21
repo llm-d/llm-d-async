@@ -175,7 +175,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 		ginkgo.DeferCleanup(func() {
 			setEnvoyFaultDelay(envoyAdminURL, 0)
 			cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
-				"-n", nsName, "scale", "deployment/integration-async-processor",
+				"-n", nsName, "scale", "deployment/integration-llm-d-async",
 				"--replicas=1", "--timeout=60s")
 			session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -183,7 +183,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 
 			cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 				"-n", nsName, "rollout", "status",
-				"deployment/integration-async-processor", "--timeout=120s")
+				"deployment/integration-llm-d-async", "--timeout=120s")
 			session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 			gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
@@ -202,7 +202,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 
 		// Scale the deployment to 0 to trigger graceful shutdown.
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
-			"-n", nsName, "scale", "deployment/integration-async-processor",
+			"-n", nsName, "scale", "deployment/integration-llm-d-async",
 			"--replicas=0", "--timeout=60s")
 		session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -240,7 +240,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 		ginkgo.DeferCleanup(func() {
 			setEnvoyFaultDelay(envoyAdminURL, 0)
 			cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
-				"-n", nsName, "scale", "deployment/short-drain-async-processor",
+				"-n", nsName, "scale", "deployment/short-drain-llm-d-async",
 				"--replicas=1", "--timeout=60s")
 			session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -248,7 +248,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 
 			cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 				"-n", nsName, "rollout", "status",
-				"deployment/short-drain-async-processor", "--timeout=120s")
+				"deployment/short-drain-llm-d-async", "--timeout=120s")
 			session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 			gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
@@ -266,7 +266,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 
 		// Scale to 0 to trigger graceful shutdown.
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
-			"-n", nsName, "scale", "deployment/short-drain-async-processor",
+			"-n", nsName, "scale", "deployment/short-drain-llm-d-async",
 			"--replicas=0", "--timeout=60s")
 		session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -319,7 +319,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 		// Wait for the replacement pod to be ready.
 		cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status",
-			"deployment/integration-async-processor", "--timeout=120s")
+			"deployment/integration-llm-d-async", "--timeout=120s")
 		session, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))

@@ -185,5 +185,5 @@
   },
   "time": { "from": "now-1h", "to": "now" },
   "title": "Async Processor",
-  "uid": "async-processor"
+  "uid": "llm-d-async"
 }

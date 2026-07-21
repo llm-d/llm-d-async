@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: async-processor-composite
+  name: llm-d-async-composite
   namespace: e2e-test
   labels:
-    app: async-processor-composite
+    app: llm-d-async-composite
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: async-processor-composite
+      app: llm-d-async-composite
   template:
     metadata:
       labels:
-        app: async-processor-composite
+        app: llm-d-async-composite
     spec:
-      serviceAccountName: async-processor
+      serviceAccountName: llm-d-async
       containers:
-      - name: async-processor
+      - name: llm-d-async
         image: ${AP_IMAGE}
         imagePullPolicy: IfNotPresent
         args:

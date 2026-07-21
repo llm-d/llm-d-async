@@ -15,7 +15,7 @@ import (
 //	  → EPP scrapes sim, computes inference_extension_flow_control_pool_saturation
 //	    (saturation = Max(WaitingQueue/QueueDepthThreshold, KVCache/KVCacheThreshold))
 //	  → Prometheus scrapes EPP
-//	  → async-processor queries Prometheus, gate opens/closes
+//	  → llm-d-async queries Prometheus, gate opens/closes
 //
 // Probe requests through Envoy → EPP are needed to trigger the flow control
 // admission layer that records the saturation metric.

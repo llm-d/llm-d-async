@@ -143,7 +143,7 @@ tests:
           path: metadata.labels.grafana_dashboard
           value: "1"
       - isNotNull:
-          path: data["async-processor.json"]
+          path: data["llm-d-async.json"]
 
   - it: should use custom Grafana dashboard label
     templates:

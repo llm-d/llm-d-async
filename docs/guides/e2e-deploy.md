@@ -1,6 +1,6 @@
 # E2E Deploy: Async Processor with Dispatch Budget Gate
 
-Deploy async-processor with a `prometheus-budget` gate on a real Kubernetes cluster,
+Deploy llm-d-async with a `prometheus-budget` gate on a real Kubernetes cluster,
 backed by a real vLLM model server and the upstream llm-d stack.
 
 ## Prerequisites
@@ -136,12 +136,12 @@ helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled
 ## Step 9: Deploy Async Processor with dispatch budget gate
 
 ```bash
-helm install async-processor ${ASYNC_REPO}/charts/async-processor/ \
-    -f ${ASYNC_REPO}/docs/guides/e2e-deploy/async-processor-values.yaml \
+helm install llm-d-async ${ASYNC_REPO}/charts/llm-d-async/ \
+    -f ${ASYNC_REPO}/docs/guides/e2e-deploy/llm-d-async-values.yaml \
     -n ${NAMESPACE}
 ```
 
-The values file (`docs/guides/e2e-deploy/async-processor-values.yaml`) configures:
+The values file (`docs/guides/e2e-deploy/llm-d-async-values.yaml`) configures:
 - Image: `ghcr.io/llm-d/llm-d-async:938cd44`
 - Queue: Redis sorted-set with `redis.url` set directly (chart creates the Secret), configured via `queuesConfig`
 - Gate: `prometheus-budget` with pool=`optimized-baseline`, max_concurrency=100, baseline=0.05 (per-queue)
@@ -161,7 +161,7 @@ The values file (`docs/guides/e2e-deploy/async-processor-values.yaml`) configure
 > ```
 - `modelServerMonitor.enabled: true` — creates a PodMonitor that relabels the `inference_pool`
   pod label into vLLM metrics (required for the dispatch budget gate fallback)
-- `podMonitor.enabled: true` — creates a PodMonitor that scrapes the async-processor's own
+- `podMonitor.enabled: true` — creates a PodMonitor that scrapes the llm-d-async's own
   Prometheus metrics (retry rate, success rate, latency, etc.)
 - `prometheusRule.enabled: true` — installs alert rules for high retry rate, deadline exceeded
   rate, low success rate, and high shed rate
@@ -178,7 +178,7 @@ kubectl get pods -n ${NAMESPACE}
 
 # Async processor logs should show "using fallback metric source" (vLLM saturation),
 # NOT "all metric sources unavailable"
-kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=async-processor --tail=10
+kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=llm-d-async --tail=10
 ```
 
 ### Verify metrics pipeline
@@ -209,10 +209,10 @@ kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAM
 # Expected: value = 1
 ```
 
-### Verify async-processor monitoring
+### Verify llm-d-async monitoring
 
 Once you have sent at least one async request (see next section), verify that the
-async-processor's own metrics are being scraped and that alerts/dashboards are available:
+llm-d-async's own metrics are being scraped and that alerts/dashboards are available:
 
 ```bash
 # Async-processor metrics in Prometheus (should show request counters)
@@ -223,11 +223,11 @@ kubectl run --rm -i prom-ap --image=curlimages/curl --restart=Never -n ${NAMESPA
 
 # Verify PrometheusRule is installed
 kubectl get prometheusrules -n ${NAMESPACE}
-# Expected: async-processor rule listed
+# Expected: llm-d-async rule listed
 
 # Verify Grafana dashboard ConfigMap is present
 kubectl get configmap -n ${NAMESPACE} -l grafana_dashboard=1
-# Expected: async-processor-dashboards ConfigMap listed
+# Expected: llm-d-async-dashboards ConfigMap listed
 ```
 
 ### Test async request end-to-end
@@ -267,7 +267,7 @@ kubectl run --rm -i test-queued --image=redis --restart=Never -n ${NAMESPACE} --
 # Expected: 1
 
 # Async processor logs should show: "using fallback value" {"fallback": 0, "error": "invalid metric value: NaN"}
-kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=async-processor --tail=5
+kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=llm-d-async --tail=5
 
 # Scale back up — gate opens, queued request gets dispatched
 kubectl scale deployment vllm-qwen3-0-6b-decode -n ${NAMESPACE} --replicas=1
@@ -391,7 +391,7 @@ kubectl run --rm -i check-drained --image=redis --restart=Never -n ${NAMESPACE} 
 
 ```bash
 kubectl delete job hey-loadtest guidellm-loadtest -n ${NAMESPACE} --ignore-not-found
-helm uninstall async-processor -n ${NAMESPACE}
+helm uninstall llm-d-async -n ${NAMESPACE}
 helm uninstall redis -n redis
 kubectl delete -n ${NAMESPACE} -k ${ASYNC_REPO}/docs/guides/e2e-deploy/modelserver/
 helm uninstall ${GUIDE_NAME} -n ${NAMESPACE}

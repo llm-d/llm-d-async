@@ -22,7 +22,7 @@ var _ = ginkgo.Describe("Health Probes", func() {
 
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "port-forward",
-			"deployment/integration-async-processor",
+			"deployment/integration-llm-d-async",
 			fmt.Sprintf("%d:8081", localPort))
 		session, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())

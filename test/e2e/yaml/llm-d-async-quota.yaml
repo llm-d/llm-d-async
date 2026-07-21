@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: async-processor-quota
+  name: llm-d-async-quota
   namespace: e2e-test
   labels:
-    app: async-processor-quota
+    app: llm-d-async-quota
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: async-processor-quota
+      app: llm-d-async-quota
   template:
     metadata:
       labels:
-        app: async-processor-quota
+        app: llm-d-async-quota
     spec:
-      serviceAccountName: async-processor
+      serviceAccountName: llm-d-async
       containers:
-      - name: async-processor
+      - name: llm-d-async
         image: ${AP_IMAGE}
         imagePullPolicy: IfNotPresent
         args:

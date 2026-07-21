@@ -189,7 +189,7 @@ func queryProm(promURL, query string) float64 {
 
 // budgetPromQL is the same PromQL the budget gate's primary source uses
 // (EPP flow control queue_size). The multiplier (* 1) is max_concurrency and
-// must match the budget processor's gate-params in async-processor.yaml.
+// must match the budget processor's gate-params in llm-d-async.yaml.
 // We use max_concurrency=1 so a single queued request in EPP's admission
 // layer is enough to drive the budget to zero.
 const budgetPromQL = `1 - (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool="e2e-pool"}) / on() (inference_pool_ready_pods{name="e2e-pool"} * 1))`

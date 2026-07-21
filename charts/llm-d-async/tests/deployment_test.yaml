@@ -251,7 +251,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: OTEL_SERVICE_NAME
-            value: "async-processor"
+            value: "llm-d-async"
           any: true
 
   - it: should not inject OTel env vars when endpoint is empty
@@ -304,19 +304,19 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --pool-config-file=/etc/async-processor/config/worker-pools.json
+          content: --pool-config-file=/etc/llm-d-async/config/worker-pools.json
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: ap-config
-            mountPath: /etc/async-processor/config
+            mountPath: /etc/llm-d-async/config
             readOnly: true
       - contains:
           path: spec.template.spec.volumes
           content:
             name: ap-config
             configMap:
-              name: RELEASE-NAME-async-processor-config
+              name: RELEASE-NAME-llm-d-async-config
 
   - it: should mount config volume and pass pubsub.topics-config-file when GCP PubSub topicsConfig is set
     set:
@@ -329,19 +329,19 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --pubsub.topics-config-file=/etc/async-processor/config/pubsub-topics.json
+          content: --pubsub.topics-config-file=/etc/llm-d-async/config/pubsub-topics.json
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: ap-config
-            mountPath: /etc/async-processor/config
+            mountPath: /etc/llm-d-async/config
             readOnly: true
       - contains:
           path: spec.template.spec.volumes
           content:
             name: ap-config
             configMap:
-              name: RELEASE-NAME-async-processor-config
+              name: RELEASE-NAME-llm-d-async-config
 
   - it: should auto-select gcp-pubsub-gated when a topic declares a gate_type
     set:
@@ -404,16 +404,16 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --transform-config-file=/etc/async-processor/config/transform-config.json
+          content: --transform-config-file=/etc/llm-d-async/config/transform-config.json
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: ap-config
-            mountPath: /etc/async-processor/config
+            mountPath: /etc/llm-d-async/config
             readOnly: true
 
   - it: should not pass transform-config-file when transformConfig is empty
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].args
-          content: --transform-config-file=/etc/async-processor/config/transform-config.json
+          content: --transform-config-file=/etc/llm-d-async/config/transform-config.json
