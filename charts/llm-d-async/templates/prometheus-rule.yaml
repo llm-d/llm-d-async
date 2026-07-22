@@ -2,16 +2,16 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ include "async-processor.fullname" . }}
+  name: {{ include "llm-d-async.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "async-processor.labels" . | nindent 4 }}
+    {{- include "llm-d-async.labels" . | nindent 4 }}
     {{- with .Values.ap.prometheusRule.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   groups:
-    - name: async-processor.rules
+    - name: llm-d-async.rules
       rules:
         {{- if .Values.ap.prometheusRule.rules.highRetryRate.enabled }}
         - alert: AsyncProcessorHighRetryRate

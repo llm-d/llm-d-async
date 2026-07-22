@@ -83,7 +83,7 @@ jobs:
           kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration get pods -o wide > /tmp/e2e-artifacts/pods.txt 2>&1 || true
           kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration describe pods > /tmp/e2e-artifacts/pod-descriptions.txt 2>&1 || true
           kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration get events --sort-by='.lastTimestamp' > /tmp/e2e-artifacts/events.txt 2>&1 || true
-          kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration logs -l app.kubernetes.io/name=async-processor --tail=500 > /tmp/e2e-artifacts/processor-logs.txt 2>&1 || true
+          kubectl --kubeconfig="$KUBECONFIG" -n e2e-integration logs -l app.kubernetes.io/name=llm-d-async --tail=500 > /tmp/e2e-artifacts/processor-logs.txt 2>&1 || true
 
       - name: Upload E2E artifacts
         if: failure()

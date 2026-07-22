@@ -177,7 +177,7 @@ ap:
     #       address: "redis:6379"
     #       limit: "5"
     queuesConfig: []
-  # PodMonitor for async-processor metrics scraping.
+  # PodMonitor for llm-d-async metrics scraping.
   podMonitor:
     enabled: false
     interval: "30s"

@@ -42,8 +42,8 @@ const (
 	prometheusManifest = "./yaml/prometheus.yaml"
 	jaegerManifest     = "./yaml/jaeger.yaml"
 
-	// Helm chart and per-instance values for async-processor deployments.
-	chartPath     = "../../charts/async-processor"
+	// Helm chart and per-instance values for llm-d-async deployments.
+	chartPath     = "../../charts/llm-d-async"
 	helmValuesDir = "./helm"
 )
 
@@ -56,7 +56,7 @@ var (
 	jaegerPort     string = env.GetEnvString("E2E_INTEGRATION_JAEGER_PORT", "30494", ginkgo.GinkgoLogr)
 
 	containerRuntime = detectContainerRuntime()
-	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/async-processor:e2e-test", ginkgo.GinkgoLogr)
+	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/llm-d-async:e2e-test", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "registry.k8s.io/gateway-api-inference-extension/epp:v1.5.0", ginkgo.GinkgoLogr)
 	simImage         = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0", ginkgo.GinkgoLogr)
 	redisImage       = env.GetEnvString("REDIS_IMAGE", "valkey/valkey:8-alpine", ginkgo.GinkgoLogr)
@@ -157,7 +157,7 @@ func setupK8sCluster() {
 	checkCmd := exec.Command("kind", "get", "clusters")
 	output, err := checkCmd.Output()
 	if err == nil && strings.Contains(string(output), kindClusterName) {
-		ginkgo.By("Kind cluster " + kindClusterName + " already exists, rebuilding and loading async-processor image")
+		ginkgo.By("Kind cluster " + kindClusterName + " already exists, rebuilding and loading llm-d-async image")
 		command := exec.Command(containerRuntime, "build", "-t", apImage, projectRoot())
 		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -193,7 +193,7 @@ func setupK8sCluster() {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 
-	ginkgo.By("Building async-processor image")
+	ginkgo.By("Building llm-d-async image")
 	command = exec.Command(containerRuntime, "build", "-t", apImage, projectRoot())
 	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -346,7 +346,7 @@ func applyManifests() {
 	// Patch Envoy service to NodePort so test code can reach it for probe requests.
 	kubectlPatchEnvoyNodePort()
 
-	ginkgo.By("Installing async-processor helm releases")
+	ginkgo.By("Installing llm-d-async helm releases")
 	imageRepo, imageTag := splitImage(apImage)
 	for _, r := range []struct{ name, values string }{
 		{"integration", helmValuesDir + "/integration.yaml"},
@@ -581,20 +581,20 @@ func doRedeployEPPWithFlowControl() {
 	// Envoy/EPP. Without this, processors that poll during the EPP restart
 	// window can get 404s from Envoy that are classified as non-retryable.
 	for _, deploy := range []string{
-		"integration-async-processor",
-		"saturation-async-processor",
-		"budget-async-processor",
-		"redis-gate-async-processor",
-		"quota-async-processor",
-		"composite-async-processor",
-		"prometheus-query-async-processor",
-		"endpoint-scrape-async-processor",
-		"short-drain-async-processor",
-		"multitenant-async-processor",
-		"tier-priority-async-processor",
-		"mt-merge-async-processor",
-		"benchmark-async-processor",
-		"benchmark-pool-gate-async-processor",
+		"integration-llm-d-async",
+		"saturation-llm-d-async",
+		"budget-llm-d-async",
+		"redis-gate-llm-d-async",
+		"quota-llm-d-async",
+		"composite-llm-d-async",
+		"prometheus-query-llm-d-async",
+		"endpoint-scrape-llm-d-async",
+		"short-drain-llm-d-async",
+		"multitenant-llm-d-async",
+		"tier-priority-llm-d-async",
+		"mt-merge-llm-d-async",
+		"benchmark-llm-d-async",
+		"benchmark-pool-gate-llm-d-async",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
@@ -603,20 +603,20 @@ func doRedeployEPPWithFlowControl() {
 		gomega.Eventually(s).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 	}
 	for _, deploy := range []string{
-		"integration-async-processor",
-		"saturation-async-processor",
-		"budget-async-processor",
-		"redis-gate-async-processor",
-		"quota-async-processor",
-		"composite-async-processor",
-		"prometheus-query-async-processor",
-		"endpoint-scrape-async-processor",
-		"short-drain-async-processor",
-		"multitenant-async-processor",
-		"tier-priority-async-processor",
-		"mt-merge-async-processor",
-		"benchmark-async-processor",
-		"benchmark-pool-gate-async-processor",
+		"integration-llm-d-async",
+		"saturation-llm-d-async",
+		"budget-llm-d-async",
+		"redis-gate-llm-d-async",
+		"quota-llm-d-async",
+		"composite-llm-d-async",
+		"prometheus-query-llm-d-async",
+		"endpoint-scrape-llm-d-async",
+		"short-drain-llm-d-async",
+		"multitenant-llm-d-async",
+		"tier-priority-llm-d-async",
+		"mt-merge-llm-d-async",
+		"benchmark-llm-d-async",
+		"benchmark-pool-gate-llm-d-async",
 	} {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")

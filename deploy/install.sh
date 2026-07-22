@@ -31,15 +31,15 @@ REDIS_NS=${REDIS_NS:-"redis"}
 PROMETHEUS_SECRET_NS=${PROMETHEUS_SECRET_NS:-$MONITORING_NAMESPACE}
 
 # AP Configuration
-AP_IMAGE_REPO=${AP_IMAGE_REPO:-"ghcr.io/llm-d/async-processor"}
+AP_IMAGE_REPO=${AP_IMAGE_REPO:-"ghcr.io/llm-d/llm-d-async"}
 AP_IMAGE_TAG=${AP_IMAGE_TAG:-"latest"}
 AP_IMAGE_PULL_POLICY=${AP_IMAGE_PULL_POLICY:-"Never"}
-AP_RELEASE_NAME=${AP_RELEASE_NAME:-"async-processor"}
+AP_RELEASE_NAME=${AP_RELEASE_NAME:-"llm-d-async"}
 VLLM_SVC_ENABLED=${VLLM_SVC_ENABLED:-true}
 VLLM_SVC_NODEPORT=${VLLM_SVC_NODEPORT:-30000}
 SKIP_TLS_VERIFY=${SKIP_TLS_VERIFY:-"false"}
 AP_LOG_LEVEL=${AP_LOG_LEVEL:-"info"}
-VALUES_FILE=${VALUES_FILE:-"$AP_PROJECT/charts/async-processor/values.yaml"}
+VALUES_FILE=${VALUES_FILE:-"$AP_PROJECT/charts/llm-d-async/values.yaml"}
 
 # Redis / Valkey Configuration
 # REDIS_CHART selects the Helm chart for the message queue backend.
@@ -149,7 +149,7 @@ Examples:
   $(basename "$0")
 
   # Deploy with custom AP image
-  IMG=<your_registry>/async-processor:tag $(basename "$0")
+  IMG=<your_registry>/llm-d-async:tag $(basename "$0")
 
   # Deploy with custom model and accelerator
   $(basename "$0") -m unsloth/Meta-Llama-3.1-8B -a A100
@@ -403,7 +403,7 @@ deploy_ap_controller() {
     # Deploy AP using Helm chart
     log_info "Installing Async-Processor via Helm chart"
 
-    helm upgrade -i "$AP_RELEASE_NAME" ${AP_PROJECT}/charts/async-processor \
+    helm upgrade -i "$AP_RELEASE_NAME" ${AP_PROJECT}/charts/llm-d-async \
         -n $AP_NS \
         --values $VALUES_FILE \
         --set ap.image.repository=$AP_IMAGE_REPO \
@@ -418,7 +418,7 @@ deploy_ap_controller() {
 
     # Wait for AP to be ready
     log_info "Waiting for AP to be ready..."
-    kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=async-processor -n $AP_NS --timeout=30s || \
+    kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=llm-d-async -n $AP_NS --timeout=30s || \
         log_warning "AP is not ready yet - check 'kubectl get pods -n $AP_NS'"
 
     log_success "AP deployment complete"
@@ -438,7 +438,7 @@ deploy_redis() {
       *)        svc="${REDIS_RELEASE_NAME}-master"  ;;
     esac
 
-    # Create a secret with the Redis-protocol URL in the AP namespace so the async-processor can connect
+    # Create a secret with the Redis-protocol URL in the AP namespace so the llm-d-async can connect
     local redis_url="redis://${svc}.${REDIS_NS}.svc.cluster.local:6379"
     log_info "Creating message queue URL secret in $AP_NS namespace"
     kubectl create secret generic redis-creds \
@@ -544,7 +544,7 @@ verify_deployment() {
     # Check AP pods
     log_info "Checking AP pods..."
     sleep 10
-    if kubectl get pods -n $AP_NS -l app.kubernetes.io/name=async-processor 2>/dev/null | grep -q Running; then
+    if kubectl get pods -n $AP_NS -l app.kubernetes.io/name=llm-d-async 2>/dev/null | grep -q Running; then
         log_success "AP is running"
     else
         log_warning "AP may still be starting"
@@ -633,7 +633,7 @@ print_summary() {
     echo "   kubectl describe variantautoscaling $LLM_D_MODELSERVICE_NAME-decode -n $LLMD_NS"
     echo ""
     echo "3. View AP logs:"
-    echo "   kubectl logs -n $AP_NS -l app.kubernetes.io/name=async-processor -f"
+    echo "   kubectl logs -n $AP_NS -l app.kubernetes.io/name=llm-d-async -f"
     echo ""
     echo "4. Check external metrics API:"
     echo "   kubectl get --raw \"/apis/external.metrics.k8s.io/v1beta1/namespaces/$LLMD_NS/inferno_desired_replicas\" | jq"
@@ -658,7 +658,7 @@ print_summary() {
     echo "================"
     echo ""
     echo "• Check AP controller logs:"
-    echo "  kubectl logs -n $AP_NS -l app.kubernetes.io/name=async-processor"
+    echo "  kubectl logs -n $AP_NS -l app.kubernetes.io/name=llm-d-async"
     echo ""
     echo "• Check all pods in llm-d namespace:"
     echo "  kubectl get pods -n $LLMD_NS"

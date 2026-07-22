@@ -20,19 +20,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "async-processor.fullname" . }}
+  name: {{ include "llm-d-async.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "async-processor.labels" . | nindent 4 }}
+    {{- include "llm-d-async.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "async-processor.selectorLabels" . | nindent 6 }}
+      {{- include "llm-d-async.selectorLabels" . | nindent 6 }}
   replicas: 1
   template:
     metadata:
       labels:
-        {{- include "async-processor.selectorLabels" . | nindent 8 }}
+        {{- include "llm-d-async.selectorLabels" . | nindent 8 }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -40,7 +40,8 @@ spec:
           type: RuntimeDefault
       containers:
       - command:
-        - /async-processor
+        # Must match the binary produced by the Dockerfile (ENTRYPOINT /llm-d-async).
+        - /llm-d-async
         args:
           {{- if .Values.ap.redis.enabled }}
           {{- if eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset" }}
@@ -59,7 +60,7 @@ spec:
           - "{{ .Values.ap.redis.requestQueueName | default "request-sortedset" }}"
           {{- if .Values.ap.redis.gateType }}
           - --redis.ss.gate-type={{ .Values.ap.redis.gateType }}
-          - --redis.ss.gate-params={{ include "async-processor.gateParamsJson" . }}
+          - --redis.ss.gate-params={{ include "llm-d-async.gateParamsJson" . }}
           {{- end }}
           {{- end }}
           - --redis.ss.result-queue-name
@@ -97,7 +98,7 @@ spec:
           {{- end }}
           - --pubsub.result-topic-id={{ .Values.ap.gcpPubSub.resultTopicId }}
           {{- if .Values.ap.gcpPubSub.topicsConfig }}
-          - --pubsub.topics-config-file=/etc/async-processor/config/pubsub-topics.json
+          - --pubsub.topics-config-file=/etc/llm-d-async/config/pubsub-topics.json
           {{- else }}
           - --pubsub.igw-base-url={{ .Values.ap.igwBaseURL }}
           - --pubsub.request-subscriber-id={{ .Values.ap.gcpPubSub.requestSubscriberId }}
@@ -112,13 +113,13 @@ spec:
           - --prometheus-cache-ttl={{ .Values.ap.prometheusCacheTTL }}
           {{- end }}
           {{- if .Values.ap.workerPools }}
-          - --pool-config-file=/etc/async-processor/config/worker-pools.json
+          - --pool-config-file=/etc/llm-d-async/config/worker-pools.json
           {{- end }}
           {{- if .Values.ap.transformConfig }}
-          - --transform-config-file=/etc/async-processor/config/transform-config.json
+          - --transform-config-file=/etc/llm-d-async/config/transform-config.json
           {{- end }}
           {{- if .Values.ap.requestMergePolicyConfig }}
-          - --request-merge-policy-config=/etc/async-processor/config/request-merge-policy.json
+          - --request-merge-policy-config=/etc/llm-d-async/config/request-merge-policy.json
           {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 64 }}
           - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
@@ -161,7 +162,7 @@ spec:
           - name: OTEL_TRACES_SAMPLER_ARG
             value: {{ .Values.ap.otel.samplerArg | quote }}
           - name: OTEL_SERVICE_NAME
-            value: "async-processor"
+            value: "llm-d-async"
           - name: OTEL_RESOURCE_ATTRIBUTES
             value: "k8s.namespace.name=$(NAMESPACE),k8s.pod.name=$(POD_NAME),service.version={{ .Chart.AppVersion }}"
           {{- end }}
@@ -169,10 +170,10 @@ spec:
           - name: REDIS_URL
             valueFrom:
               secretKeyRef:
-                name: {{ include "async-processor.redisSecretName" . }}
-                key: {{ include "async-processor.redisSecretKey" . }}
+                name: {{ include "llm-d-async.redisSecretName" . }}
+                key: {{ include "llm-d-async.redisSecretKey" . }}
           {{- end }}
-        name: async-processor
+        name: llm-d-async
         ports:
           - name: metrics
             containerPort: {{ .Values.ap.metrics.port | default 9090 }}
@@ -216,7 +217,7 @@ spec:
         volumeMounts:
           {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
           - name: ap-config
-            mountPath: /etc/async-processor/config
+            mountPath: /etc/llm-d-async/config
             readOnly: true
           {{- end }}
           {{- if .Values.ap.tls.secretName }}
@@ -225,14 +226,14 @@ spec:
             readOnly: true
           {{- end }}
         {{- end }}
-      serviceAccountName: {{ include "async-processor.fullname" . }}
+      serviceAccountName: {{ include "llm-d-async.fullname" . }}
       terminationGracePeriodSeconds: 130
       {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig .Values.ap.tls.secretName }}
       volumes:
         {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
         - name: ap-config
           configMap:
-            name: {{ include "async-processor.fullname" . }}-config
+            name: {{ include "llm-d-async.fullname" . }}-config
         {{- end }}
         {{- if .Values.ap.tls.secretName }}
         - name: tls-certs

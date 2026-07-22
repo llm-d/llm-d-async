@@ -498,7 +498,7 @@ Tracing is controlled via standard OpenTelemetry environment variables. Set `OTE
 |---------------------|-------------|---------|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC collector endpoint (e.g., `http://jaeger:4317`). Empty disables tracing. | _(disabled)_ |
 | `OTEL_EXPORTER_OTLP_INSECURE` | Use plaintext gRPC connection | `true` |
-| `OTEL_SERVICE_NAME` | Service name for traces | `async-processor` |
+| `OTEL_SERVICE_NAME` | Service name for traces | `llm-d-async` |
 | `OTEL_TRACES_SAMPLER` | Sampling strategy (`always_on`, `parentbased_traceidratio`, etc.) | `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | Sampling ratio (0.0–1.0) | `1.0` |
 

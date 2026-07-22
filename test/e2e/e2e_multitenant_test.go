@@ -82,7 +82,7 @@ var _ = ginkgo.Describe("Multi-tenant Quota and Priority E2E", ginkgo.Ordered, f
 	ginkgo.It("parks the batch pool under saturation and resumes when it clears", func() {
 		// Batch is the least saturation-tolerant tier: its wait-on-refuse pool gate
 		// parks the workers (ActionWait) under load, while premium (no pool gate) is
-		// unthrottled at the async-processor. Note: the e2e drives saturation via the
+		// unthrottled at the llm-d-async. Note: the e2e drives saturation via the
 		// EPP admission metric, which also throttles real gateway traffic, so this
 		// spec asserts the batch pool-gate mechanism directly (premium-vs-batch
 		// prioritization is covered at the quota level above, with saturation low).

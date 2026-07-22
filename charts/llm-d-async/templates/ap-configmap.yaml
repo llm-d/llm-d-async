@@ -2,10 +2,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "async-processor.fullname" . }}-config
+  name: {{ include "llm-d-async.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "async-processor.labels" . | nindent 4 }}
+    {{- include "llm-d-async.labels" . | nindent 4 }}
 data:
   {{- if .Values.ap.workerPools }}
   worker-pools.json: {{ .Values.ap.workerPools | toJson | quote }}
