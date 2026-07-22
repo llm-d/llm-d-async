@@ -379,8 +379,15 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir1))
 	require.NoError(t, json.Unmarshal([]byte(members[1]), &ir2))
 
-	assert.Equal(t, alphaResultQueue, ir1.ResultQueueName)
-	assert.Equal(t, betaResultQueue, ir2.ResultQueueName)
+	// Both requests share one queue with equal deadline scores, so the ZMembers
+	// order is not deterministic. Assert routing keyed by request ID rather than
+	// by member position (which previously made this test flaky).
+	routing := map[string]string{
+		ir1.PublicRequest.ReqID(): ir1.ResultQueueName,
+		ir2.PublicRequest.ReqID(): ir2.ResultQueueName,
+	}
+	assert.Equal(t, alphaResultQueue, routing["alpha-request"])
+	assert.Equal(t, betaResultQueue, routing["beta-request"])
 
 	// Simulate worker routing results to correct tenant queues
 	result1 := api.ResultMessage{
