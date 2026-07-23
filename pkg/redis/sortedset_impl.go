@@ -21,9 +21,14 @@ import (
 
 // SortedSetQueueConfig defines a single queue entry in the sorted-set transport config.
 type SortedSetQueueConfig struct {
-	ID                 string `json:"id,omitempty"`
-	QueueName          string `json:"queue_name,omitempty"`
-	ResultQueueName    string `json:"result_queue_name,omitempty"`
+	ID              string `json:"id,omitempty"`
+	QueueName       string `json:"queue_name,omitempty"`
+	ResultQueueName string `json:"result_queue_name,omitempty"`
+	// ResultTTLSeconds, when > 0, sets an expiry on the result destination
+	// each time results are pushed. Used for per-request result keys
+	// (frontend enqueue mode) so unfetched results are cleaned up. Queues
+	// without it behave as before (no expiry).
+	ResultTTLSeconds   int64  `json:"result_ttl_seconds,omitempty"`
 	WorkerPoolID       string `json:"worker_pool_id"`
 	InferenceObjective string `json:"inference_objective"`
 	RequestPathURL     string `json:"request_path_url"`
@@ -651,14 +656,19 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 	logger := log.FromContext(ctx)
 	defaultQueue := r.defaultResultQueueName
 	queued := make(map[string][]string)
+	resultTTLs := make(map[string]time.Duration)
 	for _, result := range batch {
 		resultQueue := defaultQueue
-		if cfg, ok := r.configMap[result.Routing.QueueID]; ok && cfg.ResultQueueName != "" {
+		cfg, hasCfg := r.configMap[result.Routing.QueueID]
+		if hasCfg && cfg.ResultQueueName != "" {
 			resultQueue = cfg.ResultQueueName
 		} else if result.Routing.ResultQueueName != "" {
 			resultQueue = result.Routing.ResultQueueName
 		}
 		queued[resultQueue] = append(queued[resultQueue], r.marshalResult(result))
+		if hasCfg && cfg.ResultTTLSeconds > 0 {
+			resultTTLs[resultQueue] = time.Duration(cfg.ResultTTLSeconds) * time.Second
+		}
 	}
 
 	if err := retryRedisOp(ctx, func(ctx context.Context) error {
@@ -666,6 +676,9 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 		for queue, msgs := range queued {
 			for _, msgStr := range msgs {
 				pipe.LPush(ctx, queue, msgStr)
+			}
+			if ttl, ok := resultTTLs[queue]; ok {
+				pipe.Expire(ctx, queue, ttl)
 			}
 		}
 		_, err := pipe.Exec(ctx)
