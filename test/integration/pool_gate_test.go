@@ -4,9 +4,11 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,11 +56,11 @@ func TestPoolGating_Blocking(t *testing.T) {
 	var wg sync.WaitGroup
 	for w := 1; w <= 4; w++ {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
 			asyncworker.WorkerWithGate(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
-				client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, poolGate)
-		}()
+				client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, poolGate, workerID, 4, "test-pool")
+		}(w)
 	}
 
 	// Send 3 requests into the channel
@@ -142,11 +144,11 @@ func TestPoolGating_Timeout(t *testing.T) {
 	var wg sync.WaitGroup
 	for w := 1; w <= 2; w++ {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
 			asyncworker.WorkerWithGate(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
-				client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, poolGate)
-		}()
+				client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, poolGate, workerID, 2, "test-pool")
+		}(w)
 	}
 
 	// Request 1 takes the capacity slot
@@ -248,7 +250,7 @@ func TestPoolGating_ActionWait(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		asyncworker.WorkerWithGate(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
-			client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, gate)
+			client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, gate, 1, 1, "test-pool")
 	}()
 
 	ir := asyncapi.NewInternalRequest(
@@ -312,7 +314,7 @@ func TestPoolGating_ActionRefuse(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		asyncworker.WorkerWithGate(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
-			client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, gate)
+			client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, gate, 1, 1, "test-pool")
 	}()
 
 	ir := asyncapi.NewInternalRequest(
@@ -343,6 +345,100 @@ func TestPoolGating_ActionRefuse(t *testing.T) {
 	mu.Lock()
 	assert.Equal(t, 0, serverHitCount, "server should not be hit on Refuse")
 	mu.Unlock()
+
+	cancel()
+	wg.Wait()
+}
+
+type dynamicBudgetGate struct {
+	mu     sync.Mutex
+	budget float64
+}
+
+func (g *dynamicBudgetGate) SetBudget(b float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.budget = b
+}
+
+func (g *dynamicBudgetGate) Budget(ctx context.Context) float64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.budget
+}
+
+func (g *dynamicBudgetGate) Apply(ctx context.Context, msg *asyncapi.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	if g.Budget(ctx) <= 0 {
+		return pipeline.Wait(), nil
+	}
+	return pipeline.Continue(), nil
+}
+
+func TestPoolGating_ProportionalThrottling(t *testing.T) {
+	var activeWorkers int32
+	var maxObservedActive int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&activeWorkers, 1)
+		for {
+			oldMax := atomic.LoadInt32(&maxObservedActive)
+			if current <= oldMax || atomic.CompareAndSwapInt32(&maxObservedActive, oldMax, current) {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		atomic.AddInt32(&activeWorkers, -1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"success"}`))
+	}))
+	defer server.Close()
+
+	client := asyncworker.NewHTTPInferenceClient(server.Client())
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 20)
+	retryChannel := make(chan pipeline.RetryMessage, 20)
+	resultChannel := make(chan asyncapi.ResultMessage, 20)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	gate := &dynamicBudgetGate{budget: 0.3} // 30% of 10 workers = 3 workers allowed
+
+	const totalWorkers = 10
+	var wg sync.WaitGroup
+	for w := 1; w <= totalWorkers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			asyncworker.WorkerWithGate(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
+				client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, gate, workerID, totalWorkers, "test-pool")
+		}(w)
+	}
+
+	for i := 1; i <= 10; i++ {
+		ir := asyncapi.NewInternalRequest(
+			asyncapi.InternalRouting{RequestQueueName: "test-queue"},
+			&asyncapi.RequestMessage{
+				ID:       fmt.Sprintf("req-%d", i),
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(5 * time.Minute).Unix(),
+				Payload:  map[string]any{"model": "test"},
+			},
+		)
+		requestChannel <- pipeline.EmbelishedRequestMessage{
+			InternalRequest: ir,
+			RequestURL:      server.URL + "/v1/completions",
+		}
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	maxActive := atomic.LoadInt32(&maxObservedActive)
+	assert.LessOrEqual(t, maxActive, int32(3), "expected at most 3 active workers for 0.3 budget on pool of 10")
+	assert.Greater(t, maxActive, int32(0), "expected at least 1 active worker")
+
+	for i := 0; i < 10; i++ {
+		<-resultChannel
+	}
 
 	cancel()
 	wg.Wait()

@@ -470,7 +470,7 @@ func TestWorker_PoolGateActionWaitThrottlesCancellationChecks(t *testing.T) {
 	ctx := WithCancellationChecker(requestCtx, checker)
 	gate := &notifyingWaitGate{applied: make(chan struct{})}
 
-	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate, 1, 1, "")
 
 	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: "token-gate-wait-throttled"}, asyncapi.RequestMessage{
 		ID:       "gate-wait-throttled",
@@ -2198,7 +2198,7 @@ func TestWorker_PoolGateShutdownReenqueues(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate, 1, 1, "")
 		close(done)
 	}()
 
@@ -2246,7 +2246,7 @@ func TestWorker_PoolGateActionWaitShutdownReenqueues(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+		WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate, 1, 1, "")
 		close(done)
 	}()
 
@@ -2297,7 +2297,7 @@ func TestWorker_PoolGateActionWaitHonorsCancellation(t *testing.T) {
 	gate := &notifyingWaitGate{applied: make(chan struct{})}
 	requestToken := "token-gate-wait-cancelled"
 
-	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate, 1, 1, "")
 
 	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
 		ID:       msgID,
@@ -2355,7 +2355,7 @@ func TestWorker_RechecksCancellationAfterGateContinue(t *testing.T) {
 	}
 	requestToken := "token-gate-continue-cancelled"
 
-	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate, 1, 1, "")
 
 	requestChannel <- newEmbR(asyncapi.InternalRouting{RequestToken: requestToken}, asyncapi.RequestMessage{
 		ID:       msgID,
@@ -2488,7 +2488,7 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 		releaseCalled: &poolReleaseCalled,
 	}
 
-	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, poolGate)
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, poolGate, 1, 1, "")
 
 	ir := asyncapi.NewInternalRequest(
 		asyncapi.InternalRouting{RequestQueueName: "test-queue"},
@@ -2543,5 +2543,35 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 	}
 	if atomic.LoadInt32(&poolReleaseCalled) != 1 {
 		t.Errorf("expected pool release to be called exactly once, got %d", poolReleaseCalled)
+	}
+}
+
+func TestComputeActiveWorkers(t *testing.T) {
+	tests := []struct {
+		name         string
+		totalWorkers int
+		budget       float64
+		expected     int
+	}{
+		{"full budget 64 workers", 64, 1.0, 64},
+		{"half budget 64 workers", 64, 0.5, 32},
+		{"quarter budget 64 workers", 64, 0.25, 16},
+		{"5% budget 64 workers", 64, 0.05, 3},
+		{"tiny positive budget 64 workers", 64, 0.001, 1},
+		{"zero budget 64 workers", 64, 0.0, 1},
+		{"negative budget 64 workers", 64, -0.1, 1},
+		{"half budget 10 workers", 10, 0.5, 5},
+		{"half budget 1 worker", 1, 0.5, 1},
+		{"zero budget 1 worker", 1, 0.0, 1},
+		{"zero total workers", 0, 1.0, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeActiveWorkers(tt.totalWorkers, tt.budget)
+			if got != tt.expected {
+				t.Errorf("computeActiveWorkers(%d, %g) = %d; want %d", tt.totalWorkers, tt.budget, got, tt.expected)
+			}
+		})
 	}
 }
