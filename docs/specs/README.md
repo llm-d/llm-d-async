@@ -1,5 +1,13 @@
 # Formal specifications (TLA+)
 
+> [!WARNING]
+> **Experimental.** These TLA+ specifications are exploratory, design-time
+> verification models — **not** part of the shipped Async Processor, not built
+> or run by CI, and not guaranteed to track the implementation. They live on
+> this branch for design exploration; treat their findings as *leads to confirm
+> against the code* (and pair any fix with a regression test), not as a
+> maintained product capability.
+
 Machine-checked models of subtle concurrency in the Async Processor. These are
 *specifications*, not tests of the Go code — they model the intended algorithm so
 we can prove safety/liveness properties hold for **every** interleaving, including
