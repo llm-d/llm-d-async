@@ -55,7 +55,7 @@ func TestTierPriorityGate_Integration(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		asyncworker.WorkerWithGate(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false},
-			client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, gate)
+			client, requestChannel, retryChannel, resultChannel, 5*time.Minute, nil, gate, 1, 1, "test-pool")
 	}()
 
 	t.Run("Saturated - Interactive - Overflow => Drop with 429", func(t *testing.T) {

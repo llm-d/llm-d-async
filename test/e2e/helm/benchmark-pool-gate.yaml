@@ -7,9 +7,10 @@ ap:
   workerPools:
     - id: "benchmark-pool"
       workers: 64
-      gate_type: "wait-on-refuse"
+      gate_type: "prometheus-saturation"
       gate_params:
-        gate: '{"gate_type":"composite","gate_params":{"gates":[{"gate_type":"prometheus-saturation","gate_params":{"pool":"e2e-pool","threshold":"0.8"}},{"gate_type":"local-max-concurrency","gate_params":{"limit":50}}]}}'
+        pool: "e2e-pool"
+        threshold: "0.8"
   metrics:
     enabled: true
     port: 9090

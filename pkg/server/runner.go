@@ -156,10 +156,10 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		setupLog.Info("Spawning workers for pool", "poolID", poolID, "workers", workersCount, "hasGate", poolGate != nil)
 		for w := 1; w <= workersCount; w++ {
 			wg.Add(1)
-			go func(mergedChan chan pipeline.EmbelishedRequestMessage, poolGate pipeline.Gate) {
+			go func(workerID int, mergedChan chan pipeline.EmbelishedRequestMessage, poolGate pipeline.Gate, poolID string) {
 				defer wg.Done()
-				asyncworker.WorkerWithGate(ctx, drainCtx, flow.Characteristics(), inferenceClient, mergedChan, flow.RetryChannel(), flow.ResultChannel(), opts.Worker.RequestTimeout, transforms, poolGate)
-			}(mergedChan, poolGate)
+				asyncworker.WorkerWithGate(ctx, drainCtx, flow.Characteristics(), inferenceClient, mergedChan, flow.RetryChannel(), flow.ResultChannel(), opts.Worker.RequestTimeout, transforms, poolGate, workerID, workersCount, poolID)
+			}(w, mergedChan, poolGate, poolID)
 		}
 	}
 

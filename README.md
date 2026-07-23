@@ -36,6 +36,8 @@ The architecture adheres to the following core principles:
   - [Deployment](#deployment)
   - [Command line parameters](#command-line-parameters)
   - [Dispatch Gates](#dispatch-gates)
+    - [Difference between Queue and Pool Gates](#difference-between-queue-and-pool-gates)
+    - [Worker Pool Gate Budget & Proportional Throttling](#worker-pool-gate-budget--proportional-throttling)
     - [Per-Queue Dispatch Gates](#per-queue-dispatch-gates)
   - [Request Messages and Consumption](#request-messages-and-consumption)
     - [Request Merge Policy](#request-merge-policy)
@@ -139,6 +141,17 @@ The Async Processor supports dispatch gates to control batch processing based on
 
 * **Queue-level gates** run at the admission phase for a specific queue. When a queue-level gate denies admission (returning `ActionRefuse`), the request is immediately returned to the broker to be retried/re-delivered, freeing the worker to process other queues.
 * **Pool-level gates** run directly inside the worker loop to regulate capacity constraints shared by all queues routing to that worker pool. When a pool-level gate returns `ActionWait`, the worker parks in-memory and polls until capacity is available, avoiding broker nack/retry overhead. If the pool-level gate returns `ActionRefuse`, the request is immediately returned to the broker.
+
+### Worker Pool Gate Budget & Proportional Throttling
+
+When a pool-level gate is configured, `poolGate.Budget(ctx)` dynamically calculates the available capacity budget $B \in [0.0, 1.0]$ for the worker pool. Rather than treating gate capacity as a binary on/off switch, the Async Processor uses `Budget()` for **Proportional Worker Pool Throttling**:
+
+1. **Active Worker Calculation**: The pool dynamically scales active worker concurrency $A$ based on total pool size $W$ and current budget $B$:
+   $$A = \max\left(1, \lfloor W \times B \rfloor\right) \quad \text{(when } W \ge 1\text{)}$$
+2. **Pre-Pop Throttling (Starvation Prevention)**: Each worker goroutine $w \in \{1 \dots W\}$ evaluates $w \le A$ **before** popping a request from the pool's dispatch channel:
+   - **Active workers ($w \le A$)**: Pull messages from the channel and evaluate `poolGate.Apply()` to dispatch inference requests.
+   - **Throttled workers ($w > A$)**: Sleep in a polling loop without pulling messages, preserving queue FIFO order and preventing head-of-line blocking / request starvation.
+3. **Prometheus Metrics**: The pool budget is exported to Prometheus via `async_dispatch_budget{pool_name="..."}`.
 
 ### Per-Queue Dispatch Gates
 
