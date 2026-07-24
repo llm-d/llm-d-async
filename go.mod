@@ -7,9 +7,9 @@ require (
 	cloud.google.com/go/pubsub/v2 v2.6.1
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/go-logr/logr v1.4.4
-	github.com/llm-d/llm-d-async/api v0.7.4
-	github.com/llm-d/llm-d-async/pipeline v0.7.4
-	github.com/llm-d/llm-d-async/producer v0.7.4
+	github.com/llm-d/llm-d-async/api v0.8.0
+	github.com/llm-d/llm-d-async/pipeline v0.8.0
+	github.com/llm-d/llm-d-async/producer v0.8.0
 	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.42.1
 	github.com/prometheus/client_golang v1.24.0
@@ -136,3 +136,9 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/llm-d/llm-d-async/api => ./api
+
+replace github.com/llm-d/llm-d-async/pipeline => ./pipeline
+
+replace github.com/llm-d/llm-d-async/producer => ./producer
