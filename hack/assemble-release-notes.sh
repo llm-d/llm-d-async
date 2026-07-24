@@ -38,8 +38,8 @@ if [[ ! -f "$NOTES" ]] || ! grep -qF "$MARKER" "$NOTES"; then
 fi
 
 # Collect "<date>\t<pr>\t<url>\t<note>" rows, sorted by date then PR number.
-rows=""; section=""; new=""
-trap 'rm -f "$rows" "$section" "$new"' EXIT
+rows=""; section=""; new=""; trimmed=""
+trap 'rm -f "$rows" "$section" "$new" "$trimmed"' EXIT
 rows="$(mktemp)"
 for f in "${fragments[@]}"; do
   pr="$(sed -n 's/^pr: *//p' "$f" | head -1)"
@@ -71,6 +71,13 @@ awk -v marker="$MARKER" -v sectionfile="$section" '
   }
 ' "$NOTES" > "$new"
 mv "$new" "$NOTES"
+
+# Trim trailing blank lines so the file ends with exactly one newline. Each
+# assembled section ends with a blank separator; on the first release that blank
+# lands at EOF, which the end-of-file-fixer pre-commit hook rejects.
+trimmed="$(mktemp)"
+awk 'NF { last = NR } { line[NR] = $0 } END { for (i = 1; i <= last; i++) print line[i] }' "$NOTES" > "$trimmed"
+mv "$trimmed" "$NOTES"
 
 git rm --quiet -- "${fragments[@]}" 2>/dev/null || rm -f "${fragments[@]}"
 
