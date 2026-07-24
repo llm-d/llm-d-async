@@ -8,10 +8,13 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
-# Local replace directives (./api, ./pipeline, ./producer) must exist before go mod download.
+# go.work redirects ./api and ./pipeline to local source; both dirs must exist before go mod download.
+# producer is in the workspace for local dev/e2e but is not imported by cmd/main.go, so drop it here
+# to avoid copying producer/ into the build context.
+COPY go.work go.work
 COPY api/ api/
 COPY pipeline/ pipeline/
-COPY producer/ producer/
+RUN go work edit -dropuse ./producer
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download

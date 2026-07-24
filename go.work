@@ -1,0 +1,8 @@
+go 1.25.8
+
+use (
+	.
+	./api
+	./pipeline
+	./producer
+)
