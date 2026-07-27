@@ -302,6 +302,20 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						return
 					}
 
+					// The send was aborted by the per-request deadline (not a
+					// process shutdown): surface DEADLINE_EXCEEDED so callers
+					// can distinguish a timed-out request from an inference
+					// failure. This happens whenever the deadline expires
+					// while the request is queued or executing downstream.
+					if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+						metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+						select {
+						case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+						case <-requestCtx.Done():
+						}
+						return
+					}
+
 					var inferenceErr asyncapi.InferenceError
 					if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
 						span.RecordError(err)
