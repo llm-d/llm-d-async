@@ -33,16 +33,51 @@ const (
 	cancellationCheckRetryAfterSecond = 1.0
 )
 
+func computeActiveWorkers(totalWorkers int, budget float64) int {
+	if totalWorkers <= 0 {
+		return 0
+	}
+	if budget <= 0.0 {
+		return 1
+	}
+	limit := int(math.Floor(float64(totalWorkers) * budget))
+	if limit < 1 {
+		return 1
+	}
+	if limit > totalWorkers {
+		return totalWorkers
+	}
+	return limit
+}
+
 func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
 	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain) {
-	WorkerWithGate(consumeCtx, requestCtx, characteristics, client, requestChannel, retryChannel, resultChannel, requestTimeout, transforms, nil)
+	WorkerWithGate(consumeCtx, requestCtx, characteristics, client, requestChannel, retryChannel, resultChannel, requestTimeout, transforms, nil, 1, 1, "")
 }
 
 func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
-	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain, poolGate pipeline.Gate) {
+	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain, poolGate pipeline.Gate, workerID, totalWorkers int, poolID string) {
 
 	logger := log.FromContext(requestCtx)
 	for {
+		if poolGate != nil && totalWorkers > 0 {
+			for {
+				budget := poolGate.Budget(requestCtx)
+				metrics.SetDispatchBudget(budget, "", "", poolID)
+				activeLimit := computeActiveWorkers(totalWorkers, budget)
+				if workerID <= activeLimit {
+					break
+				}
+				select {
+				case <-consumeCtx.Done():
+					logger.V(logutil.DEFAULT).Info("Worker finishing while throttled by pool gate.")
+					return
+				case <-time.After(gateWaitPollInterval):
+					// Poll again until budget opens up enough to allow workerID
+				}
+			}
+		}
+
 		select {
 		case <-consumeCtx.Done():
 			logger.V(logutil.DEFAULT).Info("Worker finishing, draining request channel.")

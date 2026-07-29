@@ -68,9 +68,26 @@ $$F = 0.3, \quad B = 0.1$$
 2. `max_concurrency` is expressed in request units here, but the same approach generalizes to other capacity units (e.g., tokens, bytes) given an equivalent per-endpoint capacity constant.
 3. We may also define system capacity in terms of number of bytes; in this case $D$ would be truncated at the boundary of a valid request; for instance, if we expect to be able to forward a maximum of 1024 KiB of data, then we may forward at most $1024 \times (0.7-0.1) = 614.4$ KiB; which means if we have $r_1, r_2, ...$ enqueued; if $r_1$ is 600 KiB and $r_2$ is 100 KiB, then we would only dispatch $r_1$
 
+### Worker Pool Budget Enforcement & Proportional Throttling
+
+When applied as a **Pool-Level Gate**, the dispatch budget $D \in [0, 1]$ directly regulates worker concurrency across the pool of $W$ total worker goroutines:
+
+1. **Active Worker Formula**:
+   The active worker count $A$ is dynamically calculated from total pool size $W$ and current budget $D$:
+   $$A = \max\left(1, \lfloor W \times D \rfloor\right) \quad (\text{when } W \ge 1\text{)}$$
+
+2. **Pre-Pop Capacity Guard (Starvation & Burst Prevention)**:
+   Worker goroutine $w \in \{1 \dots W\}$ checks $w \le A$ **before** popping a request from the pool's dispatch channel (`requestChannel`):
+   - **Active Workers ($w \le A$)**: Pull messages from `requestChannel` and evaluate `poolGate.Apply()` to dispatch inference requests to the gateway.
+   - **Throttled Workers ($w > A$)**: Sleep in a polling loop without pulling messages. This prevents head-of-line blocking and request starvation while maintaining queue backpressure on the broker reader.
+
+3. **Metrics Integration**:
+   The active dispatch budget $D$ is exported to Prometheus via the gauge:
+   `async_dispatch_budget{queue_id="", queue_name="", pool_name="<poolID>"}`
+
 ### Failure Modes
 
 * **Queue Consumer Failures:** If the Async Processor pod crashes, the messages remain in the persistent Message Queue (Redis/PubSub), ensuring no data loss.
-* **Downstream Router/IGW Backpressure:** If `llm-d-router` (or another inference gateway) returns an HTTP error indicating overload (e.g. HTTP 429\) despite the computed budget, then the **saturation is assumed to be close to 1**, and therefore a **dispatch budget close to 0\.** The Async Processor will not retry until a subsequent update from the metrics store will bring it back within the acceptable limits.
+* **Downstream Router/IGW Backpressure:** If `llm-d-router` (or another inference gateway) returns an HTTP error indicating overload (e.g. HTTP 429) despite the computed budget, then the **saturation is assumed to be close to 1**, and therefore a **dispatch budget close to 0.** The Async Processor will not retry until a subsequent update from the metrics store will bring it back within the acceptable limits.
   * This might happen if a sudden spike of traffic enters the gateway and the metrics did not update on-time.
-* **Unreadable Metrics:** In case of unreadable metrics, the Async Processor cannot take informed decisions, and therefore will assume a **dispatch budget of 0\.**
+* **Unreadable Metrics:** In case of unreadable metrics, the Async Processor cannot take informed decisions, and therefore will assume a **dispatch budget of 0.**
