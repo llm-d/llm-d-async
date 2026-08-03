@@ -213,6 +213,41 @@ tests:
                 key: url
           any: true
 
+  - it: should inject REDIS_URL from transportConfig.urlSecret and strip it from the config
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+      ap.transportConfig.urlSecret.key: conn
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: conn
+          any: true
+      # urlSecret is a chart directive; it must not leak into --transport-config
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: urlSecret
+
+  - it: should default urlSecret key to url when omitted
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: url
+          any: true
+
   - it: should not inject REDIS_URL for a gcp-pubsub transport
     set:
       ap.redis.secretName: ""

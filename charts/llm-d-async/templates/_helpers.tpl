@@ -83,7 +83,9 @@ per-backend values so existing values files keep working.
 */}}
 {{- define "llm-d-async.transportConfig" -}}
 {{- if .Values.ap.transport -}}
-{{- .Values.ap.transportConfig | toJson -}}
+{{- /* urlSecret is a chart-only directive (it wires REDIS_URL from a Secret);
+       strip it so it is never passed to the processor or rendered into args. */ -}}
+{{- omit .Values.ap.transportConfig "urlSecret" | toJson -}}
 {{- else -}}
 {{- include "llm-d-async.legacyTransportConfig" . -}}
 {{- end -}}
@@ -150,7 +152,9 @@ If redis.url is set, the chart creates a Secret named <fullname>-redis.
 Otherwise, use the user-provided redis.secretName.
 */}}
 {{- define "llm-d-async.redisSecretName" -}}
-{{- if .Values.ap.redis.url -}}
+{{- if and .Values.ap.transport (dig "urlSecret" "name" "" (.Values.ap.transportConfig | default dict)) -}}
+{{- dig "urlSecret" "name" "" (.Values.ap.transportConfig | default dict) -}}
+{{- else if .Values.ap.redis.url -}}
 {{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
 {{- else -}}
 {{- .Values.ap.redis.secretName -}}
@@ -162,7 +166,9 @@ Resolve the Redis secret key.
 When the chart creates the Secret, the key is always "url".
 */}}
 {{- define "llm-d-async.redisSecretKey" -}}
-{{- if .Values.ap.redis.url -}}
+{{- if and .Values.ap.transport (dig "urlSecret" "name" "" (.Values.ap.transportConfig | default dict)) -}}
+{{- dig "urlSecret" "key" "url" (.Values.ap.transportConfig | default dict) -}}
+{{- else if .Values.ap.redis.url -}}
 url
 {{- else -}}
 {{- .Values.ap.redis.secretKey -}}

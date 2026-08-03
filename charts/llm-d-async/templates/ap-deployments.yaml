@@ -10,7 +10,7 @@
 {{- fail "ap.transport is set but ap.transportConfig is empty: provide the transport configuration document (see the README 'Transport Configuration' section)." }}
 {{- end }}
 {{- if and (hasPrefix "redis" .Values.ap.transport) (not (hasKey .Values.ap.transportConfig "url")) (not (include "llm-d-async.redisSecretName" .)) }}
-{{- fail "redis transport has no connection: set url in ap.transportConfig, or set ap.redis.url / ap.redis.secretName to inject REDIS_URL." }}
+{{- fail "redis transport has no connection: set url or urlSecret ({name,key}) in ap.transportConfig, or (legacy) ap.redis.url / ap.redis.secretName. urlSecret/secretName reference an existing Secret injected as REDIS_URL." }}
 {{- end }}
 {{- else }}
 {{- /* Deprecated per-backend surface. */ -}}

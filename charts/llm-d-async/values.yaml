@@ -111,12 +111,19 @@ ap:
   #
   # transport: one of redis-pubsub, redis-sortedset, gcp-pubsub.
   # transportConfig: the transport-specific document. See the project README
-  #   "Transport Configuration" section for the schema. For the Redis transports
-  #   leave "url" unset and provide credentials via ap.redis.url / ap.redis.secretName
-  #   (injected as REDIS_URL) -- an explicit "url" here is rendered into the pod args.
+  #   "Transport Configuration" section for the schema.
+  #   Redis/Valkey connection: DO NOT put a credentialed "url" here -- inline values
+  #   are rendered into the pod args (visible via `kubectl get pod` / `helm get values`).
+  #   Instead reference an existing Secret with transportConfig.urlSecret; the chart
+  #   injects it as the REDIS_URL env var and leaves "url" out of the args. urlSecret
+  #   is a chart-only directive and is stripped before the config reaches the processor.
+  #   (An inline "url" and the legacy ap.redis.url / ap.redis.secretName still work.)
   # Example (redis-sortedset):
   #   transport: redis-sortedset
   #   transportConfig:
+  #     urlSecret:
+  #       name: my-redis-secret   # existing Secret holding the connection URL
+  #       key: url                # key within that Secret (default: url)
   #     result_queue_name: result-list
   #     poll_interval_ms: 1000
   #     batch_size: 10

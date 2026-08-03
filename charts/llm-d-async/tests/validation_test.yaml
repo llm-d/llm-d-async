@@ -25,4 +25,4 @@ tests:
             igw_base_url: "http://igw:80"
     asserts:
       - failedTemplate:
-          errorMessage: "redis transport has no connection: set url in ap.transportConfig, or set ap.redis.url / ap.redis.secretName to inject REDIS_URL."
+          errorMessage: "redis transport has no connection: set url or urlSecret ({name,key}) in ap.transportConfig, or (legacy) ap.redis.url / ap.redis.secretName. urlSecret/secretName reference an existing Secret injected as REDIS_URL."
