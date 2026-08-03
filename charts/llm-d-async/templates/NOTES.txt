@@ -18,7 +18,20 @@ WARNING: deprecated chart values in use.
       transportConfig:
         # transport-specific JSON document; see the chart README and the
         # "Transport Configuration" section of the project README.
+{{- end }}
+{{- if include "llm-d-async.usingDeprecatedRedisConn" . }}
 
-  Redis/Valkey credentials stay in ap.redis.url / ap.redis.secretName (injected
-  as REDIS_URL); leave "url" out of transportConfig to use them.
+WARNING: deprecated Redis connection values in use.
+  ap.redis.url / ap.redis.secretName are deprecated. Provide the Redis/Valkey
+  connection on the transport surface instead — the chart injects it as REDIS_URL
+  and keeps it out of the pod args:
+
+    ap:
+      transportConfig:
+        urlSecret:
+          name: <existing-secret>   # reference a Secret, OR
+          key: url
+        # or have the chart create the Secret from a literal URL:
+        # urlSecret:
+        #   url: redis://...
 {{- end }}

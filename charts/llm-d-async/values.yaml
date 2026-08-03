@@ -112,12 +112,14 @@ ap:
   # transport: one of redis-pubsub, redis-sortedset, gcp-pubsub.
   # transportConfig: the transport-specific document. See the project README
   #   "Transport Configuration" section for the schema.
-  #   Redis/Valkey connection: DO NOT put a credentialed "url" here -- inline values
-  #   are rendered into the pod args (visible via `kubectl get pod` / `helm get values`).
-  #   Instead reference an existing Secret with transportConfig.urlSecret; the chart
-  #   injects it as the REDIS_URL env var and leaves "url" out of the args. urlSecret
-  #   is a chart-only directive and is stripped before the config reaches the processor.
-  #   (An inline "url" and the legacy ap.redis.url / ap.redis.secretName still work.)
+  #   Redis/Valkey connection: DO NOT put a credentialed "url" directly in
+  #   transportConfig -- inline values are rendered into the pod args (visible via
+  #   `kubectl get pod` / `helm get values`). Use transportConfig.urlSecret instead;
+  #   the chart injects it as the REDIS_URL env var and keeps it out of the args.
+  #   urlSecret is a chart-only directive, stripped before the config reaches the
+  #   processor. Two forms:
+  #     urlSecret: {name: <secret>, key: url}  # reference an existing Secret
+  #     urlSecret: {url: "redis://..."}        # chart creates the Secret for you
   # Example (redis-sortedset):
   #   transport: redis-sortedset
   #   transportConfig:
@@ -177,10 +179,10 @@ ap:
     certKey: ""
     keyKey: ""
   redis:
-    # DEPRECATED selector: prefer ap.transport: redis-pubsub|redis-sortedset with
-    # ap.transportConfig. The request/queue fields below are translated into the
-    # transport config; the connection fields (url/secretName/secretKey) still apply
-    # on the new surface and are injected as REDIS_URL.
+    # DEPRECATED (whole block): prefer ap.transport + ap.transportConfig. The
+    # request/queue fields are translated into the transport config; the connection
+    # fields (url/secretName/secretKey) are superseded by ap.transportConfig.urlSecret.
+    # All still work for backwards compatibility and emit a migration warning.
     enabled: false
     # Compatible with any Redis-protocol server including Valkey.
     # All redis.* fields work unchanged when pointed at a Valkey endpoint.

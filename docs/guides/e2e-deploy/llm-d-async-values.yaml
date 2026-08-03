@@ -13,11 +13,14 @@ ap:
   # JSON document (see the project README "Transport Configuration" section).
   transport: redis-sortedset
   transportConfig:
+    # Connection: this dev Redis is unauthenticated, so the chart creates a Secret
+    # from the URL below and injects it as REDIS_URL (kept out of the pod args).
+    # For an existing Secret use urlSecret: {name: <secret>, key: url} instead.
+    urlSecret:
+      url: "redis://redis-master.redis.svc.cluster.local:6379"
     result_queue_name: "result-list"
     poll_interval_ms: 1000
     batch_size: 10
-    # "url" is intentionally omitted -- the chart injects REDIS_URL from the
-    # Secret it creates for ap.redis.url below.
     queues:
       - queue_name: "request-sortedset"
         request_path_url: "/v1/completions"
@@ -35,9 +38,6 @@ ap:
           # "Size max_concurrency for your pool" section of the guide.
           max_concurrency: "100"
           baseline: "0.05"
-  redis:
-    # Connection only: the chart creates the Secret and injects it as REDIS_URL.
-    url: "redis://redis-master.redis.svc.cluster.local:6379"
   podMonitor:
     enabled: true
     interval: "15s"

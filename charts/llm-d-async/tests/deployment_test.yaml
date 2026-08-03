@@ -248,6 +248,25 @@ tests:
                 key: url
           any: true
 
+  - it: should inject REDIS_URL from the chart-created Secret when urlSecret.url is set
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.url: "redis://inline-secret:6379"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-llm-d-async-redis
+                key: url
+          any: true
+      # the literal URL must not leak into --transport-config args
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: inline-secret
+
   - it: should not inject REDIS_URL for a gcp-pubsub transport
     set:
       ap.redis.secretName: ""

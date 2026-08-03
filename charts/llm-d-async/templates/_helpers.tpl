@@ -147,13 +147,27 @@ true
 {{- end }}
 
 {{/*
+Report whether the deprecated ap.redis.* connection inputs are in use. On the new
+surface the Redis connection belongs in ap.transportConfig.urlSecret; ap.redis.url
+and ap.redis.secretName are retained for backwards compatibility only.
+*/}}
+{{- define "llm-d-async.usingDeprecatedRedisConn" -}}
+{{- if or .Values.ap.redis.url .Values.ap.redis.secretName -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
 Resolve the Redis secret name.
 If redis.url is set, the chart creates a Secret named <fullname>-redis.
 Otherwise, use the user-provided redis.secretName.
 */}}
 {{- define "llm-d-async.redisSecretName" -}}
-{{- if and .Values.ap.transport (dig "urlSecret" "name" "" (.Values.ap.transportConfig | default dict)) -}}
-{{- dig "urlSecret" "name" "" (.Values.ap.transportConfig | default dict) -}}
+{{- $ts := .Values.ap.transportConfig | default dict -}}
+{{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
+{{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
+{{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
+{{- dig "urlSecret" "name" "" $ts -}}
 {{- else if .Values.ap.redis.url -}}
 {{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
 {{- else -}}
@@ -166,8 +180,11 @@ Resolve the Redis secret key.
 When the chart creates the Secret, the key is always "url".
 */}}
 {{- define "llm-d-async.redisSecretKey" -}}
-{{- if and .Values.ap.transport (dig "urlSecret" "name" "" (.Values.ap.transportConfig | default dict)) -}}
-{{- dig "urlSecret" "key" "url" (.Values.ap.transportConfig | default dict) -}}
+{{- $ts := .Values.ap.transportConfig | default dict -}}
+{{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
+url
+{{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
+{{- dig "urlSecret" "key" "url" $ts -}}
 {{- else if .Values.ap.redis.url -}}
 url
 {{- else -}}
