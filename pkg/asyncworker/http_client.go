@@ -49,25 +49,32 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	}
 	defer result.Body.Close() // nolint:errcheck
 
+	// Read the rejection context once: the headers are available on every path
+	// below, including the one where the body read fails.
+	droppedReason := result.Header.Get(asyncapi.DroppedReasonHeader)
+	retryAfter, _ := parseRetryAfter(result.Header.Get("Retry-After"))
+
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
-		return &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body}, &asyncapi.ClientError{
+		return &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body, Header: result.Header}, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       "failed to read response",
 			RawError:      err,
+			RetryAfter:    retryAfter,
 			StatusCode:    result.StatusCode,
+			DroppedReason: droppedReason,
 		}
 	}
 
-	resp := &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body}
+	resp := &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body, Header: result.Header}
 
 	if result.StatusCode == 429 {
-		retryAfter, _ := parseRetryAfter(result.Header.Get("Retry-After"))
 		return resp, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryRateLimit,
 			Message:       fmt.Sprintf("rate limited: status code %d", result.StatusCode),
 			RetryAfter:    retryAfter,
 			StatusCode:    result.StatusCode,
+			DroppedReason: droppedReason,
 		}
 	}
 
@@ -76,6 +83,7 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 			ErrorCategory: asyncapi.ErrCategoryInvalidReq,
 			Message:       fmt.Sprintf("client error: status code %d", result.StatusCode),
 			StatusCode:    result.StatusCode,
+			DroppedReason: droppedReason,
 		}
 	}
 
@@ -83,7 +91,9 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 		return resp, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       fmt.Sprintf("server error: status code %d", result.StatusCode),
+			RetryAfter:    retryAfter,
 			StatusCode:    result.StatusCode,
+			DroppedReason: droppedReason,
 		}
 	}
 

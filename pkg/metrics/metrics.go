@@ -16,6 +16,7 @@ const (
 	LabelQueueName = "queue_name"
 	LabelPoolName  = "pool_name"
 	LabelReason    = "reason"
+	LabelBand      = "band"
 
 	// LabelInferencePool names the InferencePool a gate queries. It is distinct
 	// from pool_name, which always names the async worker pool that owns the
@@ -126,6 +127,18 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_gate_metric_source_available",
 		Help: "1 when a metric-based dispatch gate's last evaluation got a usable reading from its metric source, 0 when it fell back to the configured 'fallback' budget (query error, no samples, or NaN/Inf). Distinguishes a fallback budget from a real reading of the same number: async_dispatch_budget 0 with this at 1 means a saturated pool, at 0 means unreadable metrics. async_gate_metric_value is stale whenever this is 0.",
 	}, gateLabels)
+	AIMDWindow = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_aimd_window",
+		Help: "Current congestion window of an aimd gate band: the maximum in-flight requests the band admits.",
+	}, []string{LabelPoolName, LabelBand})
+	AIMDSlowStartThreshold = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_aimd_ssthresh",
+		Help: "Slow-start threshold of an aimd gate band; the window grows exponentially below it and additively above it.",
+	}, []string{LabelPoolName, LabelBand})
+	AIMDInflight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_aimd_inflight",
+		Help: "Requests currently in flight through an aimd gate band; compare against async_aimd_window for band utilization.",
+	}, []string{LabelPoolName, LabelBand})
 )
 
 // Gate decision reason label values for async_gate_decisions_total.
@@ -250,6 +263,13 @@ func SetGateMetricSourceAvailable(available bool, queueID, queueName, poolName, 
 	GateMetricSourceAvailable.WithLabelValues(queueID, queueName, poolName, inferencePool).Set(v)
 }
 
+// SetAIMDBandState records one aimd gate band's controller state.
+func SetAIMDBandState(pool, band string, window, ssthresh float64, inflight int) {
+	AIMDWindow.WithLabelValues(pool, band).Set(window)
+	AIMDSlowStartThreshold.WithLabelValues(pool, band).Set(ssthresh)
+	AIMDInflight.WithLabelValues(pool, band).Set(float64(inflight))
+}
+
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
@@ -257,6 +277,7 @@ func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Colle
 		QueueDepth, InflightRequests, BrokerBacklog, InferenceLatencyTime, QueueResidenceTime,
 		DispatchBudget, PoolWorkerLimit, GateDecisions,
 		GateMetricValue, GateMetricThreshold, GateMetricSourceAvailable,
+		AIMDWindow, AIMDSlowStartThreshold, AIMDInflight,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

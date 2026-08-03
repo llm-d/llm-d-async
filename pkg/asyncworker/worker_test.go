@@ -796,7 +796,7 @@ func TestRetryMessage_retryAfterIgnoredWhenSmaller(t *testing.T) {
 	}
 }
 
-func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
+func TestRetryMessage_retryAfterExceedsDeadlineFallsBackToBackoff(t *testing.T) {
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 	msg := newEmb(asyncapi.RequestMessage{
@@ -805,19 +805,20 @@ func TestRetryMessage_retryAfterExceedsDeadline(t *testing.T) {
 		Deadline: time.Now().Add(5 * time.Second).Unix(),
 	}, "", nil)
 
-	// Server says wait 30s, but deadline is only 5s away → deadline exceeded.
+	// Server says wait 30s, but the deadline is only 5s away. The hint is
+	// ignored rather than terminal: the server's estimate alone must not
+	// burn a message's remaining retry budget (it may be wrong, and the
+	// retry costs nothing durable), so the backoff schedule applies.
 	retryMessage(context.Background(), msg, retryChannel, resultChannel, 30*time.Second, asyncapi.InferenceResponse{})
-	if len(retryChannel) > 0 {
-		t.Errorf("should not retry when Retry-After exceeds deadline")
+	if len(resultChannel) > 0 {
+		t.Fatalf("message terminated early; want a scheduled retry")
 	}
-	if len(resultChannel) != 1 {
-		t.Fatalf("expected deadline-exceeded result, got %d messages", len(resultChannel))
+	if len(retryChannel) != 1 {
+		t.Fatalf("expected one message in retry channel, got %d", len(retryChannel))
 	}
-	result := <-resultChannel
-	var resultMap map[string]any
-	json.Unmarshal([]byte(result.Payload), &resultMap) // nolint:errcheck
-	if resultMap["error"] != "deadline exceeded" {
-		t.Errorf("expected 'deadline exceeded', got: %s", resultMap["error"])
+	retryMsg := <-retryChannel
+	if retryMsg.BackoffDurationSeconds <= 0 || retryMsg.BackoffDurationSeconds >= 5 {
+		t.Errorf("backoff = %f, want backoff-schedule value within the deadline", retryMsg.BackoffDurationSeconds)
 	}
 }
 

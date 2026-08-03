@@ -1,14 +1,20 @@
 package api
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 // InferenceResponse holds the HTTP response from an upstream inference request.
 // StatusCode is non-zero whenever an HTTP response was received (including 4xx/5xx).
 // A zero StatusCode means no HTTP response was obtained (e.g. transport/network failure).
 // Body contains the response body; it may be partial if a read error occurred.
+// Header carries the response headers, which may include advisory capacity
+// signals from the gateway; nil when no HTTP response was received.
 type InferenceResponse struct {
 	StatusCode int
 	Body       []byte
+	Header     http.Header
 }
 
 // InferenceClient defines the interface for sending inference requests.

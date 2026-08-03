@@ -139,24 +139,11 @@ func newScheduler(maxBuffered int, activeReaders int, tierLabel string) *schedul
 }
 
 func getPriorityIndex(ir *api.InternalRequest, tierLabel string) int {
-	tierPri := 2 // default to batch (lowest priority tier)
+	var tier api.PriorityTier
 	if ir.Labels != nil {
-		switch ir.Labels[tierLabel] {
-		case string(api.TierInteractive):
-			tierPri = 0
-		case string(api.TierAsync):
-			tierPri = 1
-		case string(api.TierBatch):
-			tierPri = 2
-		}
+		tier = api.PriorityTier(ir.Labels[tierLabel])
 	}
-
-	classPri := 1 // default to overflow
-	if ir.GetClassification() == api.ClassificationReserved {
-		classPri = 0
-	}
-
-	return classPri*3 + tierPri
+	return api.LaneRank(tier, ir.GetClassification())
 }
 
 func (s *scheduler) Push(ir *api.InternalRequest, chMeta pipeline.RequestChannel) bool {

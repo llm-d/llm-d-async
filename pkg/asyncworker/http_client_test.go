@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,5 +293,100 @@ func TestNewHTTPInferenceClient(t *testing.T) {
 	}
 	if client.client != httpClient {
 		t.Error("expected client to wrap the provided http.Client")
+	}
+}
+
+type errBody struct{}
+
+func (errBody) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+func (errBody) Close() error             { return nil }
+
+func TestSendRequest_droppedReasonCaptured(t *testing.T) {
+	// Status/reason pairings match what llm-d-router emits: rejections for
+	// capacity or queue TTL and post-dispatch evictions come back as 429,
+	// while an empty pool, a disconnected client, or a shutting-down flow
+	// controller come back as 503. The plain 400 is defensive — the router
+	// does not set the header there, but the capture must not depend on
+	// status.
+	tests := []struct {
+		name          string
+		statusCode    int
+		droppedReason string
+	}{
+		{"saturated 429", http.StatusTooManyRequests, "rejected-saturated"},
+		{"ttl expired 429", http.StatusTooManyRequests, "rejected-ttl-expired"},
+		{"evicted 429", http.StatusTooManyRequests, "evicted-queue-pressure"},
+		{"no endpoints 503", http.StatusServiceUnavailable, "rejected-no-endpoints"},
+		{"context cancelled 503", http.StatusServiceUnavailable, "rejected-context-cancelled"},
+		{"plain 400", http.StatusBadRequest, "some-reason"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := make(http.Header)
+			h.Set(asyncapi.DroppedReasonHeader, tt.droppedReason)
+			client := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.statusCode,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+					Header:     h,
+				}, nil
+			}))
+			_, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+			var ce *asyncapi.ClientError
+			if !errors.As(err, &ce) {
+				t.Fatalf("expected *ClientError, got %T", err)
+			}
+			if ce.DroppedReason != tt.droppedReason {
+				t.Errorf("DroppedReason = %q, want %q", ce.DroppedReason, tt.droppedReason)
+			}
+			if !strings.Contains(ce.Error(), tt.droppedReason) {
+				t.Errorf("Error() = %q, want it to surface the dropped reason", ce.Error())
+			}
+		})
+	}
+}
+
+func TestSendRequest_serverErrorRetryAfterCaptured(t *testing.T) {
+	h := make(http.Header)
+	h.Set("Retry-After", "7")
+	client := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     h,
+		}, nil
+	}))
+	_, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	var ce *asyncapi.ClientError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *ClientError, got %T", err)
+	}
+	if ce.RetryAfter != 7*time.Second {
+		t.Errorf("RetryAfter = %v, want 7s", ce.RetryAfter)
+	}
+}
+
+func TestSendRequest_bodyReadErrorKeepsDroppedReasonAndRetryAfter(t *testing.T) {
+	h := make(http.Header)
+	h.Set(asyncapi.DroppedReasonHeader, "evicted-queue-pressure")
+	h.Set("Retry-After", "5")
+	client := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       errBody{},
+			Header:     h,
+		}, nil
+	}))
+	_, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
+	var ce *asyncapi.ClientError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *ClientError, got %T", err)
+	}
+	// The headers arrived even though the body read failed.
+	if ce.DroppedReason != "evicted-queue-pressure" {
+		t.Errorf("DroppedReason = %q, want evicted-queue-pressure", ce.DroppedReason)
+	}
+	if ce.RetryAfter != 5*time.Second {
+		t.Errorf("RetryAfter = %v, want 5s", ce.RetryAfter)
 	}
 }

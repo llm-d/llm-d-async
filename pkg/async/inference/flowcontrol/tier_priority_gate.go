@@ -35,7 +35,9 @@ func (g *TierPriorityAdmissionGate) Apply(ctx context.Context, msg *api.Internal
 		return pipeline.Verdict{}, fmt.Errorf("saturation gate failed: %w", err)
 	}
 
-	isSaturated := satRes.Action == pipeline.ActionRefuse
+	// Anything but Continue means the inner gate has no capacity now:
+	// metric gates say Refuse, feedback gates (aimd) say Wait or Refuse.
+	isSaturated := satRes.Action != pipeline.ActionContinue
 
 	if !isSaturated {
 		return pipeline.Continue(), nil

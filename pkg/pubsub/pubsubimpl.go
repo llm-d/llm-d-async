@@ -599,7 +599,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			return
 		}
 
-		if verdict.Action == pipeline.ActionRefuse {
+		// Queue-level consumers have no parking mechanism, so a Wait verdict
+		// (from gates built for worker pools, e.g. aimd) degrades to the
+		// same delayed Nack as Refuse rather than falling through to dispatch.
+		if verdict.Action == pipeline.ActionRefuse || verdict.Action == pipeline.ActionWait {
 			reason := metrics.ReasonGateClosed
 			if ir.GetClassification() == api.ClassificationOverflow {
 				reason = metrics.ReasonQuotaExhausted

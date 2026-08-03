@@ -9,9 +9,13 @@ import (
 )
 
 var _ pipeline.Gate = (*WaitOnRefuseGate)(nil)
+var _ pipeline.FeedbackGate = (*WaitOnRefuseGate)(nil)
+var _ pipeline.WaitNotifier = (*WaitOnRefuseGate)(nil)
 
 // WaitOnRefuseGate wraps a single inner gate and converts any ActionRefuse
-// verdict from the inner gate into ActionWait.
+// verdict from the inner gate into ActionWait. Feedback and wait signals
+// pass through to the inner gate, so wrapping a feedback gate does not sever
+// its signal.
 type WaitOnRefuseGate struct {
 	inner pipeline.Gate
 }
@@ -38,4 +42,22 @@ func (w *WaitOnRefuseGate) Apply(ctx context.Context, msg *api.InternalRequest, 
 		verdict.Action = pipeline.ActionWait
 	}
 	return verdict, nil
+}
+
+// ObserveOutcome implements pipeline.FeedbackGate by forwarding to the inner
+// gate when it consumes feedback; a no-op otherwise.
+func (w *WaitOnRefuseGate) ObserveOutcome(fb pipeline.DispatchFeedback) {
+	if feedbackGate, ok := w.inner.(pipeline.FeedbackGate); ok {
+		feedbackGate.ObserveOutcome(fb)
+	}
+}
+
+// WaitSignal implements pipeline.WaitNotifier with the inner gate's signal;
+// nil (blocks forever, same as no wake support) when the inner gate does not
+// notify.
+func (w *WaitOnRefuseGate) WaitSignal() <-chan struct{} {
+	if notifier, ok := w.inner.(pipeline.WaitNotifier); ok {
+		return notifier.WaitSignal()
+	}
+	return nil
 }

@@ -438,7 +438,10 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			continue
 		}
 
-		if verdict.Action == pipeline.ActionRefuse {
+		// Queue-level consumers have no parking mechanism, so a Wait verdict
+		// (from gates built for worker pools, e.g. aimd) degrades to the
+		// same re-enqueue as Refuse rather than falling through to dispatch.
+		if verdict.Action == pipeline.ActionRefuse || verdict.Action == pipeline.ActionWait {
 			reason := metrics.ReasonGateClosed
 			if ir.GetClassification() == api.ClassificationOverflow {
 				reason = metrics.ReasonQuotaExhausted

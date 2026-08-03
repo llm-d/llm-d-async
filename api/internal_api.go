@@ -24,6 +24,50 @@ const (
 	TierBatch       PriorityTier = "batch"
 )
 
+// LaneRank orders (classification, tier) pairs the way strict-priority
+// dispatch drains them: 0 is highest priority (reserved/interactive), 5 is
+// lowest (overflow/batch). Unknown tiers rank as batch and unclassified
+// requests rank as overflow. The tier-priority merge policy's lanes and the
+// aimd gate's bands both key on this order and must agree; this is the single
+// source of that mapping.
+func LaneRank(tier PriorityTier, class QuotaClassification) int {
+	tierRank := 2
+	switch tier {
+	case TierInteractive:
+		tierRank = 0
+	case TierAsync:
+		tierRank = 1
+	}
+	classRank := 1
+	if class == ClassificationReserved {
+		classRank = 0
+	}
+	return classRank*3 + tierRank
+}
+
+// laneLabels[rank] is the canonical "classification/tier" name of the lane
+// with that rank, in LaneRank order.
+var laneLabels = [6]string{
+	"reserved/interactive",
+	"reserved/async",
+	"reserved/batch",
+	"overflow/interactive",
+	"overflow/async",
+	"overflow/batch",
+}
+
+// LaneLabel returns the canonical "classification/tier" name of a lane rank
+// produced by LaneRank. Consumers that label per-lane state (e.g. the aimd
+// gate's band metrics) key on this name, so it is the single source of the
+// lane naming alongside LaneRank's ordering. Out-of-range ranks name the
+// lowest lane.
+func LaneLabel(rank int) string {
+	if rank < 0 || rank >= len(laneLabels) {
+		return laneLabels[len(laneLabels)-1]
+	}
+	return laneLabels[rank]
+}
+
 // InternalRouting holds the resolved, authoritative routing fields used by
 // infrastructure (producers, workers, retry logic). These are not part of the
 // caller-facing contract and should not be set by callers directly.

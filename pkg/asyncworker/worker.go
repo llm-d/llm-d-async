@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -115,6 +117,13 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					gateCtx, cancelGate := context.WithDeadline(requestCtx, reqDeadline)
 					defer cancelGate()
 
+					// A nil channel blocks forever, so gates without wake
+					// support fall through to the poll timer.
+					var gateWake <-chan struct{}
+					if notifier, ok := poolGate.(pipeline.WaitNotifier); ok {
+						gateWake = notifier.WaitSignal()
+					}
+
 					var verdict pipeline.Verdict
 					var err error
 					var waitRecorded bool
@@ -208,6 +217,8 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 								case <-requestCtx.Done():
 								}
 								return
+							case <-gateWake:
+								// woken by the gate; re-apply immediately
 							case <-time.After(gateWaitPollInterval):
 								// poll again
 							}
@@ -281,6 +292,12 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					inferenceStart := time.Now()
 					resp, err := client.SendRequest(reqCtx, msg.RequestURL, sendHeaders, sendPayload)
 					metrics.RecordInferenceLatency(float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
+
+					if feedbackGate, ok := poolGate.(pipeline.FeedbackGate); ok {
+						fb := dispatchFeedback(msg.InternalRequest, resp, err)
+						fb.SentAt = inferenceStart
+						feedbackGate.ObserveOutcome(fb)
+					}
 
 					if err == nil {
 						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)
@@ -422,20 +439,18 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 	}
 
 	finalDuration := expBackoffDuration(msg.RetryCount+1, int(secondsToDeadline))
-	// Honor server-specified Retry-After when it exceeds the computed backoff,
-	// but never schedule a retry beyond the message deadline.
-	if retryAfterSec := retryAfter.Seconds(); retryAfterSec > finalDuration {
+	// Honor server-specified Retry-After when it exceeds the computed backoff
+	// and still fits the message deadline. A hint beyond the deadline falls
+	// back to the backoff schedule: the server's estimate alone must not
+	// terminate a message that still has retry budget.
+	if retryAfterSec := retryAfter.Seconds(); retryAfterSec > finalDuration && retryAfterSec < float64(secondsToDeadline) {
 		finalDuration = retryAfterSec
 	}
-
-	if finalDuration >= float64(secondsToDeadline) {
-		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
-		select {
-		case resultChannel <- deadlineExhaustedResult(msg, lastResp):
-		case <-ctx.Done():
-		}
-		return
-	}
+	// Both branches keep finalDuration strictly under secondsToDeadline —
+	// expBackoffDuration caps at min(maxDelaySeconds, secondsToDeadline) and
+	// jitters below that cap — so the retry always lands before the deadline.
+	// The expiry check at the top of this function is therefore the only path
+	// that gives up on a message.
 
 	msg.RetryCount++
 	metrics.RecordRetry(queueID, queueName, msg.WorkerPoolID)
@@ -468,6 +483,54 @@ func headersWithContentType(headers map[string]string, contentType string) map[s
 	}
 	out["Content-Type"] = contentType
 	return out
+}
+
+// dispatchFeedback classifies a dispatch attempt into the feedback a gate
+// consumes. The drop reason (when the gateway sends one) distinguishes
+// capacity rejections from queue-TTL expiries, evictions, and other
+// rejections; a 429 without a reason is treated as a capacity rejection.
+// Advisory capacity views (queue duration, band headroom) are parsed from the
+// response headers whenever an HTTP response was received.
+func dispatchFeedback(msg *asyncapi.InternalRequest, resp *asyncapi.InferenceResponse, err error) pipeline.DispatchFeedback {
+	fb := pipeline.DispatchFeedback{Msg: msg}
+	if resp != nil {
+		if v := resp.Header.Get(asyncapi.ViewQueueDurationHeader); v != "" {
+			if ms, perr := strconv.ParseFloat(v, 64); perr == nil && ms >= 0 {
+				fb.QueueDuration = time.Duration(ms * float64(time.Millisecond))
+			}
+		}
+		if v := resp.Header.Get(asyncapi.ViewBandHeadroomHeader); v != "" {
+			if h, perr := strconv.ParseFloat(v, 64); perr == nil && h >= 0 {
+				fb.BandHeadroom = h
+				fb.HasBandHeadroom = true
+			}
+		}
+	}
+
+	if err == nil {
+		fb.Outcome = pipeline.OutcomeAccepted
+		return fb
+	}
+	var clientErr *asyncapi.ClientError
+	if !errors.As(err, &clientErr) {
+		fb.Outcome = pipeline.OutcomeError
+		return fb
+	}
+	fb.RetryAfter = clientErr.RetryAfter
+	switch {
+	case strings.HasPrefix(clientErr.DroppedReason, asyncapi.DroppedReasonEvictedPrefix):
+		fb.Outcome = pipeline.OutcomeEvicted
+	case clientErr.DroppedReason == asyncapi.DroppedReasonSaturated,
+		clientErr.DroppedReason == "" && clientErr.StatusCode == 429:
+		fb.Outcome = pipeline.OutcomeRejectedCapacity
+	case clientErr.DroppedReason == asyncapi.DroppedReasonTTLExpired:
+		fb.Outcome = pipeline.OutcomeTTLExpired
+	case clientErr.DroppedReason != "":
+		fb.Outcome = pipeline.OutcomeRejectedOther
+	default:
+		fb.Outcome = pipeline.OutcomeError
+	}
+	return fb
 }
 
 func inferenceErrorCategory(err error) string {

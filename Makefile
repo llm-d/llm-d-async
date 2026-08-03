@@ -99,8 +99,9 @@ vet: ## Run go vet against root, api, and producer modules.
 	cd producer && GOWORK=off go vet ./...
 
 .PHONY: test
-test: fmt vet setup-envtest ## Run tests (root module and producer submodule).
+test: fmt vet setup-envtest ## Run tests against root, api, and producer modules.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	cd api && GOWORK=off go test ./... -coverprofile=cover-api.out
 	cd producer && GOWORK=off go test ./... -coverprofile=cover-producer.out
 
 # Creates a multi-node Kind cluster

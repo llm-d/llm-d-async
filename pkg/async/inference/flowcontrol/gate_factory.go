@@ -107,6 +107,14 @@ func (f *GateFactory) Close() error {
 //     once the observed load reaches max_concurrency × (1 − baseline) per ready pod.
 //     Set it too high for the pool's real capacity and the gate never closes; the
 //     resolved closing point is logged at gate creation so this is visible.
+//   - "aimd": Sizes per-band dispatch windows from gateway response feedback: slow start,
+//     additive increase on accepts, multiplicative decrease on capacity rejections,
+//     Retry-After closes the window. One window per (tier, classification) band.
+//     Requires no metric source; the worker reports per-response outcomes to the gate.
+//     Params: min_window (default 1), max_window (default 256), increase (default 1.0),
+//     decrease_factor (default 0.5), hold_duration (default "1s"), tier_label
+//     (default "tier"), queue_duration_target (default "0", disabled). The band-state
+//     gauges carry the owning pool's name from GateConfig.Owner, not from params.
 //   - "prometheus-query": Evaluates an arbitrary user-supplied PromQL expression as the dispatch
 //     budget. The expression must resolve to an instant vector with a single sample whose value
 //     is in [0, 1]. Unlike prometheus-saturation and prometheus-budget, this gate does not
@@ -177,6 +185,60 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 
 	case "constant":
 		return ConstOpenGate(), nil
+
+	case "aimd":
+		minWindow, err := paramFloat(params, "min_window", 1.0)
+		if err != nil {
+			return nil, err
+		}
+		if minWindow < 1 {
+			return nil, fmt.Errorf("aimd min_window must be at least 1, got %g", minWindow)
+		}
+		maxWindow, err := paramFloat(params, "max_window", 256.0)
+		if err != nil {
+			return nil, err
+		}
+		if maxWindow < minWindow {
+			return nil, fmt.Errorf("aimd max_window (%g) must be at least min_window (%g)", maxWindow, minWindow)
+		}
+		increase, err := paramFloat(params, "increase", 1.0)
+		if err != nil {
+			return nil, err
+		}
+		if increase <= 0 {
+			return nil, fmt.Errorf("aimd increase must be positive, got %g", increase)
+		}
+		decrease, err := paramFloat(params, "decrease_factor", 0.5)
+		if err != nil {
+			return nil, err
+		}
+		if decrease <= 0 || decrease >= 1 {
+			return nil, fmt.Errorf("aimd decrease_factor must be in (0, 1), got %g", decrease)
+		}
+		holdDuration, err := paramDuration(params, "hold_duration", time.Second)
+		if err != nil {
+			return nil, err
+		}
+		if holdDuration < 0 {
+			return nil, fmt.Errorf("aimd hold_duration must not be negative, got %s", holdDuration)
+		}
+		queueDurationTarget, err := paramDuration(params, "queue_duration_target", 0)
+		if err != nil {
+			return nil, err
+		}
+		if queueDurationTarget < 0 {
+			return nil, fmt.Errorf("aimd queue_duration_target must not be negative, got %s", queueDurationTarget)
+		}
+		return NewAIMDGate(AIMDConfig{
+			MinWindow:           minWindow,
+			MaxWindow:           maxWindow,
+			Increase:            increase,
+			Decrease:            decrease,
+			HoldDuration:        holdDuration,
+			TierLabel:           paramString(params, "tier_label", "tier"),
+			QueueDurationTarget: queueDurationTarget,
+			PoolLabel:           cfg.Owner.WorkerPoolID,
+		}), nil
 
 	case "redis":
 		addr := paramString(params, "address", "")
