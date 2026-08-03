@@ -1,4 +1,13 @@
 suite: observability
+# A minimal transport is required for the chart to render (the Deployment
+# fail-fasts otherwise); these suites assert on the monitoring templates only.
+set:
+  ap.transport: redis-pubsub
+  ap.transportConfig:
+    queues:
+      - queue_name: request-queue
+        igw_base_url: "http://igw:80"
+  ap.redis.secretName: "redis-creds"
 tests:
   # -- PodMonitor --
   - it: should not render PodMonitor by default

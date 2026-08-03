@@ -13,21 +13,18 @@
 # prometheus-query.yaml overlay uses.
 ap:
   imagePullPolicy: Never
-  messageQueueImpl: "redis-sortedset"
-  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
   prometheusURL: "http://prometheus.e2e-integration.svc.cluster.local:9090"
   prometheusCacheTTL: "0s"
   metrics:
     enabled: true
     port: 9090
     secure: false
-  redis:
-    enabled: true
-    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
-    resultQueueName: "mt-default-result-list"
-    pollIntervalMs: 500
-    batchSize: 10
-    queuesConfig:
+  transport: redis-sortedset
+  transportConfig:
+    result_queue_name: "mt-default-result-list"
+    poll_interval_ms: 500
+    batch_size: 10
+    queues:
       # premium: highest priority — no queue quota, no pool saturation gate.
       - queue_name: "mt-premium-request-sortedset"
         worker_pool_id: "premium"
@@ -74,5 +71,7 @@ ap:
       gate_params:
         gate: |
           {"gate_type":"prometheus-query","gate_params":{"query":"clamp(1 - inference_extension_flow_control_pool_saturation{inference_pool=\"e2e-pool\"}/0.5, 0, 1)","fallback":"1"}}
+  redis:
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
   modelServerMonitor:
     enabled: false

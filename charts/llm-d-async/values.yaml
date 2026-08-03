@@ -59,7 +59,7 @@ ap:
   #         providers: ["whisper"]
   transformConfig: {}
   # Request merge policy configuration. When set, rendered to a config file and passed
-  # via --request-merge-policy-config.
+  # via --request-merge-policy-config-file.
   requestMergePolicyConfig: {}
   otel:
     # OTLP gRPC endpoint for trace collection. Examples:
@@ -102,13 +102,46 @@ ap:
     enabled: true
     port: 9090
     secure: false
-  # Message queue implementation. Supported: "redis-sortedset", "redis-pubsub",
-  # "gcp-pubsub", "gcp-pubsub-gated". Leave empty to auto-select: redis-pubsub by
-  # default, and for GCP Pub/Sub "gcp-pubsub-gated" when any gcpPubSub.topicsConfig
-  # entry declares a gate_type (per-topic gates only take effect in gated mode),
-  # otherwise "gcp-pubsub".
+  # --- Transport configuration (recommended) --------------------------------
+  # Select the message-queue backend and configure it with a single JSON document,
+  # mirroring the processor's --transport / --transport-config flags. When set,
+  # ap.transport takes precedence over the deprecated per-backend values below
+  # (ap.messageQueueImpl, ap.redis.* / ap.gcpPubSub.* request/queue fields,
+  # ap.otel.redisTracing).
+  #
+  # transport: one of redis-pubsub, redis-sortedset, gcp-pubsub.
+  # transportConfig: the transport-specific document. See the project README
+  #   "Transport Configuration" section for the schema. For the Redis transports
+  #   leave "url" unset and provide credentials via ap.redis.url / ap.redis.secretName
+  #   (injected as REDIS_URL) -- an explicit "url" here is rendered into the pod args.
+  # Example (redis-sortedset):
+  #   transport: redis-sortedset
+  #   transportConfig:
+  #     result_queue_name: result-list
+  #     poll_interval_ms: 1000
+  #     batch_size: 10
+  #     queues:
+  #       - queue_name: request-sortedset
+  #         request_path_url: /v1/completions
+  #         igw_base_url: http://igw:80
+  #         gate_type: prometheus-budget
+  #         gate_params:
+  #           pool: my-pool
+  #           max_concurrency: "100"
+  #           baseline: "0.05"
+  transport: ""
+  transportConfig: {}
+
+  # DEPRECATED: prefer ap.transport + ap.transportConfig above. Retained so
+  # existing values keep working -- the chart translates them into the transport
+  # config and the install notes print a migration warning. Message queue
+  # implementation. Supported: "redis-sortedset", "redis-pubsub", "gcp-pubsub",
+  # "gcp-pubsub-gated" ("gcp-pubsub-gated" is treated as "gcp-pubsub"; a per-topic
+  # gate_type now gates natively). Empty selects redis-pubsub.
   messageQueueImpl: ""
   gcpPubSub:
+    # DEPRECATED selector: prefer ap.transport: gcp-pubsub with ap.transportConfig.
+    # The request/topic fields below are translated into the transport config.
     enabled: false
     # GCP project ID for the Pub/Sub client. Required for the gcp-pubsub backends:
     # the process panics on startup ("projectID string is empty") if unset.
@@ -137,6 +170,10 @@ ap:
     certKey: ""
     keyKey: ""
   redis:
+    # DEPRECATED selector: prefer ap.transport: redis-pubsub|redis-sortedset with
+    # ap.transportConfig. The request/queue fields below are translated into the
+    # transport config; the connection fields (url/secretName/secretKey) still apply
+    # on the new surface and are injected as REDIS_URL.
     enabled: false
     # Compatible with any Redis-protocol server including Valkey.
     # All redis.* fields work unchanged when pointed at a Valkey endpoint.

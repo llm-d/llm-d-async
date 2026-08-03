@@ -1,9 +1,17 @@
 ap:
   imagePullPolicy: Never
-  messageQueueImpl: "redis-sortedset"
-  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
   prometheusURL: "http://prometheus.e2e-integration.svc.cluster.local:9090"
   prometheusCacheTTL: "0s"
+  transport: redis-sortedset
+  transportConfig:
+    result_queue_name: "benchmark-pool-gate-result-list"
+    poll_interval_ms: 50
+    batch_size: 64
+    queues:
+      - queue_name: "benchmark-pool-gate-request-sortedset"
+        worker_pool_id: "benchmark-pool"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
   workerPools:
     - id: "benchmark-pool"
       workers: 64
@@ -15,15 +23,6 @@ ap:
     port: 9090
     secure: false
   redis:
-    enabled: true
     url: "redis://redis.e2e-integration.svc.cluster.local:6379"
-    resultQueueName: "benchmark-pool-gate-result-list"
-    pollIntervalMs: 50
-    batchSize: 64
-    queuesConfig:
-      - queue_name: "benchmark-pool-gate-request-sortedset"
-        worker_pool_id: "benchmark-pool"
-        request_path_url: "/v1/completions"
-        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
   modelServerMonitor:
     enabled: false

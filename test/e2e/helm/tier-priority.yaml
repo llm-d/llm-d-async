@@ -1,7 +1,5 @@
 ap:
   imagePullPolicy: Never
-  messageQueueImpl: "redis-sortedset"
-  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
   prometheusURL: "http://prometheus.e2e-integration.svc.cluster.local:9090"
   prometheusCacheTTL: "0s"
   metrics:
@@ -20,18 +18,19 @@ ap:
         saturation_gate: "prometheus-saturation"
         saturation_gate_params: '{"pool":"e2e-pool","threshold":"0.8"}'
         tier_label: "tier"
-  redis:
-    enabled: true
-    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
-    resultQueueName: "tier-priority-result-list"
-    pollIntervalMs: 500
-    batchSize: 10
-    queuesConfig:
+  transport: redis-sortedset
+  transportConfig:
+    result_queue_name: "tier-priority-result-list"
+    poll_interval_ms: 500
+    batch_size: 10
+    queues:
       - queue_name: "tier-priority-interactive"
         request_path_url: "/v1/completions"
         igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
       - queue_name: "tier-priority-async"
         request_path_url: "/v1/completions"
         igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  redis:
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
   modelServerMonitor:
     enabled: false

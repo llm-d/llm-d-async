@@ -1,0 +1,24 @@
+llm-d-async {{ .Chart.AppVersion }} has been installed as {{ include "llm-d-async.fullname" . }}.
+
+Transport: {{ include "llm-d-async.transport" . }}
+
+The processor is configured through the unified transport surface
+(--transport / --transport-config); no deprecated CLI flags are emitted.
+{{- if include "llm-d-async.usingDeprecatedTransport" . }}
+
+WARNING: deprecated chart values in use.
+  You configured the transport with the deprecated per-backend values
+  (ap.redis.enabled / ap.gcpPubSub.enabled / ap.messageQueueImpl and the
+  per-backend ap.redis.* / ap.gcpPubSub.* request/queue fields, ap.otel.redisTracing).
+  They still work — the chart translates them into the transport config — but
+  will be removed in a future release. Migrate to the unified surface:
+
+    ap:
+      transport: {{ include "llm-d-async.transport" . }}
+      transportConfig:
+        # transport-specific JSON document; see the chart README and the
+        # "Transport Configuration" section of the project README.
+
+  Redis/Valkey credentials stay in ap.redis.url / ap.redis.secretName (injected
+  as REDIS_URL); leave "url" out of transportConfig to use them.
+{{- end }}
