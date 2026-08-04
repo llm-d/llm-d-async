@@ -1,0 +1,37 @@
+llm-d-async {{ .Chart.AppVersion }} has been installed as {{ include "llm-d-async.fullname" . }}.
+
+Transport: {{ include "llm-d-async.transport" . }}
+
+The processor is configured through the unified transport surface
+(--transport / --transport-config); no deprecated CLI flags are emitted.
+{{- if include "llm-d-async.usingDeprecatedTransport" . }}
+
+WARNING: deprecated chart values in use.
+  You configured the transport with the deprecated per-backend values
+  (ap.redis.enabled / ap.gcpPubSub.enabled / ap.messageQueueImpl and the
+  per-backend ap.redis.* / ap.gcpPubSub.* request/queue fields, ap.otel.redisTracing).
+  They still work — the chart translates them into the transport config — but
+  will be removed in a future release. Migrate to the unified surface:
+
+    ap:
+      transport: {{ include "llm-d-async.transport" . }}
+      transportConfig:
+        # transport-specific JSON document; see the chart README and the
+        # "Transport Configuration" section of the project README.
+{{- end }}
+{{- if include "llm-d-async.usingDeprecatedRedisConn" . }}
+
+WARNING: deprecated Redis connection values in use.
+  ap.redis.url / ap.redis.secretName are deprecated. Provide the Redis/Valkey
+  connection on the transport surface instead — the chart injects it as REDIS_URL
+  and keeps it out of the pod args:
+
+    ap:
+      transportConfig:
+        urlSecret:
+          name: <existing-secret>   # reference a Secret, OR
+          key: url
+        # or have the chart create the Secret from a literal URL:
+        # urlSecret:
+        #   url: redis://...
+{{- end }}

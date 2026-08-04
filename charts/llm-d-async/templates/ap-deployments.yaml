@@ -1,6 +1,19 @@
 {{- /* ---- Fail-fast configuration validation ----
        Turn common misconfigurations into clear install-time errors instead of
        runtime crash-loops or silently dropped requests. */ -}}
+{{- if not (include "llm-d-async.transport" .) }}
+{{- fail "No transport configured: set ap.transport (redis-pubsub|redis-sortedset|gcp-pubsub) with ap.transportConfig, or enable a backend via ap.redis.enabled / ap.gcpPubSub.enabled (deprecated)." }}
+{{- end }}
+{{- if .Values.ap.transport }}
+{{- /* New transport surface. */ -}}
+{{- if not .Values.ap.transportConfig }}
+{{- fail "ap.transport is set but ap.transportConfig is empty: provide the transport configuration document (see the README 'Transport Configuration' section)." }}
+{{- end }}
+{{- if and (hasPrefix "redis" .Values.ap.transport) (not (hasKey .Values.ap.transportConfig "url")) (not (include "llm-d-async.redisSecretName" .)) }}
+{{- fail "redis transport has no connection: set ap.transportConfig.urlSecret.url (chart creates a Secret) or ap.transportConfig.urlSecret.name/key (reference an existing Secret), or an inline url in ap.transportConfig (dev only). The deprecated ap.redis.url / ap.redis.secretName still work. The resolved Secret is injected as REDIS_URL." }}
+{{- end }}
+{{- else }}
+{{- /* Deprecated per-backend surface. */ -}}
 {{- if .Values.ap.redis.enabled }}
 {{- if and (not .Values.ap.redis.url) (not .Values.ap.redis.secretName) }}
 {{- fail "ap.redis is enabled but no connection is configured: set ap.redis.url, or set ap.redis.secretName/ap.redis.secretKey to reference an existing Secret." }}
@@ -15,6 +28,10 @@
 {{- fail "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-queue igw_base_url entries via ap.redis.queuesConfig." }}
 {{- else if and .Values.ap.gcpPubSub.enabled (not .Values.ap.gcpPubSub.topicsConfig) }}
 {{- fail "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-topic igw_base_url entries via ap.gcpPubSub.topicsConfig." }}
+{{- end }}
+{{- end }}
+{{- if and .Values.ap.redis.enabled (eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset") .Values.ap.redis.queuesConfig .Values.ap.redis.gateType }}
+{{- fail "Cannot set both queuesConfig and gateType. Use queuesConfig with per-queue gate_type instead." }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -43,69 +60,13 @@ spec:
         # Must match the binary produced by the Dockerfile (ENTRYPOINT /llm-d-async).
         - /llm-d-async
         args:
-          {{- if .Values.ap.redis.enabled }}
-          {{- if eq (.Values.ap.messageQueueImpl | default "redis-pubsub") "redis-sortedset" }}
-          - --message-queue-impl=redis-sortedset
-          {{- if and .Values.ap.redis.queuesConfig .Values.ap.redis.gateType }}
-          {{- fail "Cannot set both queuesConfig and gateType. Use queuesConfig with per-queue gate_type instead." }}
-          {{- end }}
-          {{- if .Values.ap.redis.queuesConfig }}
-          - --redis.ss.queues-config
-          - {{ .Values.ap.redis.queuesConfig | toJson | quote }}
-          {{- else }}
-          - --redis.ss.igw-base-url={{ .Values.ap.igwBaseURL }}
-          - --redis.ss.request-path-url
-          - "{{ .Values.ap.redis.requestPathURL }}"
-          - --redis.ss.request-queue-name
-          - "{{ .Values.ap.redis.requestQueueName | default "request-sortedset" }}"
-          {{- if .Values.ap.redis.gateType }}
-          - --redis.ss.gate-type={{ .Values.ap.redis.gateType }}
-          - --redis.ss.gate-params={{ include "llm-d-async.gateParamsJson" . }}
-          {{- end }}
-          {{- end }}
-          - --redis.ss.result-queue-name
-          - "{{ .Values.ap.redis.resultQueueName | default "result-list" }}"
-          - --redis.ss.poll-interval-ms
-          - "{{ .Values.ap.redis.pollIntervalMs | default 1000 }}"
-          - --redis.ss.batch-size
-          - "{{ .Values.ap.redis.batchSize | default 10 }}"
-          {{- else }}
-          - --message-queue-impl=redis-pubsub
-          {{- if .Values.ap.redis.queuesConfig }}
-          - --redis.queues-config
-          - {{ .Values.ap.redis.queuesConfig | toJson | quote }}
-          {{- else }}
-          - --redis.igw-base-url={{ .Values.ap.igwBaseURL }}
-          - --redis.request-path-url
-          - "{{ .Values.ap.redis.requestPathURL }}"
-          {{- end }}
-          {{- end }}
-          {{- else if .Values.ap.gcpPubSub.enabled }}
-          {{- /* Honor an explicit gcp-pubsub* messageQueueImpl; otherwise auto-select
-                 gcp-pubsub-gated when any topic declares a gate_type (per-topic gates
-                 only take effect in gated mode). */}}
-          {{- $mqImpl := "gcp-pubsub" }}
-          {{- if and .Values.ap.messageQueueImpl (hasPrefix "gcp-pubsub" .Values.ap.messageQueueImpl) }}
-          {{- $mqImpl = .Values.ap.messageQueueImpl }}
-          {{- else }}
-          {{- range .Values.ap.gcpPubSub.topicsConfig }}
-          {{- if .gate_type }}{{- $mqImpl = "gcp-pubsub-gated" }}{{- end }}
-          {{- end }}
-          {{- end }}
-          - --message-queue-impl={{ $mqImpl }}
-          {{- if .Values.ap.gcpPubSub.projectId }}
-          - --pubsub.project-id={{ .Values.ap.gcpPubSub.projectId }}
-          {{- end }}
-          - --pubsub.result-topic-id={{ .Values.ap.gcpPubSub.resultTopicId }}
-          {{- if .Values.ap.gcpPubSub.topicsConfig }}
-          - --pubsub.topics-config-file=/etc/llm-d-async/config/pubsub-topics.json
-          {{- else }}
-          - --pubsub.igw-base-url={{ .Values.ap.igwBaseURL }}
-          - --pubsub.request-subscriber-id={{ .Values.ap.gcpPubSub.requestSubscriberId }}
-          - --pubsub.request-path-url
-          - "{{ .Values.ap.gcpPubSub.requestPathURL }}"
-          {{- end }}
-          {{- end }}
+          {{- /* Unified transport surface. On the deprecated per-backend values the
+                 config is synthesized from them (see _helpers.tpl), so the processor
+                 never receives the retired --message-queue-impl / --redis.* / --pubsub.*
+                 flags regardless of which values the operator sets. */}}
+          - --transport={{ include "llm-d-async.transport" . }}
+          - --transport-config
+          - {{ include "llm-d-async.transportConfig" . | quote }}
           {{- if .Values.ap.prometheusURL }}
           - --prometheus-url={{ .Values.ap.prometheusURL }}
           {{- end }}
@@ -119,16 +80,13 @@ spec:
           - --transform-config-file=/etc/llm-d-async/config/transform-config.json
           {{- end }}
           {{- if .Values.ap.requestMergePolicyConfig }}
-          - --request-merge-policy-config=/etc/llm-d-async/config/request-merge-policy.json
+          - --request-merge-policy-config-file=/etc/llm-d-async/config/request-merge-policy.json
           {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 64 }}
           - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
           - --health-port={{ .Values.ap.health.port | default 8081 }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}
           - --metrics-port={{ .Values.ap.metrics.port | default 9090 }}
-          {{- if and .Values.ap.otel.redisTracing .Values.ap.otel.endpoint }}
-          - --redis-tracing=true
-          {{- end }}
           {{- if .Values.ap.tls.insecureSkipVerify }}
           - --tls-insecure-skip-verify=true
           {{- end }}
@@ -166,7 +124,7 @@ spec:
           - name: OTEL_RESOURCE_ATTRIBUTES
             value: "k8s.namespace.name=$(NAMESPACE),k8s.pod.name=$(POD_NAME),service.version={{ .Chart.AppVersion }}"
           {{- end }}
-          {{- if .Values.ap.redis.enabled }}
+          {{- if and (hasPrefix "redis" (include "llm-d-async.transport" .)) (include "llm-d-async.redisSecretName" .) }}
           - name: REDIS_URL
             valueFrom:
               secretKeyRef:
@@ -213,9 +171,9 @@ spec:
         resources:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig .Values.ap.tls.secretName }}
+        {{- if or .Values.ap.workerPools .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig .Values.ap.tls.secretName }}
         volumeMounts:
-          {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
+          {{- if or .Values.ap.workerPools .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
           - name: ap-config
             mountPath: /etc/llm-d-async/config
             readOnly: true
@@ -228,9 +186,9 @@ spec:
         {{- end }}
       serviceAccountName: {{ include "llm-d-async.fullname" . }}
       terminationGracePeriodSeconds: 130
-      {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig .Values.ap.tls.secretName }}
+      {{- if or .Values.ap.workerPools .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig .Values.ap.tls.secretName }}
       volumes:
-        {{- if or .Values.ap.workerPools .Values.ap.gcpPubSub.topicsConfig .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
+        {{- if or .Values.ap.workerPools .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
         - name: ap-config
           configMap:
             name: {{ include "llm-d-async.fullname" . }}-config

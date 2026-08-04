@@ -1,7 +1,5 @@
 ap:
   imagePullPolicy: Never
-  messageQueueImpl: "redis-sortedset"
-  igwBaseURL: "http://envoy.e2e-integration.svc.cluster.local:8081"
   concurrency: 1
   prometheusCacheTTL: "0s"
   otel:
@@ -10,19 +8,20 @@ ap:
     sampler: "always_on"
     samplerArg: "1.0"
     redisTracing: false
+  transport: redis-sortedset
+  transportConfig:
+    result_queue_name: "integration-result-list"
+    poll_interval_ms: 500
+    batch_size: 10
+    queues:
+      - queue_name: "integration-request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
   metrics:
     enabled: true
     port: 9090
     secure: false
   redis:
-    enabled: true
     url: "redis://redis.e2e-integration.svc.cluster.local:6379"
-    resultQueueName: "integration-result-list"
-    pollIntervalMs: 500
-    batchSize: 10
-    queuesConfig:
-      - queue_name: "integration-request-sortedset"
-        request_path_url: "/v1/completions"
-        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
   modelServerMonitor:
     enabled: false

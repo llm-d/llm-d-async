@@ -1,14 +1,16 @@
 suite: deployment
 templates:
   - templates/ap-deployments.yaml
-# Suite-level defaults satisfy the chart's fail-fast validation (igwBaseURL,
-# a Redis connection, and a Pub/Sub projectId) so positive tests render.
-# Individual tests override these to exercise the validation guards.
+# Suite-level defaults use the recommended transport surface (ap.transport +
+# ap.transportConfig) and a Redis connection Secret so REDIS_URL is injected.
+# Individual tests override these to exercise other backends and the guards.
 set:
-  ap.redis.enabled: true
+  ap.transport: redis-pubsub
+  ap.transportConfig:
+    queues:
+      - queue_name: request-queue
+        igw_base_url: "http://igw:80"
   ap.redis.secretName: "redis-creds"
-  ap.igwBaseURL: "http://igw:80"
-  ap.gcpPubSub.projectId: "test-project"
 tests:
   - it: should render a Deployment
     asserts:
@@ -134,30 +136,169 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --metrics-port=8080
 
-  - it: should configure redis-pubsub by default when redis enabled
+  # --- Transport surface (ap.transport + ap.transportConfig) ---------------
+  - it: should select the configured transport
     asserts:
       - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=redis-pubsub
+
+  - it: should pass the transport config document as an inline arg
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport-config
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"queue_name":"request-queue"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"igw_base_url":"http://igw:80"'
+
+  - it: should not emit any deprecated per-backend flags
+    asserts:
+      - notContains:
           path: spec.template.spec.containers[0].args
           content: --message-queue-impl=redis-pubsub
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --redis.igw-base-url=http://igw:80
 
-  - it: should configure redis-sortedset when specified
+  - it: should select redis-sortedset
     set:
-      ap.messageQueueImpl: redis-sortedset
+      ap.transport: redis-sortedset
+      ap.transportConfig:
+        poll_interval_ms: 500
+        queues:
+          - queue_name: request-sortedset
+            igw_base_url: "http://igw:80"
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --message-queue-impl=redis-sortedset
+          content: --transport=redis-sortedset
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"poll_interval_ms":500'
 
-  - it: should configure GCP Pub/Sub when enabled
+  - it: should select gcp-pubsub and pass its config
     set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.gcpPubSub.requestSubscriberId: "test-sub"
-      ap.gcpPubSub.resultTopicId: "test-topic"
+      ap.redis.secretName: ""
+      ap.transport: gcp-pubsub
+      ap.transportConfig:
+        project_id: my-project
+        result_topic_id: results
+        topics:
+          - subscriber_id: sub-1
+            igw_base_url: "http://igw:80"
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --message-queue-impl=gcp-pubsub
+          content: --transport=gcp-pubsub
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"project_id":"my-project"'
+
+  - it: should inject REDIS_URL from the created Secret when redis.url is set
+    set:
+      ap.redis.secretName: ""
+      ap.redis.url: "redis://redis-master.redis.svc:6379"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-llm-d-async-redis
+                key: url
+          any: true
+
+  - it: should inject REDIS_URL from transportConfig.urlSecret and strip it from the config
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+      ap.transportConfig.urlSecret.key: conn
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: conn
+          any: true
+      # urlSecret is a chart directive; it must not leak into --transport-config
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: urlSecret
+
+  - it: should default urlSecret key to url when omitted
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: url
+          any: true
+
+  - it: should default urlSecret key to url when explicitly empty
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+      ap.transportConfig.urlSecret.key: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: url
+          any: true
+
+  - it: should inject REDIS_URL from the chart-created Secret when urlSecret.url is set
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.url: "redis://inline-secret:6379"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-llm-d-async-redis
+                key: url
+          any: true
+      # the literal URL must not leak into --transport-config args
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: inline-secret
+
+  - it: should not inject REDIS_URL for a gcp-pubsub transport
+    set:
+      ap.redis.secretName: ""
+      ap.transport: gcp-pubsub
+      ap.transportConfig:
+        project_id: my-project
+        result_topic_id: results
+        topics:
+          - subscriber_id: sub-1
+            igw_base_url: "http://igw:80"
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+          any: true
 
   - it: should default the image to the published repo with the appVersion tag
     asserts:
@@ -173,69 +314,18 @@ tests:
           path: spec.template.spec.containers[0].image
           value: ghcr.io/llm-d/llm-d-async:v1.2.3
 
-  - it: should render --pubsub.project-id when projectId is set
+  - it: should not require a Secret when url is inline in transportConfig
     set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.gcpPubSub.projectId: "my-project"
-      ap.gcpPubSub.requestSubscriberId: "test-sub"
-      ap.gcpPubSub.resultTopicId: "test-topic"
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: --pubsub.project-id=my-project
-
-  - it: should fail when gcp-pubsub is enabled without a projectId
-    set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.gcpPubSub.projectId: ""
-      ap.gcpPubSub.requestSubscriberId: "test-sub"
-      ap.gcpPubSub.resultTopicId: "test-topic"
-    asserts:
-      - failedTemplate:
-          errorMessage: "ap.gcpPubSub is enabled but ap.gcpPubSub.projectId is empty: the GCP Pub/Sub backend requires a project ID (the process panics on startup without it)."
-
-  - it: should fail when redis is enabled with no url and no secretName
-    set:
-      ap.redis.enabled: true
-      ap.redis.url: ""
       ap.redis.secretName: ""
-    asserts:
-      - failedTemplate:
-          errorMessage: "ap.redis is enabled but no connection is configured: set ap.redis.url, or set ap.redis.secretName/ap.redis.secretKey to reference an existing Secret."
-
-  - it: should fail when igwBaseURL is empty in single-queue redis mode
-    set:
-      ap.redis.enabled: true
-      ap.igwBaseURL: ""
-    asserts:
-      - failedTemplate:
-          errorMessage: "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-queue igw_base_url entries via ap.redis.queuesConfig."
-
-  - it: should fail when igwBaseURL is empty in single-topic gcp-pubsub mode
-    set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.igwBaseURL: ""
-      ap.gcpPubSub.resultTopicId: "test-topic"
-    asserts:
-      - failedTemplate:
-          errorMessage: "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-topic igw_base_url entries via ap.gcpPubSub.topicsConfig."
-
-  - it: should not require igwBaseURL when redis queuesConfig is set
-    set:
-      ap.redis.enabled: true
-      ap.messageQueueImpl: "redis-sortedset"
-      ap.igwBaseURL: ""
-      ap.redis.queuesConfig:
-        - queue_name: "queue-1"
-          igw_base_url: "http://igw-1:80"
-          request_path_url: "/v1/completions"
+      ap.transportConfig:
+        url: "redis://inline:6379"
+        queues:
+          - queue_name: request-queue
+            igw_base_url: "http://igw:80"
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --redis.ss.queues-config
+          content: --transport=redis-pubsub
 
   - it: should inject OTel env vars when endpoint is set
     set:
@@ -279,22 +369,12 @@ tests:
             secret:
               secretName: my-tls-secret
 
-  - it: should not mount TLS volume when secretName is empty
+  - it: should not mount any volume by default
     asserts:
       - isNull:
           path: spec.template.spec.containers[0].volumeMounts
       - isNull:
           path: spec.template.spec.volumes
-
-  - it: should fail when queuesConfig and gateType are both set
-    set:
-      ap.messageQueueImpl: redis-sortedset
-      ap.redis.gateType: prometheus-saturation
-      ap.redis.queuesConfig:
-        - queue_name: q1
-    asserts:
-      - failedTemplate:
-          errorMessage: "Cannot set both queuesConfig and gateType. Use queuesConfig with per-queue gate_type instead."
 
   - it: should mount config volume and pass pool-config-file when workerPools are set
     set:
@@ -317,81 +397,6 @@ tests:
             name: ap-config
             configMap:
               name: RELEASE-NAME-llm-d-async-config
-
-  - it: should mount config volume and pass pubsub.topics-config-file when GCP PubSub topicsConfig is set
-    set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.gcpPubSub.resultTopicId: "test-result-topic"
-      ap.gcpPubSub.topicsConfig:
-        - subscriber_id: "sub-1"
-          igw_base_url: "http://igw:80"
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: --pubsub.topics-config-file=/etc/llm-d-async/config/pubsub-topics.json
-      - contains:
-          path: spec.template.spec.containers[0].volumeMounts
-          content:
-            name: ap-config
-            mountPath: /etc/llm-d-async/config
-            readOnly: true
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: ap-config
-            configMap:
-              name: RELEASE-NAME-llm-d-async-config
-
-  - it: should auto-select gcp-pubsub-gated when a topic declares a gate_type
-    set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.gcpPubSub.resultTopicId: "test-result-topic"
-      ap.gcpPubSub.topicsConfig:
-        - subscriber_id: "sub-1"
-          igw_base_url: "http://igw:80"
-          gate_type: "redis-quota"
-          gate_params:
-            address: "redis:6379"
-            attribute: "team"
-            mode: "concurrency"
-            limit: "5"
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: --message-queue-impl=gcp-pubsub-gated
-      - notContains:
-          path: spec.template.spec.containers[0].args
-          content: --message-queue-impl=gcp-pubsub
-
-  - it: should keep plain gcp-pubsub when no topic declares a gate_type
-    set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.gcpPubSub.resultTopicId: "test-result-topic"
-      ap.gcpPubSub.topicsConfig:
-        - subscriber_id: "sub-1"
-          igw_base_url: "http://igw:80"
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: --message-queue-impl=gcp-pubsub
-      - notContains:
-          path: spec.template.spec.containers[0].args
-          content: --message-queue-impl=gcp-pubsub-gated
-
-  - it: should honor an explicit gcp-pubsub-gated messageQueueImpl override
-    set:
-      ap.redis.enabled: false
-      ap.gcpPubSub.enabled: true
-      ap.gcpPubSub.requestSubscriberId: "test-sub"
-      ap.gcpPubSub.resultTopicId: "test-topic"
-      ap.messageQueueImpl: "gcp-pubsub-gated"
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: --message-queue-impl=gcp-pubsub-gated
 
   - it: should pass transform-config-file and mount the config when transformConfig is set
     set:
@@ -417,3 +422,15 @@ tests:
       - notContains:
           path: spec.template.spec.containers[0].args
           content: --transform-config-file=/etc/llm-d-async/config/transform-config.json
+
+  - it: should pass the renamed request-merge-policy-config-file flag
+    set:
+      ap.requestMergePolicyConfig:
+        type: random-robin
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --request-merge-policy-config-file=/etc/llm-d-async/config/request-merge-policy.json
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --request-merge-policy-config=/etc/llm-d-async/config/request-merge-policy.json

@@ -1,0 +1,193 @@
+suite: deprecated transport values (backwards compatibility)
+# The deprecated per-backend selectors (ap.redis.enabled / ap.gcpPubSub.enabled /
+# ap.messageQueueImpl and the ap.redis.* / ap.gcpPubSub.* request fields,
+# ap.otel.redisTracing) still work: the chart translates them into the unified
+# --transport / --transport-config surface and never emits the retired flags.
+templates:
+  - templates/ap-deployments.yaml
+tests:
+  - it: redis.enabled defaults to the redis-pubsub transport
+    set:
+      ap.redis.enabled: true
+      ap.redis.secretName: "redis-creds"
+      ap.igwBaseURL: "http://igw:80"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=redis-pubsub
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"queue_name":"request-queue"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"igw_base_url":"http://igw:80"'
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=redis-pubsub
+
+  - it: messageQueueImpl redis-sortedset selects the sorted-set transport
+    set:
+      ap.redis.enabled: true
+      ap.messageQueueImpl: redis-sortedset
+      ap.redis.secretName: "redis-creds"
+      ap.igwBaseURL: "http://igw:80"
+      ap.redis.resultQueueName: "result-list"
+      ap.redis.pollIntervalMs: 500
+      ap.redis.batchSize: 20
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=redis-sortedset
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"queue_name":"request-sortedset"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"poll_interval_ms":500'
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"batch_size":20'
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=redis-sortedset
+
+  - it: single-queue sorted-set gate is translated into the queue entry
+    set:
+      ap.redis.enabled: true
+      ap.messageQueueImpl: redis-sortedset
+      ap.redis.secretName: "redis-creds"
+      ap.igwBaseURL: "http://igw:80"
+      ap.redis.gateType: prometheus-saturation
+      ap.redis.gateParams:
+        pool: p1
+        threshold: 0.7
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"gate_type":"prometheus-saturation"'
+      # gate_params values are rendered as strings for the params parser.
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"threshold":"0.7"'
+
+  - it: redisTracing is translated into enable_tracing
+    set:
+      ap.redis.enabled: true
+      ap.messageQueueImpl: redis-sortedset
+      ap.redis.secretName: "redis-creds"
+      ap.igwBaseURL: "http://igw:80"
+      ap.otel.endpoint: "http://otel:4317"
+      ap.otel.redisTracing: true
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"enable_tracing":true'
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --redis-tracing=true
+
+  - it: redis queuesConfig is passed through as the queues array
+    set:
+      ap.redis.enabled: true
+      ap.messageQueueImpl: redis-sortedset
+      ap.redis.secretName: "redis-creds"
+      ap.igwBaseURL: ""
+      ap.redis.queuesConfig:
+        - queue_name: "queue-1"
+          igw_base_url: "http://igw-1:80"
+          request_path_url: "/v1/completions"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=redis-sortedset
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"queue_name":"queue-1"'
+
+  - it: gcpPubSub.enabled with a topics gate maps to gcp-pubsub (no more gated impl)
+    set:
+      ap.redis.enabled: false
+      ap.gcpPubSub.enabled: true
+      ap.gcpPubSub.projectId: "test-project"
+      ap.gcpPubSub.resultTopicId: "test-result-topic"
+      ap.gcpPubSub.topicsConfig:
+        - subscriber_id: "sub-1"
+          igw_base_url: "http://igw:80"
+          gate_type: "redis-quota"
+          gate_params:
+            address: "redis:6379"
+            limit: "5"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=gcp-pubsub
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"gate_type":"redis-quota"'
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=gcp-pubsub
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=gcp-pubsub-gated
+
+  - it: deprecated gcp-pubsub-gated messageQueueImpl maps to gcp-pubsub
+    set:
+      ap.redis.enabled: false
+      ap.gcpPubSub.enabled: true
+      ap.gcpPubSub.projectId: "test-project"
+      ap.gcpPubSub.resultTopicId: "test-topic"
+      ap.gcpPubSub.requestSubscriberId: "test-sub"
+      ap.igwBaseURL: "http://igw:80"
+      ap.messageQueueImpl: "gcp-pubsub-gated"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=gcp-pubsub
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=gcp-pubsub-gated
+
+  # Deprecated-path fail-fast guards are preserved.
+  - it: should fail when redis is enabled with no url and no secretName
+    set:
+      ap.redis.enabled: true
+      ap.redis.url: ""
+      ap.redis.secretName: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "ap.redis is enabled but no connection is configured: set ap.redis.url, or set ap.redis.secretName/ap.redis.secretKey to reference an existing Secret."
+
+  - it: should fail when gcp-pubsub is enabled without a projectId
+    set:
+      ap.redis.enabled: false
+      ap.gcpPubSub.enabled: true
+      ap.gcpPubSub.projectId: ""
+      ap.gcpPubSub.requestSubscriberId: "test-sub"
+      ap.gcpPubSub.resultTopicId: "test-topic"
+      ap.igwBaseURL: "http://igw:80"
+    asserts:
+      - failedTemplate:
+          errorMessage: "ap.gcpPubSub is enabled but ap.gcpPubSub.projectId is empty: the GCP Pub/Sub backend requires a project ID (the process panics on startup without it)."
+
+  - it: should fail when igwBaseURL is empty in single-queue redis mode
+    set:
+      ap.redis.enabled: true
+      ap.redis.secretName: "redis-creds"
+      ap.igwBaseURL: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "ap.igwBaseURL is required: set it to your inference gateway base URL, or provide per-queue igw_base_url entries via ap.redis.queuesConfig."
+
+  - it: should fail when queuesConfig and gateType are both set
+    set:
+      ap.redis.enabled: true
+      ap.redis.secretName: "redis-creds"
+      ap.messageQueueImpl: redis-sortedset
+      ap.redis.gateType: prometheus-saturation
+      ap.redis.queuesConfig:
+        - queue_name: q1
+          igw_base_url: "http://igw:80"
+    asserts:
+      - failedTemplate:
+          errorMessage: "Cannot set both queuesConfig and gateType. Use queuesConfig with per-queue gate_type instead."

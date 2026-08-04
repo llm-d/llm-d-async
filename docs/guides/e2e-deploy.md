@@ -164,7 +164,11 @@ helm install llm-d-async ${ASYNC_REPO}/charts/llm-d-async/ \
 
 The values file (`docs/guides/e2e-deploy/llm-d-async-values.yaml`) configures:
 - Image: `ghcr.io/llm-d/llm-d-async:938cd44`
-- Queue: Redis sorted-set with `redis.url` set directly (chart creates the Secret), configured via `queuesConfig`
+- Queue: `redis-sortedset` transport, configured via `transport` / `transportConfig`.
+  Connection: `transportConfig.urlSecret.url` — the chart creates a Secret from the URL and
+  injects it as `REDIS_URL` (kept out of the pod args). This dev Redis is unauthenticated;
+  for a **credentialed or production** Redis, reference an existing Secret instead with
+  `ap.transportConfig.urlSecret: {name: <secret>, key: url}`
 - Gate: `prometheus-budget` with pool=`optimized-baseline`, max_concurrency=100, baseline=0.05 (per-queue).
   `max_concurrency` is a **per ready pod** capacity — see [Size `max_concurrency` for your pool](#size-max_concurrency-for-your-pool)
   before reusing this value on your own model

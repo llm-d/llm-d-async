@@ -1,0 +1,28 @@
+suite: transport validation
+# Self-contained (no suite-level defaults) so each test starts from an empty
+# transport configuration and exercises one fail-fast guard.
+templates:
+  - templates/ap-deployments.yaml
+tests:
+  - it: should fail when no transport is configured at all
+    asserts:
+      - failedTemplate:
+          errorMessage: "No transport configured: set ap.transport (redis-pubsub|redis-sortedset|gcp-pubsub) with ap.transportConfig, or enable a backend via ap.redis.enabled / ap.gcpPubSub.enabled (deprecated)."
+
+  - it: should fail when transport is set without a transportConfig
+    set:
+      ap.transport: redis-pubsub
+    asserts:
+      - failedTemplate:
+          errorMessage: "ap.transport is set but ap.transportConfig is empty: provide the transport configuration document (see the README 'Transport Configuration' section)."
+
+  - it: should fail when a redis transport has no connection
+    set:
+      ap.transport: redis-pubsub
+      ap.transportConfig:
+        queues:
+          - queue_name: request-queue
+            igw_base_url: "http://igw:80"
+    asserts:
+      - failedTemplate:
+          errorMessage: "redis transport has no connection: set ap.transportConfig.urlSecret.url (chart creates a Secret) or ap.transportConfig.urlSecret.name/key (reference an existing Secret), or an inline url in ap.transportConfig (dev only). The deprecated ap.redis.url / ap.redis.secretName still work. The resolved Secret is injected as REDIS_URL."
