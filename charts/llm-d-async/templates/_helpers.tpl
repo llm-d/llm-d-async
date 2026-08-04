@@ -149,10 +149,16 @@ true
 {{/*
 Report whether the deprecated ap.redis.* connection inputs are in use. On the new
 surface the Redis connection belongs in ap.transportConfig.urlSecret; ap.redis.url
-and ap.redis.secretName are retained for backwards compatibility only.
+and ap.redis.secretName are retained for backwards compatibility only. Only warn
+when the effective transport is Redis and the connection actually comes from
+ap.redis.* (i.e. the new urlSecret surface is not configured), so the migration
+notice never fires for a non-Redis backend or when urlSecret already supersedes it.
 */}}
 {{- define "llm-d-async.usingDeprecatedRedisConn" -}}
-{{- if or .Values.ap.redis.url .Values.ap.redis.secretName -}}
+{{- $transport := include "llm-d-async.transport" . -}}
+{{- $ts := .Values.ap.transportConfig | default dict -}}
+{{- $hasUrlSecret := or (dig "urlSecret" "url" "" $ts) (dig "urlSecret" "name" "" $ts) -}}
+{{- if and (hasPrefix "redis" $transport) (not $hasUrlSecret) (or .Values.ap.redis.url .Values.ap.redis.secretName) -}}
 true
 {{- end -}}
 {{- end }}
@@ -184,7 +190,7 @@ When the chart creates the Secret, the key is always "url".
 {{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
 url
 {{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
-{{- dig "urlSecret" "key" "url" $ts -}}
+{{- dig "urlSecret" "key" "url" $ts | default "url" -}}
 {{- else if .Values.ap.redis.url -}}
 url
 {{- else -}}

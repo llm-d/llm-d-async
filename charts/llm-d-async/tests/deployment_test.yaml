@@ -248,6 +248,22 @@ tests:
                 key: url
           any: true
 
+  - it: should default urlSecret key to url when explicitly empty
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+      ap.transportConfig.urlSecret.key: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: url
+          any: true
+
   - it: should inject REDIS_URL from the chart-created Secret when urlSecret.url is set
     set:
       ap.redis.secretName: ""
