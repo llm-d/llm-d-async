@@ -21,6 +21,13 @@ func init() {
 		var params struct {
 			PriorityHeader string `json:"priority_header"`
 			TierLabel      string `json:"tier_label"`
+			// LaneObjectives maps lane keys ("reserved-interactive",
+			// "overflow-batch", ...) to InferenceObjective names stamped as
+			// ObjectiveHeader, replacing the per-queue objective for lane
+			// granularity. The numeric priority header has no consumer in
+			// upstream gateways. Objectives are how priority reaches them.
+			ObjectiveHeader string            `json:"objective_header"`
+			LaneObjectives  map[string]string `json:"lane_objectives"`
 			fairness.Params
 		}
 		if len(parameters) > 0 {
@@ -36,6 +43,12 @@ func init() {
 		if !httpguts.ValidHeaderFieldName(params.PriorityHeader) {
 			return nil, fmt.Errorf("invalid tier-priority parameters: priority_header %q is not a legal HTTP header name", params.PriorityHeader)
 		}
+		if params.ObjectiveHeader == "" {
+			params.ObjectiveHeader = "x-llm-d-inference-objective"
+		}
+		if !httpguts.ValidHeaderFieldName(params.ObjectiveHeader) {
+			return nil, fmt.Errorf("invalid tier-priority parameters: objective_header %q is not a legal HTTP header name", params.ObjectiveHeader)
+		}
 		fairnessHeader, err := params.ResolveHeader()
 		if err != nil {
 			return nil, fmt.Errorf("invalid tier-priority parameters: %w", err)
@@ -43,6 +56,8 @@ func init() {
 		return NewTierPriorityPolicy(name, Config{
 			PriorityHeader:    params.PriorityHeader,
 			TierLabel:         params.TierLabel,
+			ObjectiveHeader:   params.ObjectiveHeader,
+			LaneObjectives:    params.LaneObjectives,
 			FairnessHeader:    fairnessHeader,
 			FairnessAttribute: params.Attribute,
 		}), nil
@@ -65,6 +80,14 @@ type Config struct {
 	// FairnessAttribute is the message metadata attribute holding the tenant
 	// identity. Empty falls back to fairness.DefaultAttribute.
 	FairnessAttribute string
+	// ObjectiveHeader is the HTTP header stamped with the lane's
+	// InferenceObjective name. Empty falls back to
+	// "x-llm-d-inference-objective".
+	ObjectiveHeader string
+	// LaneObjectives maps lane keys ("reserved-interactive", "overflow-batch",
+	// ...) to InferenceObjective names. Lanes without an entry are not
+	// stamped. Nil disables objective stamping.
+	LaneObjectives map[string]string
 }
 
 // NewTierPriorityPolicy returns a merge policy that buckets requests into strict
@@ -74,11 +97,17 @@ func NewTierPriorityPolicy(name string, cfg Config) *TierPriorityPolicy {
 	if tierLabel == "" {
 		tierLabel = "tier"
 	}
+	objectiveHeader := cfg.ObjectiveHeader
+	if objectiveHeader == "" {
+		objectiveHeader = "x-llm-d-inference-objective"
+	}
 	return &TierPriorityPolicy{
-		name:           name,
-		priorityHeader: cfg.PriorityHeader,
-		tierLabel:      tierLabel,
-		fairness:       fairness.New(cfg.FairnessHeader, cfg.FairnessAttribute),
+		name:            name,
+		priorityHeader:  cfg.PriorityHeader,
+		tierLabel:       tierLabel,
+		objectiveHeader: objectiveHeader,
+		laneObjectives:  cfg.LaneObjectives,
+		fairness:        fairness.New(cfg.FairnessHeader, cfg.FairnessAttribute),
 	}
 }
 
@@ -86,10 +115,12 @@ var _ pipeline.RequestMergePolicy = (*TierPriorityPolicy)(nil)
 var _ plugins.Plugin = (*TierPriorityPolicy)(nil)
 
 type TierPriorityPolicy struct {
-	name           string
-	priorityHeader string
-	tierLabel      string
-	fairness       fairness.Stamper
+	name            string
+	priorityHeader  string
+	tierLabel       string
+	objectiveHeader string
+	laneObjectives  map[string]string
+	fairness        fairness.Stamper
 }
 
 func (p *TierPriorityPolicy) TypedName() plugins.TypedName {
@@ -195,6 +226,25 @@ func getPriorityIndex(ir *api.InternalRequest, tierLabel string) int {
 	}
 
 	return classPri*3 + tierPri
+}
+
+// laneKey names the (classification, tier) lane for objective mapping, e.g.
+// "reserved-interactive" or "overflow-batch".
+func laneKey(ir *api.InternalRequest, tierLabel string) string {
+	tier := string(api.TierBatch)
+	if ir.Labels != nil {
+		switch ir.Labels[tierLabel] {
+		case string(api.TierInteractive):
+			tier = string(api.TierInteractive)
+		case string(api.TierAsync):
+			tier = string(api.TierAsync)
+		}
+	}
+	class := "overflow"
+	if ir.GetClassification() == api.ClassificationReserved {
+		class = "reserved"
+	}
+	return class + "-" + tier
 }
 
 func (s *scheduler) Push(ir *api.InternalRequest, chMeta pipeline.RequestChannel) bool {
@@ -333,6 +383,11 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 				pri := getPriorityIndex(ir, tierLabel)
 				if priorityHeader != "" {
 					headers[priorityHeader] = strconv.Itoa(pri)
+				}
+				if len(p.laneObjectives) > 0 {
+					if objective, ok := p.laneObjectives[laneKey(ir, tierLabel)]; ok && objective != "" {
+						headers[p.objectiveHeader] = objective
+					}
 				}
 
 				erm := pipeline.EmbelishedRequestMessage{

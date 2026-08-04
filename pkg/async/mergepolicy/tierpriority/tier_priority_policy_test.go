@@ -292,3 +292,55 @@ func TestPerBucketLimitsNonBlocking(t *testing.T) {
 		t.Fatal("push to empty bucket blocked")
 	}
 }
+
+func TestTierPriorityStamping(t *testing.T) {
+	ch := pipeline.RequestChannel{
+		Channel:      make(chan *api.InternalRequest, 4),
+		WorkerPoolID: "pool-s",
+		IGWBaseURL:   "http://gw",
+	}
+	pools := map[string]pipeline.WorkerPoolConfig{
+		"pool-s": {ID: "pool-s", Workers: 1},
+	}
+	policy := NewTierPriorityPolicy("test-stamping", Config{
+		PriorityHeader: "x-gateway-priority",
+		TierLabel:      "tier",
+		LaneObjectives: map[string]string{
+			"reserved-interactive": "interactive-reserved",
+			"overflow-interactive": "interactive-overflow",
+		},
+	})
+
+	mk := func(id, tier, class, team string) *api.InternalRequest {
+		ir := api.NewInternalRequest(api.InternalRouting{
+			Labels: map[string]string{"tier": tier, api.LabelClassification: class},
+		}, &api.RequestMessage{
+			ID: id, Created: 1, Deadline: 9999999999,
+			Metadata: map[string]string{"team": team},
+		})
+		return ir
+	}
+	ch.Channel <- mk("s-reserved", "interactive", string(api.ClassificationReserved), "team-a")
+	ch.Channel <- mk("s-overflow", "interactive", string(api.ClassificationOverflow), "team-b")
+	close(ch.Channel)
+
+	dispatch := policy.MergeRequestChannels([]pipeline.RequestChannel{ch}, pools)
+	merged := dispatch.Channels["pool-s"]
+
+	expected := map[string]string{
+		"s-reserved": "interactive-reserved",
+		"s-overflow": "interactive-overflow",
+	}
+	deadline := time.After(3 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case msg := <-merged:
+			want := expected[msg.PublicRequest.ReqID()]
+			if got := msg.HttpHeaders["x-llm-d-inference-objective"]; got != want {
+				t.Errorf("%s: objective header = %q, want %q", msg.PublicRequest.ReqID(), got, want)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for stamped messages")
+		}
+	}
+}
