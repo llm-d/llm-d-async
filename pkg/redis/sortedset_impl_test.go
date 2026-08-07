@@ -827,6 +827,59 @@ func TestSortedSetFlow_ResultBatch(t *testing.T) {
 	}
 }
 
+func TestSortedSetFlow_ResultTTL(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	flow := &RedisSortedSetFlow{
+		defaultResultQueueName: "default-results",
+		rdb:                    rdb,
+		resultChannel:          make(chan api.ResultMessage, 4),
+		pollInterval:           50 * time.Millisecond,
+		batchSize:              10,
+		gate:                   noopGate(),
+		configMap: map[string]SortedSetQueueConfig{
+			"ttl-queue": {ID: "ttl-queue", ResultTTLSeconds: 60},
+			"no-ttl":    {ID: "no-ttl"},
+		},
+	}
+
+	go flow.resultWorker(ctx)
+
+	// Per-message result key routing from a queue with result_ttl_seconds:
+	// the destination key gets an expiry.
+	flow.resultChannel <- api.ResultMessage{
+		ID:      "ttl-1",
+		Payload: "data",
+		Routing: api.InternalRouting{QueueID: "ttl-queue", ResultQueueName: "results:req:ttl-1"},
+	}
+	// Same flow from a queue without TTL configured: no expiry (unchanged
+	// belt behavior).
+	flow.resultChannel <- api.ResultMessage{
+		ID:      "plain-1",
+		Payload: "data",
+		Routing: api.InternalRouting{QueueID: "no-ttl", ResultQueueName: "belt-results"},
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if n, _ := rdb.LLen(ctx, "results:req:ttl-1").Result(); n != 1 {
+		t.Fatalf("expected 1 result on per-request key, got %d", n)
+	}
+	ttl := s.TTL("results:req:ttl-1")
+	if ttl <= 0 || ttl > 60*time.Second {
+		t.Errorf("expected TTL in (0, 60s] on per-request key, got %v", ttl)
+	}
+
+	if n, _ := rdb.LLen(ctx, "belt-results").Result(); n != 1 {
+		t.Fatalf("expected 1 result on belt, got %d", n)
+	}
+	if ttl := s.TTL("belt-results"); ttl != 0 {
+		t.Errorf("expected no TTL on belt key, got %v", ttl)
+	}
+}
+
 func TestSortedSetFlow_ResultBatchMultiQueue(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

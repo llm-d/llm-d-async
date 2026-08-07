@@ -2791,3 +2791,40 @@ func TestWorker_PoolGateDecisionsMetrics(t *testing.T) {
 		}
 	})
 }
+
+// A send aborted by the per-request deadline (message deadline in the past
+// relative to the send duration) must surface DEADLINE_EXCEEDED, not
+// INFERENCE_ERROR, so callers can distinguish timeout from failure.
+func TestDeadlineAbortedSendClassifiedAsDeadlineExceeded(t *testing.T) {
+	msgId := "deadline-mid-flight"
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		// Simulate an upstream that holds the request until the context dies.
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx := context.Background()
+
+	go Worker(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       msgId,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "m", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", map[string]string{})
+
+	select {
+	case r := <-resultChannel:
+		if r.ErrorCode != asyncapi.ErrCodeDeadlineExceeded {
+			t.Errorf("expected DEADLINE_EXCEEDED, got error code %q (message %q)", r.ErrorCode, r.ErrorMessage)
+		}
+	case <-retryChannel:
+		t.Error("deadline-aborted send should not be retried")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for result")
+	}
+}
