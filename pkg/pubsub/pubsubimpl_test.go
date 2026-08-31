@@ -443,3 +443,30 @@ func TestHealthCheck_StaleConsumeErrorRecovers(t *testing.T) {
 		t.Errorf("expected stale consume error to fall back to a healthy active probe, got error: %v", err)
 	}
 }
+
+func TestQueueBacklogMarksSourceUnavailableWithoutMetricClient(t *testing.T) {
+	flow := &PubSubMQFlow{
+		requestChannels: []RequestChannelData{
+			{
+				subscriberID: "sub-no-metrics",
+				requestChannel: pipeline.RequestChannel{
+					WorkerPoolID: "pool-a",
+				},
+			},
+		},
+	}
+
+	stats, err := flow.QueueBacklog(context.Background())
+	if err != nil {
+		t.Fatalf("QueueBacklog returned error: %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("QueueBacklog returned %d stats, want 1", len(stats))
+	}
+	if stats[0].QueueName != "sub-no-metrics" || stats[0].PoolName != "pool-a" {
+		t.Fatalf("unexpected backlog labels: %+v", stats[0])
+	}
+	if stats[0].Depth != 0 || stats[0].SourceAvailable {
+		t.Fatalf("backlog without metric client = %+v, want unavailable zero sentinel", stats[0])
+	}
+}

@@ -292,6 +292,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					}
 
 					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
+					metrics.RecordDispatchedReq(queueID, queueName, msg.WorkerPoolID)
 					inferenceStart := time.Now()
 					resp, err := client.SendRequest(reqCtx, msg.RequestURL, sendHeaders, sendPayload)
 					metrics.RecordInferenceLatency(float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)

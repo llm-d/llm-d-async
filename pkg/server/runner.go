@@ -467,6 +467,7 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 		for _, s := range stats {
 			current[queueLabels{id: s.QueueID, name: s.QueueName, pool: s.PoolName}] = struct{}{}
 			metrics.SetBrokerBacklog(s.QueueID, s.QueueName, s.PoolName, float64(s.Depth))
+			metrics.SetBrokerBacklogSourceAvailable(s.QueueID, s.QueueName, s.PoolName, s.SourceAvailable)
 			// Nil counts mean the broker cannot report per-item deadlines
 			// (e.g. Cloud Pub/Sub); emit nothing for it. When present they are
 			// exact cumulative bucket counts, zeroed on a failed read so the

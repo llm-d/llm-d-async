@@ -346,8 +346,16 @@ func (r *PubSubMQFlow) Shutdown() {
 func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
 	if r.metricClient == nil {
 		// Backlog reporting was disabled at startup (already logged when the
-		// client failed to initialize); no-op rather than erroring every poll.
-		return nil, nil
+		// client failed to initialize). Emit unavailable samples so a zero
+		// backlog cannot be mistaken for a successful read of an empty queue.
+		stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
+		for _, cd := range r.requestChannels {
+			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueName: cd.subscriberID,
+				PoolName:  cd.requestChannel.WorkerPoolID,
+			})
+		}
+		return stats, nil
 	}
 	now := time.Now()
 	interval := &monitoringpb.TimeInterval{
@@ -371,9 +379,8 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		ts, err := it.Next()
 		if err != nil {
 			if errors.Is(err, iterator.Done) {
-				// No sample in the window: for a configured subscription this
-				// normally means it has drained. Report 0 so the gauge does not
-				// retain a stale (high) value after the queue empties.
+				// A successful query with no sample does not prove the subscription
+				// is empty. Export a zero sentinel, but leave SourceAvailable false.
 				stats = append(stats, pipeline.QueueBacklogStat{
 					QueueName: subID,
 					PoolName:  cd.requestChannel.WorkerPoolID,
@@ -393,6 +400,7 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		}
 		points := ts.GetPoints()
 		if len(points) == 0 {
+			// A time series without points also cannot certify an empty queue.
 			stats = append(stats, pipeline.QueueBacklogStat{
 				QueueName: subID,
 				PoolName:  cd.requestChannel.WorkerPoolID,
@@ -401,9 +409,10 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		}
 		// Points are returned newest-first; the first is the latest sample.
 		stats = append(stats, pipeline.QueueBacklogStat{
-			QueueName: subID,
-			PoolName:  cd.requestChannel.WorkerPoolID,
-			Depth:     points[0].GetValue().GetInt64Value(),
+			QueueName:       subID,
+			PoolName:        cd.requestChannel.WorkerPoolID,
+			Depth:           points[0].GetValue().GetInt64Value(),
+			SourceAvailable: true,
 		})
 	}
 	return stats, firstErr

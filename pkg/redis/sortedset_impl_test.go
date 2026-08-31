@@ -2115,15 +2115,15 @@ func TestQueueBacklog(t *testing.T) {
 		t.Fatalf("QueueBacklog returned error: %v", err)
 	}
 
-	got := make(map[string]int64, len(stats))
+	got := make(map[string]pipeline.QueueBacklogStat, len(stats))
 	for _, s := range stats {
-		got[s.QueueName] = s.Depth
+		got[s.QueueName] = s
 	}
-	if got["queue-a"] != 3 {
-		t.Errorf("queue-a backlog = %d, want 3", got["queue-a"])
+	if got["queue-a"].Depth != 3 || !got["queue-a"].SourceAvailable {
+		t.Errorf("queue-a backlog = %+v, want depth 3 from an available source", got["queue-a"])
 	}
-	if got["queue-b"] != 1 {
-		t.Errorf("queue-b backlog = %d, want 1", got["queue-b"])
+	if got["queue-b"].Depth != 1 || !got["queue-b"].SourceAvailable {
+		t.Errorf("queue-b backlog = %+v, want depth 1 from an available source", got["queue-b"])
 	}
 }
 
@@ -2248,8 +2248,9 @@ func TestQueueBacklogDeadlineCountsAtScale(t *testing.T) {
 }
 
 // TestQueueBacklogReportsZeroOnError verifies that a per-queue failure reports a
-// 0 sentinel for that queue (rather than skipping it) so the gauge does not
-// retain a stale value, while healthy queues still report their real depth.
+// 0 sentinel marked unavailable (rather than skipping it) so the gauge does not
+// retain a stale value or look like a trustworthy empty queue, while healthy
+// queues still report their real depth.
 func TestQueueBacklogReportsZeroOnError(t *testing.T) {
 	_, rdb, ctx, cancel := setupTest(t)
 	defer rdb.Close() // nolint:errcheck
@@ -2273,18 +2274,18 @@ func TestQueueBacklogReportsZeroOnError(t *testing.T) {
 		t.Fatal("QueueBacklog expected an error for the WRONGTYPE queue, got nil")
 	}
 
-	got := make(map[string]int64, len(stats))
+	got := make(map[string]pipeline.QueueBacklogStat, len(stats))
 	for _, s := range stats {
-		got[s.QueueName] = s.Depth
+		got[s.QueueName] = s
 	}
 	if _, ok := got["queue-bad"]; !ok {
 		t.Error("queue-bad missing from stats; want a 0 sentinel instead of being skipped")
 	}
-	if got["queue-bad"] != 0 {
-		t.Errorf("queue-bad backlog = %d, want 0", got["queue-bad"])
+	if got["queue-bad"].Depth != 0 || got["queue-bad"].SourceAvailable {
+		t.Errorf("queue-bad backlog = %+v, want unavailable depth 0", got["queue-bad"])
 	}
-	if got["queue-ok"] != 1 {
-		t.Errorf("queue-ok backlog = %d, want 1", got["queue-ok"])
+	if got["queue-ok"].Depth != 1 || !got["queue-ok"].SourceAvailable {
+		t.Errorf("queue-ok backlog = %+v, want available depth 1", got["queue-ok"])
 	}
 
 	// A failed read must leave the expiring counts zeroed with every bucket

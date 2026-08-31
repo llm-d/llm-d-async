@@ -782,13 +782,14 @@ You only need this format when publishing directly to the broker, bypassing a pr
 
 ### Prometheus Metrics
 
-The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem on the metrics port (default `9090`). All counters and histograms carry `queue_id`, `queue_name`, and `pool_name` labels so you can filter and aggregate per queue.
+The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem on the metrics port (default `9090`). Per-queue metrics carry `queue_id`, `queue_name`, and `pool_name` labels unless noted otherwise.
 
 **Request lifecycle:**
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `llm_d_async_async_request_total` | Counter | New async requests (first attempt only) |
+| `llm_d_async_async_dispatched_requests_total` | Counter | Downstream inference dispatch attempts, including retries. Apply `rate()` to observe actual admitted request rate. |
 | `llm_d_async_async_successful_requests_total` | Counter | Requests that received a successful inference response |
 | `llm_d_async_async_tokens_total` | Counter | Tokens processed by successfully-dispatched requests, by `direction`: `input` (prompt_tokens) and `output` (completion_tokens). Parsed best-effort from the OpenAI `usage` object in 2xx response bodies; no-op when usage is absent or the body is not parseable (e.g. streaming responses). Non-OpenAI gateways undercount by design. |
 | `llm_d_async_async_failed_requests_total` | Counter | Requests that failed with a fatal or non-retryable error |
@@ -811,7 +812,8 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 |--------|------|-------------|
 | `llm_d_async_async_queue_depth` | Gauge | Requests received from the broker and buffered in-process awaiting an available worker |
 | `llm_d_async_async_inflight_requests` | Gauge | Requests currently being processed by workers (dispatched to inference, awaiting a response) |
-| `llm_d_async_async_broker_backlog` | Gauge | Undelivered/pending messages held by the broker queue (polled every `metrics-backlog-poll-interval`; `redis-sortedset` and `gcp-pubsub` only) |
+| `llm_d_async_async_broker_backlog` | Gauge | Undelivered/pending messages held by the broker queue (polled every `metrics-backlog-poll-interval`; `redis-sortedset` and `gcp-pubsub` only). A zero is trustworthy only when the matching source-availability gauge is `1`. |
+| `llm_d_async_async_broker_backlog_source_available` | Gauge | `1` when the most recent broker-backlog read succeeded; `0` when the source was unavailable or errored. |
 | `llm_d_async_async_pool_worker_limit` | Gauge | Configured worker concurrency limit for a pool (carries only the `pool_name` label). Compare against `llm_d_async_async_inflight_requests` to compute worker utilization. |
 
 **Gates:**
@@ -819,6 +821,9 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | Metric | Type | Description |
 |--------|------|-------------|
 | `llm_d_async_async_dispatch_budget` | Gauge | Current dispatch budget [0.0–1.0] returned by the queue's gate; the fraction of system capacity available for new requests (0.0 = gate fully closed). Useful for diagnosing why throughput is throttled. |
+| `llm_d_async_async_drain_limit_rps` | Gauge | Maximum dispatch-attempt RPS in the valid lease seen by the most recent gate evaluation. Zero with observed `lease_valid=1` is an explicit pause. Carries only `pool_name`. |
+| `llm_d_async_async_drain_limit_lease_valid` | Gauge | `1` when the most recent gate evaluation observed a valid, unexpired external drain-limit lease; otherwise `0`. This observation does not self-expire while no requests evaluate the gate; combine it with `valid_until_seconds > time()` for current validity. Carries only `pool_name`. |
+| `llm_d_async_async_drain_limit_valid_until_seconds` | Gauge | Unix timestamp when the most recently observed valid external drain-limit lease expires, or zero when that evaluation observed no valid lease. The drain-limit gauges initialize to zero/invalid when the gate starts. Carries only `pool_name`. |
 | `llm_d_async_async_gate_decisions_total` | Counter | Count of gate decisions that prevented dispatch, by `reason`: `gate_closed` (no dispatch budget), `quota_exhausted` (per-attribute quota overflow), `dropped` (gate permanently rejected the request), `error` (gate evaluation failed). `quota_exhausted`, `dropped` and `error` count individual messages refused after being dequeued. `gate_closed` counts those plus every dequeue round in which the budget shrank the batch to zero — the way budget-based gates (`prometheus-budget`/`-saturation`/`-query`) shed work *before* a message is dequeued — so its rate reflects throttled dispatch opportunities, not messages. All four `reason` series are created at 0 when a queue or gated worker pool starts, so a query returns 0 rather than an empty vector. |
 | `llm_d_async_async_gate_metric_value` | Gauge | Raw metric value a metric-based gate (`prometheus-saturation`/`-budget`/`-query`) last read — the number compared against the threshold below. For the saturation gate this is `1 - saturation`. |
 | `llm_d_async_async_gate_metric_threshold` | Gauge | Threshold the value above is compared against. The gate closes when `value <= threshold`, which is what drives `async_dispatch_budget` to 0. |
@@ -830,7 +835,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 |-------|-------------|
 | `queue_id` | Queue identifier. For `redis-sortedset`, from the queue config `id` field (defaults to the queue name); other transports use the queue name / subscriber ID. |
 | `queue_name` | Logical queue name (Redis sorted set name, channel name, or Pub/Sub subscriber ID) |
-| `pool_name` | Worker pool the queue routes to (`async_pool_worker_limit` carries only this label) |
+| `pool_name` | Async worker pool that owns the series; it never identifies the InferencePool queried by a gate |
 | `reason` | Gate-decision reason (only on `async_gate_decisions_total`): `gate_closed`, `quota_exhausted`, `dropped`, `error` |
 | `inference_pool` | InferencePool a gate queries (only on the `async_gate_metric_*` gauges), from the gate's `pool` param. Empty when the gate does not name one. |
 | `direction` | Token direction (only on `async_tokens_total`): `input` or `output` |
@@ -841,11 +846,30 @@ per-queue series therefore carries the same `queue_id`/`queue_name`/`pool_name`
 triple and joins on it, including the gate gauges. A **pool-level** gate (one
 configured on a worker pool rather than a queue) has no single queue, so its gauges
 and `async_gate_decisions_total` counter carry an empty `queue_id` and `queue_name`
-and are keyed by `pool_name` alone.
+and are keyed by `pool_name` alone. The pool worker limit and leased drain-limit
+gauges are always keyed by `pool_name` alone.
 
 **Example PromQL queries:**
 
 ```promql
+# Actual downstream dispatch-attempt rate by async worker pool
+sum by (pool_name) (rate(llm_d_async_async_dispatched_requests_total[30s]))
+
+# Broker backlog only where the most recent source read is trustworthy
+llm_d_async_async_broker_backlog
+and
+(llm_d_async_async_broker_backlog_source_available == 1)
+
+# Requested cap, validity, and remaining lease lifetime by pool
+llm_d_async_async_drain_limit_rps
+and
+(llm_d_async_async_drain_limit_lease_valid == 1)
+and
+(llm_d_async_async_drain_limit_valid_until_seconds > time())
+
+# Remaining lease lifetime (negative means the last-observed lease has expired)
+llm_d_async_async_drain_limit_valid_until_seconds - time()
+
 # Per-queue success ratio over the last 5 minutes
 rate(llm_d_async_async_successful_requests_total[5m]) / rate(llm_d_async_async_request_total[5m])
 

@@ -669,6 +669,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 			continue
 		}
 		stat.Depth = cardCmd.Val()
+		stat.SourceAvailable = true
 		var secondaryErr error
 		for _, cc := range countCmds {
 			if cc.Err() != nil {

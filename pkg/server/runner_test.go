@@ -322,6 +322,7 @@ func TestPollBacklogSkipsNilDeadlineViews(t *testing.T) {
 
 func TestPollBacklogRemovesDeletedQueueSnapshots(t *testing.T) {
 	metrics.BrokerBacklog.Reset()
+	metrics.BrokerBacklogSourceAvailable.Reset()
 	metrics.DispatchBudget.Reset()
 	metrics.DeadlineProximity.Reset()
 	labels := pipeline.QueueBacklogStat{QueueID: "gone", QueueName: "queue-gone", PoolName: "pool-a", Depth: 3,
@@ -341,6 +342,9 @@ func TestPollBacklogRemovesDeletedQueueSnapshots(t *testing.T) {
 
 	if got := testutil.CollectAndCount(metrics.BrokerBacklog); got != 0 {
 		t.Fatalf("deleted queue backlog still exposes %d series", got)
+	}
+	if got := testutil.CollectAndCount(metrics.BrokerBacklogSourceAvailable); got != 0 {
+		t.Fatalf("deleted queue backlog availability still exposes %d series", got)
 	}
 	if got := testutil.CollectAndCount(metrics.DeadlineProximity); got != 0 {
 		t.Fatalf("deleted queue deadline snapshot still exposes %d series", got)

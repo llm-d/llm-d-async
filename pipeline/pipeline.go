@@ -58,10 +58,11 @@ type ExpiringCount struct {
 
 // QueueBacklogStat reports the broker-side backlog for a single queue.
 type QueueBacklogStat struct {
-	QueueID   string
-	QueueName string
-	PoolName  string
-	Depth     int64
+	QueueID         string
+	QueueName       string
+	PoolName        string
+	Depth           int64
+	SourceAvailable bool
 	// ExpiringCounts holds exact cumulative per-bucket counts of queued items
 	// nearing their deadline, ordered as the metric's bucket boundaries (most
 	// urgent first). Nil when the broker cannot expose per-item deadlines
