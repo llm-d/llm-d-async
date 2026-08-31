@@ -200,6 +200,7 @@ make deploy-ap-on-k8s
 | Flag | Default | Description |
 |------|---------|-------------|
 | `concurrency` | `64` | Number of concurrent workers (per pool if unspecified). The processor is I/O-bound (each worker holds one in-flight request for its full duration), so in-flight concurrency caps throughput — see [Queues, Topics, and Worker Pools](#queues-topics-and-worker-pools). |
+| `gate-wait-timeout` | `5m` | Maximum time a worker parks one request at a pool gate before recoverably re-enqueueing it. Independent of `request-timeout`; `0` waits until the request's own deadline. |
 | `transport` | `redis-pubsub` | The transport (message queue) implementation. One of `redis-pubsub` (**deprecated**: it still works but will be removed in a future release), `redis-sortedset`, `gcp-pubsub`. Gating is configured per queue/topic via `gate_type` in the transport config (this replaces the former `gcp-pubsub-gated` implementation). |
 | `transport-config` | — | Inline JSON transport configuration. See [Transport Configuration](#transport-configuration). Mutually exclusive with `transport-config-file`; exactly one of the two is required. |
 | `transport-config-file` | — | Path to a JSON file with the transport configuration. Mutually exclusive with `transport-config`. |

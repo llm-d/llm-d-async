@@ -136,6 +136,28 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --metrics-port=8080
 
+  - it: should pass the default gate wait timeout to binary args
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --gate-wait-timeout=5m
+
+  - it: should pass a custom gate wait timeout to binary args
+    set:
+      ap.gateWaitTimeout: "90s"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --gate-wait-timeout=90s
+
+  - it: should allow disabling the operational gate wait timeout
+    set:
+      ap.gateWaitTimeout: "0"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --gate-wait-timeout=0
+
   # --- Transport surface (ap.transport + ap.transportConfig) ---------------
   - it: should select the configured transport
     asserts:
