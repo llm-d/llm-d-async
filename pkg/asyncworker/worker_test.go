@@ -14,7 +14,6 @@ import (
 	"time"
 
 	asyncapi "github.com/llm-d/llm-d-async/api"
-	uotel "github.com/llm-d/llm-d-async/internal/otel"
 	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
@@ -23,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -1826,12 +1826,16 @@ func TestMetrics_LabelsIsolated(t *testing.T) {
 
 func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {
 	t.Helper()
+	previousProvider := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	t.Cleanup(func() {
 		_ = tp.Shutdown(context.Background())
+		otel.SetTracerProvider(previousProvider)
+		otel.SetTextMapPropagator(previousPropagator)
 	})
 	return exporter
 }
@@ -1845,13 +1849,34 @@ func findSpan(spans tracetest.SpanStubs, name string) *tracetest.SpanStub {
 	return nil
 }
 
-func spanAttr(s *tracetest.SpanStub, key string) string {
-	for _, attr := range s.Attributes {
-		if string(attr.Key) == key {
-			return attr.Value.String()
+func assertSpanAttributes(t *testing.T, s *tracetest.SpanStub, expected ...attribute.KeyValue) {
+	t.Helper()
+	for _, want := range expected {
+		found := false
+		for _, got := range s.Attributes {
+			if got.Key == want.Key {
+				found = true
+				if got.Value.Type() != want.Value.Type() || got.Value.String() != want.Value.String() {
+					t.Errorf("span %q attribute %q = %v (%v), want %v (%v)", s.Name, want.Key, got.Value, got.Value.Type(), want.Value, want.Value.Type())
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("span %q missing attribute %q", s.Name, want.Key)
 		}
 	}
-	return ""
+}
+
+func assertNoSpanAttributes(t *testing.T, s *tracetest.SpanStub, keys ...string) {
+	t.Helper()
+	for _, attr := range s.Attributes {
+		for _, key := range keys {
+			if string(attr.Key) == key {
+				t.Errorf("span %q unexpectedly has attribute %q = %v", s.Name, key, attr.Value)
+			}
+		}
+	}
 }
 
 func getSpansEventually(t *testing.T, exporter *tracetest.InMemoryExporter, expectedCount int) tracetest.SpanStubs {
@@ -1882,7 +1907,8 @@ func TestWorker_SpanOnSuccess(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-success", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload: map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Metadata: map[string]string{"model": "metadata-model"},
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1896,14 +1922,70 @@ func TestWorker_SpanOnSuccess(t *testing.T) {
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
 	}
-	if spanAttr(s, uotel.AttrRequestID) != "span-success" {
-		t.Errorf("expected request.id=span-success, got %s", spanAttr(s, uotel.AttrRequestID))
-	}
-	if spanAttr(s, uotel.AttrRetryCount) != "0" {
-		t.Errorf("expected retry.count=0, got %s", spanAttr(s, uotel.AttrRetryCount))
-	}
+	assertSpanAttributes(t, s,
+		attribute.String("gen_ai.request.id", "span-success"),
+		attribute.String("request.id", "span-success"),
+		attribute.String("gen_ai.request.model", "test"),
+		attribute.Int("llm_d.async.retry_count", 0),
+		attribute.Int("retry.count", 0),
+	)
+	assertNoSpanAttributes(t, s,
+		"llm_d.async.queue.id", "queue.id", "llm_d.async.queue.name", "queue.name",
+		"llm_d.async.error.category", "error.category",
+	)
 	if s.Status.Code == codes.Error {
 		t.Error("expected non-error status on success span")
+	}
+}
+
+func TestWorker_SpanOmitsUnavailableModel(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "missing", payload: map[string]any{"prompt": "hi"}},
+		{name: "empty", payload: map[string]any{"model": ""}},
+		{name: "non-string", payload: map[string]any{"model": 42}},
+		{name: "null", payload: map[string]any{"model": nil}},
+		{name: "nil-payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exporter := setupTestTracer(t)
+			httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+			})
+			inferenceClient := NewHTTPInferenceClient(httpclient)
+			requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+			retryChannel := make(chan pipeline.RetryMessage, 1)
+			resultChannel := make(chan asyncapi.ResultMessage, 1)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			go Worker(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+			requestChannel <- newEmb(asyncapi.RequestMessage{
+				ID: "span-model", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+				Payload: tc.payload,
+			}, "http://localhost:30800/v1/completions", nil)
+
+			select {
+			case result := <-resultChannel:
+				if result.StatusCode != http.StatusOK {
+					t.Fatalf("result status = %d, want %d", result.StatusCode, http.StatusOK)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timeout waiting for result")
+			}
+
+			spans := getSpansEventually(t, exporter, 1)
+			s := findSpan(spans, "process-request")
+			if s == nil {
+				t.Fatal("expected 'process-request' span")
+			}
+			assertNoSpanAttributes(t, s, "gen_ai.request.model")
+			if s.Status.Code == codes.Error {
+				t.Error("expected non-error status when model is unavailable")
+			}
+		})
 	}
 }
 
@@ -1940,9 +2022,10 @@ func TestWorker_SpanOnFatalError(t *testing.T) {
 	if s.Status.Code != codes.Error {
 		t.Error("expected error status on fatal error span")
 	}
-	if spanAttr(s, uotel.AttrErrorCategory) != "UNKNOWN" {
-		t.Errorf("expected error.category=UNKNOWN, got %s", spanAttr(s, uotel.AttrErrorCategory))
-	}
+	assertSpanAttributes(t, s,
+		attribute.String("llm_d.async.error.category", "UNKNOWN"),
+		attribute.String("error.category", "UNKNOWN"),
+	)
 	if len(s.Events) == 0 {
 		t.Error("expected recorded error event on span")
 	}
@@ -1978,9 +2061,10 @@ func TestWorker_SpanOnRetryableError(t *testing.T) {
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
 	}
-	if spanAttr(s, uotel.AttrErrorCategory) != "RATE_LIMIT" {
-		t.Errorf("expected error.category=RATE_LIMIT, got %s", spanAttr(s, uotel.AttrErrorCategory))
-	}
+	assertSpanAttributes(t, s,
+		attribute.String("llm_d.async.error.category", "RATE_LIMIT"),
+		attribute.String("error.category", "RATE_LIMIT"),
+	)
 	if s.Status.Code == codes.Error {
 		t.Error("retryable error should not set span error status")
 	}
@@ -2016,9 +2100,10 @@ func TestWorker_SpanOnServerError(t *testing.T) {
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
 	}
-	if spanAttr(s, uotel.AttrErrorCategory) != "SERVER_ERROR" {
-		t.Errorf("expected error.category=SERVER_ERROR, got %s", spanAttr(s, uotel.AttrErrorCategory))
-	}
+	assertSpanAttributes(t, s,
+		attribute.String("llm_d.async.error.category", "SERVER_ERROR"),
+		attribute.String("error.category", "SERVER_ERROR"),
+	)
 }
 
 func TestWorker_TraceContextExtraction(t *testing.T) {
@@ -2037,6 +2122,7 @@ func TestWorker_TraceContextExtraction(t *testing.T) {
 	// Create a parent span and inject its context into metadata
 	parentCtx, parentSpan := otel.Tracer("test").Start(ctx, "parent-operation")
 	parentTraceID := parentSpan.SpanContext().TraceID()
+	parentSpanID := parentSpan.SpanContext().SpanID()
 	metadata := make(map[string]string)
 	otel.GetTextMapPropagator().Inject(parentCtx, propagation.MapCarrier(metadata))
 	parentSpan.End()
@@ -2055,7 +2141,7 @@ func TestWorker_TraceContextExtraction(t *testing.T) {
 		t.Fatal("timeout waiting for result")
 	}
 
-	spans := getSpansEventually(t, exporter, 1)
+	spans := getSpansEventually(t, exporter, 2)
 	s := findSpan(spans, "process-request")
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
@@ -2063,6 +2149,9 @@ func TestWorker_TraceContextExtraction(t *testing.T) {
 	if s.SpanContext.TraceID() != parentTraceID {
 		t.Errorf("expected process-request span to share parent trace ID %s, got %s",
 			parentTraceID, s.SpanContext.TraceID())
+	}
+	if s.Parent.SpanID() != parentSpanID {
+		t.Errorf("expected process-request parent span ID %s, got %s", parentSpanID, s.Parent.SpanID())
 	}
 }
 
@@ -2080,6 +2169,7 @@ func TestWorker_SpanOnShutdownReenqueue(t *testing.T) {
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go Worker(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
@@ -2119,8 +2209,12 @@ func TestWorker_SpanOnShutdownReenqueue(t *testing.T) {
 			t.Error("re-enqueue span link does not reference process-request span")
 		}
 	}
-	if spanAttr(reenqueueSpan, uotel.AttrRequestID) != "span-shutdown" {
-		t.Errorf("expected request.id=span-shutdown on re-enqueue span, got %s", spanAttr(reenqueueSpan, uotel.AttrRequestID))
+	assertSpanAttributes(t, reenqueueSpan,
+		attribute.String("gen_ai.request.id", "span-shutdown"),
+		attribute.String("request.id", "span-shutdown"),
+	)
+	if reenqueueSpan.Parent.IsValid() || reenqueueSpan.SpanContext.TraceID() == processSpan.SpanContext.TraceID() {
+		t.Error("expected re-enqueue span to start a separate trace without a parent")
 	}
 }
 
@@ -2139,7 +2233,7 @@ func TestWorker_SpanIncludesQueueName(t *testing.T) {
 	go Worker(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
 
 	requestChannel <- newEmbR(
-		asyncapi.InternalRouting{QueueID: "my-test-qid", RequestQueueName: "my-test-queue"},
+		asyncapi.InternalRouting{QueueID: "my-test-qid", RequestQueueName: "my-test-queue", RetryCount: 3},
 		asyncapi.RequestMessage{
 			ID: "span-queue", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
 			Payload: map[string]any{"model": "test", "prompt": "hi"},
@@ -2156,12 +2250,14 @@ func TestWorker_SpanIncludesQueueName(t *testing.T) {
 	if s == nil {
 		t.Fatal("expected 'process-request' span")
 	}
-	if spanAttr(s, uotel.AttrQueueID) != "my-test-qid" {
-		t.Errorf("expected queue.id=my-test-qid, got %s", spanAttr(s, uotel.AttrQueueID))
-	}
-	if spanAttr(s, uotel.AttrQueueName) != "my-test-queue" {
-		t.Errorf("expected queue.name=my-test-queue, got %s", spanAttr(s, uotel.AttrQueueName))
-	}
+	assertSpanAttributes(t, s,
+		attribute.String("llm_d.async.queue.id", "my-test-qid"),
+		attribute.String("queue.id", "my-test-qid"),
+		attribute.String("llm_d.async.queue.name", "my-test-queue"),
+		attribute.String("queue.name", "my-test-queue"),
+		attribute.Int("llm_d.async.retry_count", 3),
+		attribute.Int("retry.count", 3),
+	)
 }
 
 func TestWorker_InFlightCompletesOnConsumeCancel(t *testing.T) {

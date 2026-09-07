@@ -26,7 +26,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/go-logr/logr"
@@ -35,11 +35,22 @@ import (
 const defaultServiceName = "llm-d-async"
 
 const (
-	AttrRequestID     = "request.id"
-	AttrQueueID       = "queue.id"
-	AttrQueueName     = "queue.name"
-	AttrRetryCount    = "retry.count"
-	AttrErrorCategory = "error.category"
+	// AttrRequestID matches llm-d-router's extension; semconv has no request ID key.
+	AttrRequestID     = "gen_ai.request.id"
+	AttrRequestModel  = string(semconv.GenAIRequestModelKey)
+	AttrQueueID       = "llm_d.async.queue.id"
+	AttrQueueName     = "llm_d.async.queue.name"
+	AttrRetryCount    = "llm_d.async.retry_count"
+	AttrErrorCategory = "llm_d.async.error.category"
+)
+
+// Legacy attributes are emitted alongside their replacements for one release.
+const (
+	LegacyAttrRequestID     = "request.id"
+	LegacyAttrQueueID       = "queue.id"
+	LegacyAttrQueueName     = "queue.name"
+	LegacyAttrRetryCount    = "retry.count"
+	LegacyAttrErrorCategory = "error.category"
 )
 
 // StartSpan creates a new span using the llm-d-async tracer.

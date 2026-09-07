@@ -892,13 +892,23 @@ The Async Processor supports distributed tracing via [OpenTelemetry](https://ope
 
 **Span attributes:**
 
-| Attribute | Description |
-|-----------|-------------|
-| `request.id` | Request identifier |
-| `queue.id` | Queue identifier (matches Prometheus `queue_id` label) |
-| `queue.name` | Queue name (matches Prometheus `queue_name` label) |
-| `retry.count` | Current retry attempt (0 for first attempt) |
-| `error.category` | Error classification on failure (`RATE_LIMIT`, `SERVER_ERROR`, `UNKNOWN`, etc.) |
+The GenAI model attribute uses OpenTelemetry semantic conventions
+[`v1.41.0`](https://pkg.go.dev/go.opentelemetry.io/otel/semconv/v1.41.0).
+The request ID attribute matches llm-d-router's `gen_ai.request.id` extension;
+internal attributes use the `llm_d.async.*` namespace.
+
+| Attribute | Deprecated alias | Description |
+|-----------|------------------|-------------|
+| `gen_ai.request.id` | `request.id` | Request identifier on `process-request` and `re-enqueue` spans |
+| `gen_ai.request.model` | — | Non-empty string `model` from the request payload on `process-request` spans; omitted when missing, empty, or not a string |
+| `llm_d.async.queue.id` | `queue.id` | Queue identifier (matches Prometheus `queue_id` label); omitted when empty |
+| `llm_d.async.queue.name` | `queue.name` | Queue name (matches Prometheus `queue_name` label); omitted when empty |
+| `llm_d.async.retry_count` | `retry.count` | Current retry attempt (0 for first attempt) |
+| `llm_d.async.error.category` | `error.category` | Error classification on failure (`RATE_LIMIT`, `SERVER_ERROR`, `UNKNOWN`, etc.) |
+
+Deprecated aliases are emitted alongside the new attributes with identical values
+for one release, then removed. Update trace queries and dashboards to use the new
+attribute names during this migration window.
 
 **Trace context propagation:**
 

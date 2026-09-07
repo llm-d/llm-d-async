@@ -230,13 +230,24 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 
 					spanAttrs := []attribute.KeyValue{
 						attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
+						attribute.String(uotel.LegacyAttrRequestID, msg.PublicRequest.ReqID()),
 						attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
+						attribute.Int(uotel.LegacyAttrRetryCount, msg.RetryCount),
+					}
+					if model, ok := msg.PublicRequest.ReqPayload()["model"].(string); ok && model != "" {
+						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrRequestModel, model))
 					}
 					if queueID != "" {
-						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueID, queueID))
+						spanAttrs = append(spanAttrs,
+							attribute.String(uotel.AttrQueueID, queueID),
+							attribute.String(uotel.LegacyAttrQueueID, queueID),
+						)
 					}
 					if queueName != "" {
-						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrQueueName, queueName))
+						spanAttrs = append(spanAttrs,
+							attribute.String(uotel.AttrQueueName, queueName),
+							attribute.String(uotel.LegacyAttrQueueName, queueName),
+						)
 					}
 					reqCtx, span := uotel.StartSpan(reqCtx, "process-request",
 						trace.WithAttributes(spanAttrs...),
@@ -261,7 +272,10 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					if body, contentType, handled, terr := transforms.Apply(payloadBytes, msg.PublicRequest.ReqMetadata()); terr != nil {
 						span.RecordError(terr)
 						span.SetStatus(codes.Error, "request transform failed")
-						span.SetAttributes(attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)))
+						span.SetAttributes(
+							attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
+							attribute.String(uotel.LegacyAttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
+						)
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 						select {
 						case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to transform request body: %s", terr.Error())):
@@ -301,7 +315,10 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 
 					if requestCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 						_, bgSpan := uotel.DetachedContext(reqCtx, "re-enqueue")
-						bgSpan.SetAttributes(attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()))
+						bgSpan.SetAttributes(
+							attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
+							attribute.String(uotel.LegacyAttrRequestID, msg.PublicRequest.ReqID()),
+						)
 						defer bgSpan.End()
 						retryChannel <- pipeline.RetryMessage{
 							EmbelishedRequestMessage: msg,
@@ -328,7 +345,10 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
 						span.RecordError(err)
 						span.SetStatus(codes.Error, "inference request failed")
-						span.SetAttributes(attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)))
+						span.SetAttributes(
+							attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)),
+							attribute.String(uotel.LegacyAttrErrorCategory, inferenceErrorCategory(err)),
+						)
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 
 						var resultMsg asyncapi.ResultMessage
@@ -349,7 +369,10 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 					if inferenceErr.Category().Sheddable() {
 						metrics.RecordSheddedReq(queueID, queueName, msg.WorkerPoolID)
 					}
-					span.SetAttributes(attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())))
+					span.SetAttributes(
+						attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())),
+						attribute.String(uotel.LegacyAttrErrorCategory, string(inferenceErr.Category())),
+					)
 					var retryAfter time.Duration
 					var clientErr *asyncapi.ClientError
 					if errors.As(err, &clientErr) {
