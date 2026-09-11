@@ -320,7 +320,7 @@ func waitForBudget(promURL, envoyURL string, pred func(float64) bool) {
 func waitForSaturation(promURL, envoyURL string, pred func(float64) bool) {
 	gomega.EventuallyWithOffset(1, func() bool {
 		sendProbeRequest(envoyURL)
-		v := queryProm(promURL, `inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"}`)
+		v := queryProm(promURL, `(llm_d_epp_flow_control_pool_saturation{inference_pool="e2e-pool"} or inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"})`)
 		return !math.IsNaN(v) && pred(v)
 	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for saturation to satisfy condition")
 }

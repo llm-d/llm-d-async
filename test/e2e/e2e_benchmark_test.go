@@ -106,7 +106,7 @@ var _ = ginkgo.Describe("Async Processor Performance Benchmark E2E", ginkgo.Orde
 				case <-ticker.C:
 					// Send probe requests to drive flow control admission logic in EPP
 					sendProbeRequest(envoyURL)
-					satVal := queryProm(promURL, `inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"}`)
+					satVal := queryProm(promURL, `(llm_d_epp_flow_control_pool_saturation{inference_pool="e2e-pool"} or inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"})`)
 					if !math.IsNaN(satVal) {
 						saturationMetrics = append(saturationMetrics, satVal)
 					}
@@ -192,7 +192,7 @@ var _ = ginkgo.Describe("Async Processor Performance Benchmark E2E", ginkgo.Orde
 				case <-ticker.C:
 					// Send probe requests to drive flow control admission logic in EPP
 					sendProbeRequest(envoyURL)
-					satVal := queryProm(promURL, `inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"}`)
+					satVal := queryProm(promURL, `(llm_d_epp_flow_control_pool_saturation{inference_pool="e2e-pool"} or inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"})`)
 					if !math.IsNaN(satVal) {
 						saturationMetrics = append(saturationMetrics, satVal)
 					}
@@ -296,7 +296,7 @@ var _ = ginkgo.Describe("Async Processor Performance Benchmark E2E", ginkgo.Orde
 				case <-ticker.C:
 					// Send probe requests to drive flow control admission logic in EPP
 					sendProbeRequest(envoyURL)
-					satVal := queryProm(promURL, `inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"}`)
+					satVal := queryProm(promURL, `(llm_d_epp_flow_control_pool_saturation{inference_pool="e2e-pool"} or inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"})`)
 					if !math.IsNaN(satVal) {
 						saturationMetrics = append(saturationMetrics, satVal)
 					}

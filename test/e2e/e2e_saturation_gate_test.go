@@ -12,7 +12,7 @@ import (
 // These tests drive the saturation gate through the full observability pipeline:
 //
 //	setSimWaitingRequests → sim reports vllm:num_requests_waiting
-//	  → EPP scrapes sim, computes inference_extension_flow_control_pool_saturation
+//	  → EPP scrapes sim, computes llm_d_epp_flow_control_pool_saturation
 //	    (saturation = Max(WaitingQueue/QueueDepthThreshold, KVCache/KVCacheThreshold))
 //	  → Prometheus scrapes EPP
 //	  → llm-d-async queries Prometheus, gate opens/closes

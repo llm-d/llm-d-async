@@ -263,7 +263,7 @@ func TestNewSaturationPromQLSourceFromConfig(t *testing.T) {
 		source, err := NewSaturationPromQLSourceFromConfig(promConfig,
 			map[string]any{"pool": "my-pool"})
 		require.NoError(t, err)
-		require.Contains(t, source.expr, `1 - inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}`)
+		require.Contains(t, source.expr, `1 - llm_d_epp_flow_control_pool_saturation{inference_pool="my-pool"}`)
 		require.NotContains(t, source.expr, "namespace")
 	})
 

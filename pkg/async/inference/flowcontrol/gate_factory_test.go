@@ -315,7 +315,7 @@ func TestGateFactory_SaturationGateLogsResolvedQuery(t *testing.T) {
 	}})
 	require.NoError(t, err)
 
-	assert.Contains(t, strings.Join(logged, "\n"), "inference_extension_flow_control_pool_saturation")
+	assert.Contains(t, strings.Join(logged, "\n"), "llm_d_epp_flow_control_pool_saturation")
 }
 
 func TestGateFactory_PrometheusQueryGateWithoutURL(t *testing.T) {
