@@ -9,7 +9,7 @@
 #
 # The guide's pool query is over vllm:num_requests_running; here it is over the
 # EPP saturation metric the e2e harness can drive (setSimWaitingRequests →
-# inference_extension_flow_control_pool_saturation), the same metric the e2e
+# llm_d_epp_flow_control_pool_saturation), the same metric the e2e
 # prometheus-query.yaml overlay uses.
 ap:
   imagePullPolicy: Never
@@ -70,7 +70,7 @@ ap:
       gate_type: "wait-on-refuse"
       gate_params:
         gate: |
-          {"gate_type":"prometheus-query","gate_params":{"query":"clamp(1 - inference_extension_flow_control_pool_saturation{inference_pool=\"e2e-pool\"}/0.5, 0, 1)","fallback":"1"}}
+          {"gate_type":"prometheus-query","gate_params":{"query":"clamp(1 - llm_d_epp_flow_control_pool_saturation{inference_pool=\"e2e-pool\"}/0.5, 0, 1)","fallback":"1"}}
   redis:
     url: "redis://redis.e2e-integration.svc.cluster.local:6379"
   modelServerMonitor:

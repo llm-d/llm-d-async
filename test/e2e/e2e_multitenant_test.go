@@ -29,7 +29,7 @@ var _ = ginkgo.Describe("Multi-tenant Quota and Priority E2E", ginkgo.Ordered, f
 	var ctx context.Context
 
 	ginkgo.BeforeAll(func() {
-		// The batch pool gate reads inference_extension_flow_control_pool_saturation,
+		// The batch pool gate reads llm_d_epp_flow_control_pool_saturation,
 		// which only exists once EPP runs with flow control enabled.
 		redeployEPPWithFlowControl()
 	})

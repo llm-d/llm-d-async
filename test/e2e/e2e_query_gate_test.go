@@ -18,7 +18,7 @@ const (
 // dispatch budget. The e2e Helm values configure it with the same saturation
 // metric used by the saturation gate tests:
 //
-//	1 - inference_extension_flow_control_pool_saturation{inference_pool="e2e-pool"}
+//	1 - llm_d_epp_flow_control_pool_saturation{inference_pool="e2e-pool"}
 //
 // Because threshold=0 the raw PromQL result is used directly as the budget.
 var _ = ginkgo.Describe("Prometheus Query Dispatch Gate E2E", ginkgo.Ordered, func() {

@@ -149,7 +149,7 @@ func TestPromQLMetricSource_CustomExprPassthrough(t *testing.T) {
 	}))
 	defer server.Close()
 
-	expr := `max(avg_over_time(inference_extension_flow_control_pool_saturation{inference_pool="my-pool"}[5m]))`
+	expr := `max(avg_over_time(llm_d_epp_flow_control_pool_saturation{inference_pool="my-pool"}[5m]))`
 	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, expr)
 	require.NoError(t, err)
 

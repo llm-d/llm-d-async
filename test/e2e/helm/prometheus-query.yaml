@@ -14,7 +14,7 @@ ap:
         igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
         gate_type: "prometheus-query"
         gate_params:
-          query: "1 - inference_extension_flow_control_pool_saturation{inference_pool=\"e2e-pool\"}"
+          query: "1 - llm_d_epp_flow_control_pool_saturation{inference_pool=\"e2e-pool\"}"
           fallback: "0.0"
   metrics:
     enabled: true
