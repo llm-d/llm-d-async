@@ -167,6 +167,112 @@
           "custom": { "drawStyle": "line", "fillOpacity": 10 }
         }
       }
+    },
+    {
+      "title": "Exceeded Deadline Rate by Queue",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum by (queue_name) (rate(llm_d_async_async_exceeded_deadline_requests_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{ queue_name }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Token Processing Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum by (queue_name, direction) (rate(llm_d_async_async_tokens_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{ queue_name }} - {{ direction }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "tokens/s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Deadline Proximity by Queue (p10 / p50 / p90 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.10, sum by (le, queue_name) (llm_d_async_async_deadline_proximity_millis_bucket{namespace=\"$namespace\"})) / 1000",
+          "legendFormat": "p10 - {{ queue_name }}"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, queue_name) (llm_d_async_async_deadline_proximity_millis_bucket{namespace=\"$namespace\"})) / 1000",
+          "legendFormat": "p50 - {{ queue_name }}"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum by (le, queue_name) (llm_d_async_async_deadline_proximity_millis_bucket{namespace=\"$namespace\"})) / 1000",
+          "legendFormat": "p90 - {{ queue_name }}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, queue_name) (llm_d_async_async_deadline_proximity_millis_bucket{namespace=\"$namespace\"})) / 1000",
+          "legendFormat": "p99 - {{ queue_name }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Note: Deadline Proximity",
+      "type": "text",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Note:** Deadline proximity (`llm_d_async_async_deadline_proximity_millis`) only works when Redis Sorted Set queues are used (`--transport=redis-sortedset`). Cloud Pub/Sub cannot expose per-item deadlines.\n\n*Scrape Semantics:* This metric is a snapshot histogram rebuilt per poll from Redis `ZCOUNT`. Because it is not monotonic, do not use `rate()`. Returns `NaN` when the queue is empty."
+      }
+    },
+    {
+      "title": "Broker backlog by queue",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "expr": "sum by (queue_name) (llm_d_async_async_broker_backlog{namespace=\"$namespace\"})",
+          "legendFormat": "{{ queue_name }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "In-process queue depth by queue",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        {
+          "expr": "sum by (queue_name) (llm_d_async_async_queue_depth{namespace=\"$namespace\"})",
+          "legendFormat": "{{ queue_name }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
     }
   ],
   "schemaVersion": 39,
