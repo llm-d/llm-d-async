@@ -88,6 +88,7 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 
 	printAllFlags(setupLog)
 	opts.warnDeprecatedFlags(setupLog)
+	opts.warnDeprecatedTransport(setupLog)
 
 	poolsMap, totalConcurrency, err := loadWorkerPools(opts.Worker, setupLog)
 	if err != nil {

@@ -128,7 +128,8 @@ ap:
   # (ap.messageQueueImpl, ap.redis.* / ap.gcpPubSub.* request/queue fields,
   # ap.otel.redisTracing).
   #
-  # transport: one of redis-pubsub, redis-sortedset, gcp-pubsub.
+  # transport: one of redis-pubsub (deprecated; prefer redis-sortedset),
+  # redis-sortedset, gcp-pubsub.
   # transportConfig: the transport-specific document. See the project README
   #   "Transport Configuration" section for the schema.
   #   Redis/Valkey connection: DO NOT put a credentialed "url" directly in
@@ -165,7 +166,7 @@ ap:
   # config and the install notes print a migration warning. Message queue
   # implementation. Supported: "redis-sortedset", "redis-pubsub", "gcp-pubsub",
   # "gcp-pubsub-gated" ("gcp-pubsub-gated" is treated as "gcp-pubsub"; a per-topic
-  # gate_type now gates natively). Empty selects redis-pubsub.
+  # gate_type now gates natively). Empty selects redis-pubsub (deprecated).
   messageQueueImpl: ""
   gcpPubSub:
     # DEPRECATED selector: prefer ap.transport: gcp-pubsub with ap.transportConfig.

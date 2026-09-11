@@ -91,7 +91,7 @@ Short orientation topics. Each links to the full reference section further down.
 
 ### Transports
 
-The transport is the message queue backend the processor pulls requests from and writes results to. Three implementations are available: `redis-pubsub` (ephemeral Redis channels), `redis-sortedset` (persisted, priority-sorted Redis — recommended for production), and `gcp-pubsub` (GCP Pub/Sub). The transport is selected with `--transport` and configured with a single JSON document. Redis-protocol-compatible backends such as Valkey work unchanged (see [Backend Compatibility](#backend-compatibility)). → [Transport Configuration](#transport-configuration)
+The transport is the message queue backend the processor pulls requests from and writes results to. Three implementations are available: `redis-pubsub` (ephemeral Redis channels — **deprecated**, prefer `redis-sortedset`), `redis-sortedset` (persisted, priority-sorted Redis — recommended for production), and `gcp-pubsub` (GCP Pub/Sub). The transport is selected with `--transport` and configured with a single JSON document. Redis-protocol-compatible backends such as Valkey work unchanged (see [Backend Compatibility](#backend-compatibility)). → [Transport Configuration](#transport-configuration)
 
 ### Queues, Topics, and Worker Pools
 
@@ -200,7 +200,7 @@ make deploy-ap-on-k8s
 | Flag | Default | Description |
 |------|---------|-------------|
 | `concurrency` | `64` | Number of concurrent workers (per pool if unspecified). The processor is I/O-bound (each worker holds one in-flight request for its full duration), so in-flight concurrency caps throughput — see [Queues, Topics, and Worker Pools](#queues-topics-and-worker-pools). |
-| `transport` | `redis-pubsub` | The transport (message queue) implementation. One of `redis-pubsub`, `redis-sortedset`, `gcp-pubsub`. Gating is configured per queue/topic via `gate_type` in the transport config (this replaces the former `gcp-pubsub-gated` implementation). |
+| `transport` | `redis-pubsub` | The transport (message queue) implementation. One of `redis-pubsub` (**deprecated**: it still works but will be removed in a future release), `redis-sortedset`, `gcp-pubsub`. Gating is configured per queue/topic via `gate_type` in the transport config (this replaces the former `gcp-pubsub-gated` implementation). |
 | `transport-config` | — | Inline JSON transport configuration. See [Transport Configuration](#transport-configuration). Mutually exclusive with `transport-config-file`; exactly one of the two is required. |
 | `transport-config-file` | — | Path to a JSON file with the transport configuration. Mutually exclusive with `transport-config`. |
 | `transport-config-watch-interval` | `0` | For `redis-sortedset` only, periodically reloads the `queues` field from `transport-config-file`. The file must contain a complete valid transport configuration. Changes to other transport fields require a restart. |
@@ -252,7 +252,7 @@ make deploy-ap-on-k8s
 
 The transport (message queue) is selected with `--transport` and configured with a single JSON document, supplied either inline via `--transport-config` or from a file via `--transport-config-file` (the two are mutually exclusive; exactly one is required). This is the recommended configuration surface for all backends.
 
-**`redis-pubsub`:**
+**`redis-pubsub` (deprecated — prefer `redis-sortedset` for new deployments):**
 ```json
 {
   "url": "redis://user:pass@host:6379/0",

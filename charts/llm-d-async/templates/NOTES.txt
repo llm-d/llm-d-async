@@ -19,6 +19,19 @@ WARNING: deprecated chart values in use.
         # transport-specific JSON document; see the chart README and the
         # "Transport Configuration" section of the project README.
 {{- end }}
+{{- if eq (include "llm-d-async.transport" .) "redis-pubsub" }}
+
+WARNING: the redis-pubsub transport is deprecated.
+  It still works and will keep working through the next release, but it is
+  scheduled for removal. Migrate to redis-sortedset (recommended for
+  production) on the unified surface:
+
+    ap:
+      transport: redis-sortedset
+      transportConfig:
+        # transport-specific JSON document; see the chart README and the
+        # "Transport Configuration" section of the project README.
+{{- end }}
 {{- if include "llm-d-async.usingDeprecatedRedisConn" . }}
 
 WARNING: deprecated Redis connection values in use.

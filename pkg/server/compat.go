@@ -87,6 +87,18 @@ func (o *Options) warnDeprecatedFlags(logger logr.Logger) {
 	}
 }
 
+// warnDeprecatedTransport logs a deprecation warning when the effective
+// transport is redis-pubsub. The transport is deprecated in this release: it
+// keeps working through the next release as well and may be removed no earlier
+// than the release after that (N+2 deprecation policy).
+func (o *Options) warnDeprecatedTransport(logger logr.Logger) {
+	if o.effectiveTransportType() != "redis-pubsub" {
+		return
+	}
+	logger.Info("Deprecated transport in use; it still works but will be removed in a future release. Prefer redis-sortedset.",
+		"transport", "redis-pubsub", "use", "redis-sortedset")
+}
+
 // effectiveTransportType returns the transport that will be used, honoring the
 // new --transport flag first and falling back to the deprecated
 // --message-queue-impl (normalizing the retired gcp-pubsub-gated alias).

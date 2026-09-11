@@ -339,6 +339,66 @@ func TestWarnDeprecatedFlags_MergePolicyRenameNotIgnored(t *testing.T) {
 	}
 }
 
+func TestWarnDeprecatedTransport(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantWarn bool
+	}{
+		{
+			name:     "default transport redis-pubsub warns",
+			args:     nil,
+			wantWarn: true,
+		},
+		{
+			name: "explicit redis-pubsub via new surface warns",
+			args: []string{
+				"--transport=redis-pubsub",
+				`--transport-config={"url":"redis://x","queues":[]}`,
+			},
+			wantWarn: true,
+		},
+		{
+			name:     "legacy redis-pubsub warns",
+			args:     []string{"--message-queue-impl=redis-pubsub"},
+			wantWarn: true,
+		},
+		{
+			name:     "redis-sortedset does not warn",
+			args:     []string{"--message-queue-impl=redis-sortedset"},
+			wantWarn: false,
+		},
+		{
+			name: "gcp-pubsub via new surface does not warn",
+			args: []string{
+				"--transport=gcp-pubsub",
+				`--transport-config={"project_id":"p","result_topic_id":"r","topics":[]}`,
+			},
+			wantWarn: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := newTestOptions(t, tt.args...)
+
+			var msgs []string
+			logger := funcr.New(func(prefix, args string) { msgs = append(msgs, args) }, funcr.Options{})
+			o.warnDeprecatedTransport(logger)
+
+			joined := strings.Join(msgs, "\n")
+			if tt.wantWarn {
+				if !strings.Contains(joined, "Deprecated transport in use") ||
+					!strings.Contains(joined, "redis-pubsub") ||
+					!strings.Contains(joined, "redis-sortedset") {
+					t.Errorf("expected redis-pubsub deprecation warning naming redis-sortedset, got:\n%s", joined)
+				}
+			} else if len(msgs) != 0 {
+				t.Errorf("expected no deprecation warning, got:\n%s", joined)
+			}
+		})
+	}
+}
+
 func TestWarnDeprecatedFlags_NoneSet(t *testing.T) {
 	o := newTestOptions(t, "--transport-config={\"url\":\"redis://x\",\"queues\":[]}")
 
