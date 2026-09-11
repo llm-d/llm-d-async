@@ -130,3 +130,32 @@ func TestIllegalHeaderNamesRejectedAtStartup(t *testing.T) {
 		})
 	}
 }
+
+// The numeric priority header has no consumer in upstream llm-d gateways, so it
+// must stay unstamped unless the operator explicitly opts in.
+func TestPriorityHeaderNotStampedByDefault(t *testing.T) {
+	factory, ok := plugins.Lookup("tier-priority")
+	if !ok {
+		t.Fatal("tier-priority plugin not registered")
+	}
+
+	// Absent parameters leave the priority header unset and unstamped.
+	plugin, err := factory("test", nil, nil)
+	if err != nil {
+		t.Fatalf("factory error: %v", err)
+	}
+	msg := mergeOne(t, plugin.(*TierPriorityPolicy), nil)
+	if _, stamped := msg.HttpHeaders["x-gateway-priority"]; stamped {
+		t.Error("priority header should be absent when unspecified")
+	}
+
+	// An explicit header opts back in.
+	plugin, err = factory("test", json.RawMessage(`{"priority_header": "x-gateway-priority"}`), nil)
+	if err != nil {
+		t.Fatalf("factory error: %v", err)
+	}
+	msg = mergeOne(t, plugin.(*TierPriorityPolicy), nil)
+	if _, stamped := msg.HttpHeaders["x-gateway-priority"]; !stamped {
+		t.Error("priority header should be stamped when explicitly configured")
+	}
+}

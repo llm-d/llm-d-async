@@ -35,12 +35,12 @@ func init() {
 				return nil, fmt.Errorf("failed to parse tier-priority parameters: %w", err)
 			}
 		}
-		if params.PriorityHeader == "" {
-			params.PriorityHeader = "x-gateway-priority"
-		}
+		// The numeric priority header has no consumer in upstream llm-d
+		// gateways; objectives are how priority reaches them. Leave it unset
+		// unless the operator explicitly opts in, and only then validate it.
 		// An illegal header name is one net/http refuses to write, which would
 		// fail every dispatched request permanently; surface it at startup.
-		if !httpguts.ValidHeaderFieldName(params.PriorityHeader) {
+		if params.PriorityHeader != "" && !httpguts.ValidHeaderFieldName(params.PriorityHeader) {
 			return nil, fmt.Errorf("invalid tier-priority parameters: priority_header %q is not a legal HTTP header name", params.PriorityHeader)
 		}
 		if params.ObjectiveHeader == "" {

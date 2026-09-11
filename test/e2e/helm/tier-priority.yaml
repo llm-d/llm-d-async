@@ -8,8 +8,6 @@ ap:
     secure: false
   requestMergePolicyConfig:
     type: "tier-priority"
-    parameters:
-      priority_header: "x-gateway-priority"
   workerPools:
     - id: "default"
       workers: 1
