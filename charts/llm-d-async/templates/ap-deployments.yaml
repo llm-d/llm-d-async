@@ -2,7 +2,7 @@
        Turn common misconfigurations into clear install-time errors instead of
        runtime crash-loops or silently dropped requests. */ -}}
 {{- if not (include "llm-d-async.transport" .) }}
-{{- fail "No transport configured: set ap.transport (redis-pubsub|redis-sortedset|gcp-pubsub) with ap.transportConfig, or enable a backend via ap.redis.enabled / ap.gcpPubSub.enabled (deprecated)." }}
+{{- fail "No transport configured: set ap.transport (redis-pubsub|redis-sortedset|gcp-pubsub|sql) with ap.transportConfig, or enable a backend via ap.redis.enabled / ap.gcpPubSub.enabled (deprecated)." }}
 {{- end }}
 {{- if .Values.ap.transport }}
 {{- /* New transport surface. */ -}}
@@ -11,6 +11,9 @@
 {{- end }}
 {{- if and (hasPrefix "redis" .Values.ap.transport) (not (hasKey .Values.ap.transportConfig "url")) (not (include "llm-d-async.redisSecretName" .)) }}
 {{- fail "redis transport has no connection: set ap.transportConfig.urlSecret.url (chart creates a Secret) or ap.transportConfig.urlSecret.name/key (reference an existing Secret), or an inline url in ap.transportConfig (dev only). The deprecated ap.redis.url / ap.redis.secretName still work. The resolved Secret is injected as REDIS_URL." }}
+{{- end }}
+{{- if and (eq .Values.ap.transport "sql") (not (hasKey .Values.ap.transportConfig "url")) (not (include "llm-d-async.redisSecretName" .)) }}
+{{- fail "sql transport has no connection: set ap.transportConfig.urlSecret.url (chart creates a Secret) or ap.transportConfig.urlSecret.name/key (reference an existing Secret), or an inline url in ap.transportConfig (dev only). The resolved Secret is injected as SQL_URL." }}
 {{- end }}
 {{- else }}
 {{- /* Deprecated per-backend surface. */ -}}
@@ -125,8 +128,8 @@ spec:
           - name: OTEL_RESOURCE_ATTRIBUTES
             value: "k8s.namespace.name=$(NAMESPACE),k8s.pod.name=$(POD_NAME),service.version={{ .Chart.AppVersion }}"
           {{- end }}
-          {{- if and (hasPrefix "redis" (include "llm-d-async.transport" .)) (include "llm-d-async.redisSecretName" .) }}
-          - name: REDIS_URL
+          {{- if and (include "llm-d-async.urlEnvVar" .) (include "llm-d-async.redisSecretName" .) }}
+          - name: {{ include "llm-d-async.urlEnvVar" . }}
             valueFrom:
               secretKeyRef:
                 name: {{ include "llm-d-async.redisSecretName" . }}

@@ -65,7 +65,7 @@ Short orientation topics. Each links to the full reference section further down.
 
 ### Transports
 
-The transport is the message queue backend the processor pulls requests from and writes results to. Three implementations are available: `redis-pubsub` (ephemeral Redis channels — **deprecated**, prefer `redis-sortedset`), `redis-sortedset` (persisted, priority-sorted Redis — recommended for production), and `gcp-pubsub` (GCP Pub/Sub). The transport is selected with `--transport` and configured with a single JSON document. Redis-protocol-compatible backends such as Valkey work unchanged (see [Backend Compatibility](docs/transports.md#backend-compatibility)). → [Transport Configuration](docs/transports.md#transport-configuration)
+The transport is the message queue backend the processor pulls requests from and writes results to. Four implementations are available: `redis-pubsub` (ephemeral Redis channels — **deprecated**, prefer `redis-sortedset`), `redis-sortedset` (persisted, priority-sorted Redis — recommended for production), `gcp-pubsub` (GCP Pub/Sub), and `sql` (Postgres; deadline-sorted, with processors leasing hash partitions of each queue and no broker beyond the database). The transport is selected with `--transport` and configured with a single JSON document. Redis-protocol-compatible backends such as Valkey work unchanged (see [Backend Compatibility](docs/transports.md#backend-compatibility)). → [Transport Configuration](docs/transports.md#transport-configuration)
 
 ### Queues, Topics, and Worker Pools
 
