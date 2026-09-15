@@ -10,6 +10,7 @@ require (
 	github.com/llm-d/llm-d-async/api v1.0.0
 	github.com/llm-d/llm-d-async/pipeline v1.0.0
 	github.com/llm-d/llm-d-async/producer v1.0.0
+	github.com/llm-d/llm-d-async/producer-sql v0.0.0
 	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.25.0
@@ -56,6 +57,7 @@ require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
+	github.com/exaring/otelpgx v0.12.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
@@ -90,6 +92,10 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/pgx/v5 v5.9.2 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/moby/spdystream v0.5.1 // indirect
@@ -152,3 +158,5 @@ replace github.com/llm-d/llm-d-async/api => ./api
 replace github.com/llm-d/llm-d-async/pipeline => ./pipeline
 
 replace github.com/llm-d/llm-d-async/producer => ./producer
+
+replace github.com/llm-d/llm-d-async/producer-sql => ./producer-sql

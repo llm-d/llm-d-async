@@ -5,4 +5,5 @@ use (
 	./api
 	./pipeline
 	./producer
+	./producer-sql
 )
