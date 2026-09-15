@@ -351,6 +351,7 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
 		for _, cd := range r.requestChannels {
 			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   cd.subscriberID,
 				QueueName: cd.subscriberID,
 				PoolName:  cd.requestChannel.WorkerPoolID,
 			})
@@ -382,6 +383,7 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 				// A successful query with no sample does not prove the subscription
 				// is empty. Export a zero sentinel, but leave SourceAvailable false.
 				stats = append(stats, pipeline.QueueBacklogStat{
+					QueueID:   subID,
 					QueueName: subID,
 					PoolName:  cd.requestChannel.WorkerPoolID,
 				})
@@ -393,6 +395,7 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 			// Report 0 rather than skipping so the gauge does not retain a
 			// stale value for this subscription after a failed poll.
 			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   subID,
 				QueueName: subID,
 				PoolName:  cd.requestChannel.WorkerPoolID,
 			})
@@ -402,6 +405,7 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		if len(points) == 0 {
 			// A time series without points also cannot certify an empty queue.
 			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   subID,
 				QueueName: subID,
 				PoolName:  cd.requestChannel.WorkerPoolID,
 			})
@@ -409,6 +413,7 @@ func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklo
 		}
 		// Points are returned newest-first; the first is the latest sample.
 		stats = append(stats, pipeline.QueueBacklogStat{
+			QueueID:         subID,
 			QueueName:       subID,
 			PoolName:        cd.requestChannel.WorkerPoolID,
 			Depth:           points[0].GetValue().GetInt64Value(),
