@@ -136,14 +136,14 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&o.Worker.DrainTimeout, "drain-timeout", o.Worker.DrainTimeout, "maximum time to wait for in-flight requests to complete after SIGTERM")
 	fs.StringVar(&o.Worker.PoolConfigFile, "pool-config-file", o.Worker.PoolConfigFile, "Path to the pools configuration JSON file")
 
-	fs.StringVar(&o.Transport.Type, "transport", o.Transport.Type, "The transport implementation to use. Supported: redis-pubsub, redis-sortedset, gcp-pubsub")
+	fs.StringVar(&o.Transport.Type, "transport", o.Transport.Type, "The transport implementation to use. Supported: redis-pubsub, redis-sortedset, gcp-pubsub, sql")
 	fs.StringVar(&o.Transport.Config, "transport-config", o.Transport.Config, "Inline JSON transport configuration. Mutually exclusive with --transport-config-file.")
 	fs.StringVar(&o.Transport.ConfigFile, "transport-config-file", o.Transport.ConfigFile, "Path to transport configuration JSON file. Mutually exclusive with --transport-config.")
 	fs.DurationVar(&o.Transport.ConfigWatchInterval, "transport-config-watch-interval", o.Transport.ConfigWatchInterval, "If positive, periodically reload the queues field of --transport-config-file; 0 disables hot reload (default)")
 	fs.StringVar(&o.Transport.MergePolicyConfigFile, "request-merge-policy-config-file", o.Transport.MergePolicyConfigFile, "Path to the request merge policy configuration JSON file (empty defaults to random-robin)")
 	// Deprecated: use --request-merge-policy-config-file. Retained for backwards compatibility.
 	fs.StringVar(&o.legacyMergePolicyConfigFile, "request-merge-policy-config", o.legacyMergePolicyConfigFile, "Deprecated: use --request-merge-policy-config-file. Path to the request merge policy configuration JSON file")
-	fs.DurationVar(&o.Transport.BacklogPollInterval, "metrics-backlog-poll-interval", o.Transport.BacklogPollInterval, "interval to poll the broker for queue backlog metrics (0 disables); only applies to flows that support it (redis-sortedset, gcp-pubsub)")
+	fs.DurationVar(&o.Transport.BacklogPollInterval, "metrics-backlog-poll-interval", o.Transport.BacklogPollInterval, "interval to poll the broker for queue backlog metrics (0 disables); only applies to flows that support it (redis-sortedset, gcp-pubsub, sql)")
 
 	// Deprecated: use --transport / --transport-config instead. Retained for backwards compatibility.
 	fs.StringVar(&o.MessageQueueImpl, "message-queue-impl", o.MessageQueueImpl, "Deprecated: use --transport. The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")
@@ -223,7 +223,7 @@ func (o *Options) Complete() error {
 }
 
 var (
-	validTransports = []string{"redis-pubsub", "redis-sortedset", "gcp-pubsub"}
+	validTransports = []string{"redis-pubsub", "redis-sortedset", "gcp-pubsub", "sql"}
 	validQueueImpls = []string{"redis-pubsub", "redis-sortedset", "gcp-pubsub", "gcp-pubsub-gated"}
 )
 

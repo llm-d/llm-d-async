@@ -23,6 +23,7 @@ import (
 	"github.com/llm-d/llm-d-async/pkg/plugins"
 	"github.com/llm-d/llm-d-async/pkg/pubsub"
 	"github.com/llm-d/llm-d-async/pkg/redis"
+	"github.com/llm-d/llm-d-async/pkg/sqlflow"
 	"github.com/llm-d/llm-d-async/pkg/version"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -314,6 +315,13 @@ func loadFlow(opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[
 		}
 		flow, err := redis.NewRedisSortedSetFlow(*cfg, workerPools, gateFactory)
 		return flow, cfg, err
+	case "sql":
+		cfg, err := sqlflow.LoadConfig(configBytes)
+		if err != nil {
+			return nil, nil, err
+		}
+		flow, err := sqlflow.New(context.Background(), *cfg, workerPools, gateFactory)
+		return flow, nil, err
 	case "gcp-pubsub":
 		cfg, err := pubsub.LoadConfig(configBytes)
 		if err != nil {

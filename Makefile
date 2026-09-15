@@ -87,22 +87,25 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: fmt
-fmt: ## Run go fmt against root, api, and producer modules.
+fmt: ## Run go fmt against root, api, producer, and producer-sql modules.
 	go fmt ./...
 	cd api && go fmt ./...
 	cd producer && GOWORK=off go fmt ./...
+	cd producer-sql && GOWORK=off go fmt ./...
 
 .PHONY: vet
-vet: ## Run go vet against root, api, and producer modules.
+vet: ## Run go vet against root, api, producer, and producer-sql modules.
 	go vet ./...
 	cd api && go vet ./...
 	cd producer && GOWORK=off go vet ./...
+	cd producer-sql && GOWORK=off go vet ./...
 
 .PHONY: test
-test: fmt vet setup-envtest ## Run tests against root, api, and producer modules.
+test: fmt vet setup-envtest ## Run tests against root, api, producer, and producer-sql modules.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 	cd api && go test ./... -coverprofile=cover-api.out
 	cd producer && GOWORK=off go test ./... -coverprofile=cover-producer.out
+	cd producer-sql && GOWORK=off go test ./... -coverprofile=cover-producer-sql.out
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node

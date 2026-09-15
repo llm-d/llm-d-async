@@ -1,0 +1,88 @@
+# Postgres 17 and Redis 7 on one CPU node, each limited to 2 CPU / 4 GiB,
+# and the bench Job on another node. Build the image from cross-compiled
+# binaries, then set IMAGE and the node names before applying:
+#   ctx=$(mktemp -d) && cp hack/transport-bench/Dockerfile "$ctx"
+#   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$ctx" ./hack/transport-bench
+#   build and push "$ctx" to a registry the cluster can pull as $IMG
+#   sed -e "s|IMAGE|$IMG|" -e "s|DB_NODE|<db-node>|" -e "s|BENCH_NODE|<bench-node>|" \
+#     hack/transport-bench/k8s.yaml | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bench-postgres
+  labels: {app: bench-postgres}
+spec:
+  nodeName: DB_NODE
+  containers:
+    - name: postgres
+      image: postgres:17
+      args: ["-c", "max_connections=400", "-c", "shared_buffers=1GB"]
+      env:
+        - {name: POSTGRES_HOST_AUTH_METHOD, value: trust}
+        - {name: POSTGRES_DB, value: asyncq}
+      ports: [{containerPort: 5432}]
+      resources:
+        requests: {cpu: "2", memory: 4Gi}
+        limits: {cpu: "2", memory: 4Gi}
+      readinessProbe:
+        exec: {command: ["pg_isready", "-U", "postgres"]}
+        periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bench-postgres
+spec:
+  selector: {app: bench-postgres}
+  ports: [{port: 5432}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bench-redis
+  labels: {app: bench-redis}
+spec:
+  nodeName: DB_NODE
+  containers:
+    - name: redis
+      image: redis:7
+      args: ["--appendonly", "yes", "--appendfsync", "everysec"]
+      ports: [{containerPort: 6379}]
+      resources:
+        requests: {cpu: "2", memory: 4Gi}
+        limits: {cpu: "2", memory: 4Gi}
+      readinessProbe:
+        exec: {command: ["redis-cli", "ping"]}
+        periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bench-redis
+spec:
+  selector: {app: bench-redis}
+  ports: [{port: 6379}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: transport-bench
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      nodeName: BENCH_NODE
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: IMAGE
+          args: ["--transports=sql,redis-sortedset", "--rates=1000,2000,4000,8000,12000,16000,24000",
+                 "--csv=/tmp/results.csv", "--dump-csv", "--drain-timeout=60s"]
+          env:
+            - {name: SQL_URL, value: "postgres://postgres@bench-postgres:5432/asyncq?sslmode=disable"}
+            - {name: REDIS_URL, value: "redis://bench-redis:6379/0"}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+          resources:
+            requests: {cpu: "8", memory: 16Gi}
+            limits: {cpu: "8", memory: 16Gi}
+      volumes: [{name: tmp, emptyDir: {}}]

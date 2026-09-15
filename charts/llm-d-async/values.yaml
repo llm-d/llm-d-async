@@ -129,13 +129,14 @@ ap:
   # ap.otel.redisTracing).
   #
   # transport: one of redis-pubsub (deprecated; prefer redis-sortedset),
-  # redis-sortedset, gcp-pubsub.
+  # redis-sortedset, gcp-pubsub, sql.
   # transportConfig: the transport-specific document. See the project README
   #   "Transport Configuration" section for the schema.
-  #   Redis/Valkey connection: DO NOT put a credentialed "url" directly in
+  #   Redis/Valkey or SQL connection: DO NOT put a credentialed "url" directly in
   #   transportConfig -- inline values are rendered into the pod args (visible via
   #   `kubectl get pod` / `helm get values`). Use transportConfig.urlSecret instead;
-  #   the chart injects it as the REDIS_URL env var and keeps it out of the args.
+  #   the chart injects it as the REDIS_URL (redis-*) or SQL_URL (sql) env var and
+  #   keeps it out of the args.
   #   urlSecret is a chart-only directive, stripped before the config reaches the
   #   processor. Two forms:
   #     urlSecret: {name: <secret>, key: url}  # reference an existing Secret
@@ -158,6 +159,16 @@ ap:
   #           pool: my-pool
   #           max_concurrency: "100"
   #           baseline: "0.05"
+  # Example (sql, sharing the batch gateway's Postgres):
+  #   transport: sql
+  #   transportConfig:
+  #     urlSecret:
+  #       name: batch-gateway-secrets
+  #       key: postgresql-url
+  #     result_queue_name: result-sql
+  #     queues:
+  #       - queue_name: request-sql
+  #         igw_base_url: http://igw:80
   transport: ""
   transportConfig: {}
 
