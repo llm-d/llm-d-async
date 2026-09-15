@@ -87,22 +87,31 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: fmt
-fmt: ## Run go fmt against root, api, and producer modules.
+fmt: ## Run go fmt against root, api, producer, and producer-sql modules.
 	go fmt ./...
 	cd api && go fmt ./...
 	cd producer && GOWORK=off go fmt ./...
+	cd producer-sql && GOWORK=off go fmt ./...
 
 .PHONY: vet
-vet: ## Run go vet against root, api, and producer modules.
+vet: ## Run go vet against root, api, producer, and producer-sql modules.
 	go vet ./...
 	cd api && go vet ./...
 	cd producer && GOWORK=off go vet ./...
+	cd producer-sql && GOWORK=off go vet ./...
 
 .PHONY: test
-test: fmt vet setup-envtest ## Run tests against root, api, and producer modules.
+test: fmt vet setup-envtest ## Run tests against root, api, producer, and producer-sql modules.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 	cd api && go test ./... -coverprofile=cover-api.out
 	cd producer && GOWORK=off go test ./... -coverprofile=cover-producer.out
+	cd producer-sql && GOWORK=off go test -p 1 ./... -coverprofile=cover-producer-sql.out
+
+.PHONY: test-sql
+test-sql: ## Run the Postgres-backed sql transport tests. Requires TEST_POSTGRES_URL.
+	@test -n "$(TEST_POSTGRES_URL)" || { echo "TEST_POSTGRES_URL is required, e.g. postgres://postgres@localhost:5432/asyncq_test?sslmode=disable"; exit 1; }
+	cd producer-sql && GOWORK=off go test -p 1 ./...
+	go test ./pkg/sqlflow/...
 
 .PHONY: bench
 bench: ## Run microbenchmarks. Set BENCH_REDIS_ADDR=host:port to measure against a real Redis instead of miniredis.

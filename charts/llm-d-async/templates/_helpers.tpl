@@ -81,6 +81,15 @@ Transport config JSON document passed via --transport-config. On the new surface
 it is ap.transportConfig verbatim; otherwise it is synthesized from the deprecated
 per-backend values so existing values files keep working.
 */}}
+{{- define "llm-d-async.urlEnvVar" -}}
+{{- $transport := include "llm-d-async.transport" . -}}
+{{- if hasPrefix "redis" $transport -}}
+REDIS_URL
+{{- else if eq $transport "sql" -}}
+SQL_URL
+{{- end -}}
+{{- end -}}
+
 {{- define "llm-d-async.transportConfig" -}}
 {{- if .Values.ap.transport -}}
 {{- /* urlSecret is a chart-only directive (it wires REDIS_URL from a Secret);
