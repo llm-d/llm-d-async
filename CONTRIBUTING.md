@@ -116,7 +116,7 @@ package integration_test
 
 ## Releasing
 
-This repository is a multi-module Go repo. The lightweight sub-modules (`api`, `pipeline`, `producer`) each have their own `go.mod` so that external consumers can depend on them without pulling in the heavyweight root module.
+This repository is a multi-module Go repo. The lightweight sub-modules (`api`, `pipeline`, `producer`, `producer-gcp`) each have their own `go.mod` so that external consumers can depend on them without pulling in the heavyweight root module.
 
 ### Preparing a release
 
@@ -135,7 +135,7 @@ git tag v0.8.0
 git push origin v0.8.0
 ```
 
-3. The `CI - Tag Go Submodules` workflow automatically creates the prefixed tags required by Go modules (e.g. `api/v0.8.0`, `pipeline/v0.8.0`, `producer/v0.8.0`).
+3. The `CI - Tag Go Submodules` workflow automatically creates the prefixed tags required by Go modules (e.g. `api/v0.8.0`, `pipeline/v0.8.0`, `producer/v0.8.0`, `producer-gcp/v0.8.0`).
 
 Go requires sub-module tags to carry the directory prefix — see [Managing module source](https://go.dev/doc/modules/managing-source) for details.
 

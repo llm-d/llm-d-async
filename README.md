@@ -83,6 +83,7 @@ The architecture adheres to the following core principles:
     - [Redis Sorted Set (Persisted)](#redis-sorted-set-persisted)
     - [Redis Channels (Ephemeral)](#redis-channels-ephemeral)
     - [GCP Pub/Sub](#gcp-pubsub)
+    - [Producer libraries](#producer-libraries)
   - [Development](#development)
 
 ## Concepts
@@ -803,7 +804,8 @@ The async processor expects request messages to have the following format:
 }
 ```
 
-Producers handle wrapping these into the internal wire format used for persistence and routing.
+Producers handle wrapping Redis traffic into the internal wire format used for persistence and routing.
+The GCP Pub/Sub producer publishes a plain `RequestMessage` as message data and puts metadata on attributes.
 
 ### Result Messages
 
@@ -829,7 +831,7 @@ Results are written to the result queue/topic with the following structure:
 
 ### Internal Wire Format
 
-On the broker itself, messages travel in a tagged envelope carrying the request kind and internal routing (producers create this automatically):
+On Redis, messages travel in a tagged envelope carrying the request kind and internal routing (the Redis producer creates this automatically):
 
 ```json
 {"request_kind": "plain", "data": { "id": "...", "deadline": 1764045130, "payload": {} }}
@@ -1109,8 +1111,11 @@ The GCP PubSub implementation requires the user to configure the following:
     - Retries with exponential backoff.
     - Dead Letter Queue (DLQ).
 - Results Topic.
+- Per-producer result subscriptions filtered on the `result_route` attribute, if you use [`producer-gcp`](#producer-libraries).
 
 <u>Note:</u> If DLQ is NOT configured for the request topic, retried messages will be counted multiple times in the #_of_requests metric.
+The Pub/Sub service agent (`service-{project-number}@gcp-sa-pubsub.iam.gserviceaccount.com`) needs `pubsub.subscriber` on the request subscription and `pubsub.publisher` on the DLQ topic.
+`producer-gcp` creates the DLQ topic and subscription but does not grant these IAM roles.
 
 ![Async Processor - GCP PubSub Architecture](/docs/images/gcp_pubsub_architecture.png "AP - GCP PubSub")
 
@@ -1126,6 +1131,37 @@ The GCP PubSub implementation requires the user to configure the following:
 - `pubsub.result-topic-id`: The results topic ID.
 - `pubsub.batch-size`: Number of inflight messages. Default is <u>10</u>.
 - `pubsub.topics-config-file`: The configuration file name when using multiple topics — a JSON array of [topic entries](#queue-and-topic-entry-fields). <br> Mutually exclusive with `pubsub.request-subscriber-id`, `pubsub.request-path-url` and `pubsub.inference-objective` flags.
+
+### Producer libraries
+
+Callers enqueue work through a `Producer` implementation rather than speaking the broker wire format themselves.
+The interface lives in `github.com/llm-d/llm-d-async/api`.
+Redis and GCP clients are separate modules so a GCP-only caller never imports `go-redis`.
+
+| Module | Transport | Notes |
+| --- | --- | --- |
+| `github.com/llm-d/llm-d-async/producer` | Redis sorted set | Wraps requests in the [internal wire format](#internal-wire-format). Supports `CancelRequests` and durable result delivery. |
+| `github.com/llm-d/llm-d-async/producer-gcp` | GCP Pub/Sub | Publishes a plain `RequestMessage` as data with metadata on attributes. `CancelRequests` returns `api.ErrNotSupported`. Durable results are not in v1. |
+
+`producer-gcp` stamps a `result_route` attribute on each request.
+The processor echoes that same attribute onto result publications.
+Each producer attaches a filtered result subscription so it only sees its own results.
+`RequestSubscriptionID` must match the processor's `subscriber_id`.
+
+By default `NewProducer` idempotently creates the request topic, the request subscription (exactly-once, exponential backoff, DLQ, never-expire), the result topic, this producer's filtered result subscription (7-day inactivity expiration), and a DLQ topic plus subscription.
+`AlreadyExists` is success after checking that an existing subscription is attached to the expected topic (and, for the result subscription, that the filter matches).
+Use `WithoutCreateResources` for a publish-only identity.
+See [docs/proposals/gcp-pubsub-producer.md](docs/proposals/gcp-pubsub-producer.md).
+
+```go
+p, err := producergcp.NewProducer(producergcp.Config{
+    ProjectID:             "my-project",
+    RequestTopicID:        "requests",
+    RequestSubscriptionID: "llm-d-async-requests",
+    ResultTopicID:         "results",
+    ResultRoute:           "batch-job-42",
+})
+```
 
 ## Development
 
