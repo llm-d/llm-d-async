@@ -442,7 +442,7 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 			} else {
 				msgBytes = bytes
 			}
-			publishPubSub(ctx, publisher, msgBytes, map[string]string{})
+			publishPubSub(ctx, publisher, msgBytes, resultPublishAttributes(msg))
 			value, ok := resultChannels.Load(msg.Routing.TransportCorrelationID)
 			if !ok {
 				logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for message", "pubsubID", msg.Routing.TransportCorrelationID)
@@ -453,6 +453,16 @@ func resultWorker(ctx context.Context, publisher *pubsub.Publisher, resultChanne
 
 		}
 	}
+}
+
+// resultPublishAttributes returns the Pub/Sub attributes stamped on a result
+// publication. Only result_route is copied; caller metadata is not echoed.
+func resultPublishAttributes(msg api.ResultMessage) map[string]string {
+	route := msg.Metadata[api.ResultRouteAttribute]
+	if route == "" {
+		return map[string]string{}
+	}
+	return map[string]string{api.ResultRouteAttribute: route}
 }
 
 func publishPubSub(ctx context.Context, publisher *pubsub.Publisher, msg []byte, attrs map[string]string) {

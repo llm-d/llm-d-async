@@ -470,3 +470,80 @@ func TestQueueBacklogMarksSourceUnavailableWithoutMetricClient(t *testing.T) {
 		t.Fatalf("backlog without metric client = %+v, want unavailable zero sentinel", stats[0])
 	}
 }
+
+func TestResultPublishAttributes(t *testing.T) {
+	t.Parallel()
+
+	if got := resultPublishAttributes(api.ResultMessage{}); len(got) != 0 {
+		t.Errorf("empty metadata: got %v, want empty", got)
+	}
+
+	got := resultPublishAttributes(api.ResultMessage{
+		Metadata: map[string]string{
+			"userid":                 "alice",
+			api.ResultRouteAttribute: "producer-a",
+		},
+	})
+	if len(got) != 1 || got[api.ResultRouteAttribute] != "producer-a" {
+		t.Errorf("stamped attributes = %v, want only result_route=producer-a", got)
+	}
+}
+
+func TestResultWorkerStampsResultRouteAttribute(t *testing.T) {
+	client, _ := newFakePubSub(t)
+	ctx := context.Background()
+	topicName := "projects/" + testProject + "/topics/results"
+	if _, err := client.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{Name: topicName}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	subName := "projects/" + testProject + "/subscriptions/results-sub"
+	if _, err := client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  subName,
+		Topic: topicName,
+	}); err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+
+	publisher := client.Publisher("results")
+	t.Cleanup(func() { publisher.Stop() })
+
+	resultCh := make(chan api.ResultMessage, 1)
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go resultWorker(wctx, publisher, resultCh)
+
+	resultCh <- api.ResultMessage{
+		ID:       "req-1",
+		Payload:  `{"ok":true}`,
+		Metadata: map[string]string{api.ResultRouteAttribute: "producer-a", "userid": "alice"},
+	}
+
+	sub := client.Subscriber("results-sub")
+	sub.ReceiveSettings.MaxOutstandingMessages = 1
+	sub.ReceiveSettings.NumGoroutines = 1
+	recvCtx, recvCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer recvCancel()
+
+	var got *pubsub.Message
+	err := sub.Receive(recvCtx, func(ctx context.Context, msg *pubsub.Message) {
+		got = msg
+		msg.Ack()
+		recvCancel()
+	})
+	if got == nil {
+		t.Fatalf("did not receive result: %v", err)
+	}
+	if got.Attributes[api.ResultRouteAttribute] != "producer-a" {
+		t.Errorf("result attributes = %v, want result_route=producer-a", got.Attributes)
+	}
+	if _, ok := got.Attributes["userid"]; ok {
+		t.Errorf("result attributes leaked caller metadata: %v", got.Attributes)
+	}
+	var decoded api.ResultMessage
+	if err := json.Unmarshal(got.Data, &decoded); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if decoded.ID != "req-1" {
+		t.Errorf("result id = %q, want req-1", decoded.ID)
+	}
+}
