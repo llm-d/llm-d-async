@@ -8,6 +8,7 @@ import (
 
 	"github.com/llm-d/llm-d-async/internal/logging"
 	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
+	"github.com/llm-d/llm-d-async/pkg/asyncworker"
 	"github.com/llm-d/llm-d-async/pkg/pubsub"
 	"github.com/llm-d/llm-d-async/pkg/redis"
 	"github.com/spf13/pflag"
@@ -28,10 +29,11 @@ type TLSConfig struct {
 }
 
 type WorkerConfig struct {
-	Concurrency    int
-	RequestTimeout time.Duration
-	DrainTimeout   time.Duration
-	PoolConfigFile string
+	Concurrency     int
+	RequestTimeout  time.Duration
+	GateWaitTimeout time.Duration
+	DrainTimeout    time.Duration
+	PoolConfigFile  string
 }
 
 // TransportOptions groups the transport selection and configuration flags.
@@ -98,9 +100,10 @@ func NewOptions() *Options {
 				MetricsEndpointAuth: true,
 			},
 			Worker: WorkerConfig{
-				Concurrency:    64,
-				RequestTimeout: 5 * time.Minute,
-				DrainTimeout:   2 * time.Minute,
+				Concurrency:     64,
+				RequestTimeout:  5 * time.Minute,
+				GateWaitTimeout: asyncworker.DefaultGateWaitTimeout,
+				DrainTimeout:    2 * time.Minute,
 			},
 			Transport: TransportOptions{
 				Type:                "redis-pubsub",
@@ -133,6 +136,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 
 	fs.IntVar(&o.Worker.Concurrency, "concurrency", o.Worker.Concurrency, "number of concurrent workers")
 	fs.DurationVar(&o.Worker.RequestTimeout, "request-timeout", o.Worker.RequestTimeout, "timeout for individual inference requests")
+	fs.DurationVar(&o.Worker.GateWaitTimeout, "gate-wait-timeout", o.Worker.GateWaitTimeout, "maximum time a worker parks one request at a pool gate before re-enqueueing it (0 waits until the request deadline)")
 	fs.DurationVar(&o.Worker.DrainTimeout, "drain-timeout", o.Worker.DrainTimeout, "maximum time to wait for in-flight requests to complete after SIGTERM")
 	fs.StringVar(&o.Worker.PoolConfigFile, "pool-config-file", o.Worker.PoolConfigFile, "Path to the pools configuration JSON file")
 
@@ -248,6 +252,9 @@ func (o *Options) Validate() error {
 	}
 	if (o.TLS.Cert != "") != (o.TLS.Key != "") {
 		return fmt.Errorf("both --tls-cert and --tls-key must be provided together")
+	}
+	if o.Worker.GateWaitTimeout < 0 {
+		return fmt.Errorf("--gate-wait-timeout must be non-negative")
 	}
 	return nil
 }

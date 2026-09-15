@@ -497,8 +497,100 @@ func TestWorker_PoolGateActionWaitThrottlesCancellationChecks(t *testing.T) {
 	if got := checker.checkCount(); got > 1 {
 		t.Fatalf("expected throttled cancellation checks during ActionWait, got %d", got)
 	}
+	if got := gate.applyCount.Load(); got > 3 {
+		t.Fatalf("expected bounded backoff to limit gate polls, got %d applies in 220ms", got)
+	}
 	if called.Load() != 0 {
 		t.Fatalf("expected inference client to be skipped, got %d calls", called.Load())
+	}
+}
+
+func TestWorker_PoolGateWaitTimeoutReenqueues(t *testing.T) {
+	var called atomic.Int32
+	inferenceClient := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	}))
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go WorkerWithGateTimeout(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel,
+		10*time.Millisecond, 100*time.Millisecond, nil, &waitingPoolGate{})
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "gate-wait-timeout",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case retry := <-retryChannel:
+		if retry.PublicRequest.ReqID() != "gate-wait-timeout" {
+			t.Fatalf("re-enqueued wrong request %q", retry.PublicRequest.ReqID())
+		}
+	case result := <-resultChannel:
+		t.Fatalf("gate wait timeout must be recoverable, got terminal result %+v", result)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for gate-wait requeue")
+	}
+	if called.Load() != 0 {
+		t.Fatalf("expected no inference call while gate stayed closed, got %d", called.Load())
+	}
+}
+
+func TestWorker_PoolGateWaitDoesNotConsumeInferenceTimeout(t *testing.T) {
+	var called atomic.Int32
+	inferenceClient := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	}))
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	gate := &waitThenContinueGate{waits: 2}
+	go WorkerWithGateTimeout(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel,
+		10*time.Millisecond, time.Second, nil, gate)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "gate-wait-independent-timeout",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-retryChannel:
+		t.Fatal("request should dispatch after the gate opens")
+	case result := <-resultChannel:
+		if result.ErrorCode != "" {
+			t.Fatalf("expected successful result after gate opened, got %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for inference result")
+	}
+	if called.Load() != 1 {
+		t.Fatalf("expected one inference call, got %d", called.Load())
+	}
+}
+
+func TestGateWaitBackoffIsBoundedAndJittered(t *testing.T) {
+	backoff := gateWaitInitialBackoff
+	for i := 0; i < 10; i++ {
+		delay := jitteredGateWait(backoff)
+		if delay < backoff/2 || delay > backoff {
+			t.Fatalf("jittered wait %v outside [%v, %v]", delay, backoff/2, backoff)
+		}
+		backoff = nextGateWaitBackoff(backoff)
+	}
+	if backoff != gateWaitMaxBackoff {
+		t.Fatalf("backoff = %v, want cap %v", backoff, gateWaitMaxBackoff)
 	}
 }
 
@@ -2479,8 +2571,9 @@ func (g *waitingPoolGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest
 }
 
 type notifyingWaitGate struct {
-	applied  chan struct{}
-	notified atomic.Bool
+	applied    chan struct{}
+	notified   atomic.Bool
+	applyCount atomic.Int32
 }
 
 func (g *notifyingWaitGate) Budget(ctx context.Context) float64 {
@@ -2488,10 +2581,27 @@ func (g *notifyingWaitGate) Budget(ctx context.Context) float64 {
 }
 
 func (g *notifyingWaitGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	g.applyCount.Add(1)
 	if g.applied != nil && !g.notified.Swap(true) {
 		close(g.applied)
 	}
 	return pipeline.Wait(), nil
+}
+
+type waitThenContinueGate struct {
+	waits int32
+	calls atomic.Int32
+}
+
+func (g *waitThenContinueGate) Budget(context.Context) float64 {
+	return 1
+}
+
+func (g *waitThenContinueGate) Apply(context.Context, *asyncapi.InternalRequest, *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	if g.calls.Add(1) <= g.waits {
+		return pipeline.Wait(), nil
+	}
+	return pipeline.Continue(), nil
 }
 
 type signalContinueGate struct {

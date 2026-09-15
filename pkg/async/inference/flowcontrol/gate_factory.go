@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -85,6 +86,8 @@ func (f *GateFactory) Close() error {
 // Supported gate types:
 //   - "constant": Always returns budget 1.0 (fully open)
 //   - "redis": Queries Redis for dispatch budget
+//   - "redis-leased-rate": Enforces a fail-closed, externally leased absolute
+//     dispatch-rate ceiling shared through Redis.
 //   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
 //     Params: pool (required), threshold (default 0.8), fallback (default 0.0)
 //   - "composite": Combines multiple gates. Params: gates (JSON array of gate configurations)
@@ -190,6 +193,35 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		}
 		budgetKey := paramString(params, "budget_key", "dispatch-gate-budget")
 		return redisgate.NewRedisDispatchGate(client, budgetKey), nil
+
+	case "redis-leased-rate":
+		addr := paramString(params, "address", "")
+		if addr == "" {
+			return nil, fmt.Errorf("redis-leased-rate gate requires an 'address' in gate_params")
+		}
+		client, ok := f.redisClients[addr]
+		if !ok {
+			client = goredis.NewClient(&goredis.Options{Addr: addr})
+			f.redisClients[addr] = client
+		}
+
+		poolID := paramString(params, "pool_id", cfg.Owner.WorkerPoolID)
+		if poolID == "" {
+			return nil, fmt.Errorf("redis-leased-rate gate requires a 'pool_id' in gate_params or a worker-pool owner")
+		}
+		controlKey := paramString(params, "control_key", "")
+		if controlKey == "" {
+			return nil, fmt.Errorf("redis-leased-rate gate requires a 'control_key' in gate_params")
+		}
+		burstSeconds, err := paramFloat(params, "burst_seconds", 1.0)
+		if err != nil {
+			return nil, fmt.Errorf("redis-leased-rate gate requires a valid 'burst_seconds': %w", err)
+		}
+		if math.IsNaN(burstSeconds) || math.IsInf(burstSeconds, 0) || burstSeconds <= 0 {
+			return nil, fmt.Errorf("redis-leased-rate burst_seconds must be finite and positive, got %g", burstSeconds)
+		}
+		stateKey := paramString(params, "state_key", "")
+		return redisgate.NewRedisLeasedRateGate(client, controlKey, stateKey, poolID, burstSeconds), nil
 
 	case "redis-quota":
 		addr := paramString(params, "address", "")

@@ -48,6 +48,10 @@ ap:
   # real inference pools mostly idle. Tune to your backend's latency/throughput
   # target — see the Async Processor Operations Guide.
   concurrency: 64
+  # Maximum time a worker parks one request at a pool gate before recoverably
+  # re-enqueueing it. Independent of the downstream request timeout; 0 waits
+  # until the request's own deadline.
+  gateWaitTimeout: "5m"
   drainTimeout: "2m"
   prometheusURL: ""
   prometheusCacheTTL: ""

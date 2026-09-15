@@ -10,11 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	asyncapi "github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/llm-d/llm-d-async/pkg/asyncworker"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestPoolGating_Blocking verifies that pool-level gating in "blocking" mode
@@ -346,4 +349,130 @@ func TestPoolGating_ActionRefuse(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+func newLeasedPoolGate(t *testing.T, rate float64) (pipeline.Gate, *goredis.Client, string) {
+	t.Helper()
+	redisServer := miniredis.RunT(t)
+	redisServer.SetTime(time.Now())
+	client := goredis.NewClient(&goredis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	controlKey := "integration:drain-limit:batch-pool"
+	err := client.HSet(context.Background(), controlKey, map[string]any{
+		"api_version":         asyncapi.DispatchRateLimitAPIVersion,
+		"pool_id":             "batch-pool",
+		"max_admission_rps":   rate,
+		"valid_until_unix_ms": time.Now().Add(time.Minute).UnixMilli(),
+		"decision_id":         "integration-decision",
+	}).Err()
+	require.NoError(t, err)
+
+	factory := flowcontrol.NewGateFactory("")
+	t.Cleanup(func() { _ = factory.Close() })
+	gate, err := factory.CreateGate(pipeline.GateConfig{
+		GateType: "wait-on-refuse",
+		GateParams: map[string]any{
+			"gate": map[string]any{
+				"gate_type": "redis-leased-rate",
+				"gate_params": map[string]any{
+					"address":     redisServer.Addr(),
+					"control_key": controlKey,
+				},
+			},
+		},
+		Owner: pipeline.GateOwner{WorkerPoolID: "batch-pool"},
+	})
+	require.NoError(t, err)
+	return gate, client, controlKey
+}
+
+func TestPoolGating_RedisLeasedRateWaitsUntilLeasePermits(t *testing.T) {
+	gate, redisClient, controlKey := newLeasedPoolGate(t, 0)
+	var hits int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		asyncworker.WorkerWithGateTimeout(ctx, ctx, pipeline.Characteristics{}, asyncworker.NewHTTPInferenceClient(server.Client()),
+			requestChannel, retryChannel, resultChannel, time.Second, 2*time.Second, nil, gate)
+	}()
+	t.Cleanup(func() { cancel(); wg.Wait() })
+
+	requestChannel <- pipeline.EmbelishedRequestMessage{
+		InternalRequest: asyncapi.NewInternalRequest(asyncapi.InternalRouting{RequestQueueName: "batch-queue"}, &asyncapi.RequestMessage{
+			ID: "leased-wait", Created: time.Now().Unix(), Deadline: time.Now().Add(30 * time.Second).Unix(), Payload: map[string]any{"model": "test"},
+		}),
+		RequestURL:   server.URL,
+		WorkerPoolID: "batch-pool",
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	mu.Lock()
+	assert.Equal(t, 0, hits, "paused lease must prevent downstream admission")
+	mu.Unlock()
+	assert.Empty(t, retryChannel, "ActionWait should park rather than requeue immediately")
+
+	require.NoError(t, redisClient.HSet(context.Background(), controlKey,
+		"max_admission_rps", 1,
+		"decision_id", "integration-resume",
+	).Err())
+
+	select {
+	case result := <-resultChannel:
+		assert.Equal(t, "leased-wait", result.ID)
+	case retry := <-retryChannel:
+		t.Fatalf("request requeued before resumed lease admitted it: %+v", retry)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for resumed leased gate to dispatch")
+	}
+	mu.Lock()
+	assert.Equal(t, 1, hits, "resumed lease should admit exactly one downstream attempt")
+	mu.Unlock()
+}
+
+func TestPoolGating_RedisLeasedRateWaitTimeoutRequeues(t *testing.T) {
+	gate, _, _ := newLeasedPoolGate(t, 0)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		asyncworker.WorkerWithGateTimeout(ctx, ctx, pipeline.Characteristics{}, asyncworker.NewHTTPInferenceClient(http.DefaultClient),
+			requestChannel, retryChannel, resultChannel, time.Second, 150*time.Millisecond, nil, gate)
+	}()
+	t.Cleanup(func() { cancel(); wg.Wait() })
+
+	requestChannel <- pipeline.EmbelishedRequestMessage{
+		InternalRequest: asyncapi.NewInternalRequest(asyncapi.InternalRouting{RequestQueueName: "batch-queue"}, &asyncapi.RequestMessage{
+			ID: "leased-timeout", Created: time.Now().Unix(), Deadline: time.Now().Add(30 * time.Second).Unix(), Payload: map[string]any{"model": "test"},
+		}),
+		RequestURL:   "http://unused.invalid",
+		WorkerPoolID: "batch-pool",
+	}
+
+	select {
+	case retry := <-retryChannel:
+		assert.Equal(t, "leased-timeout", retry.PublicRequest.ReqID())
+	case result := <-resultChannel:
+		t.Fatalf("gate wait timeout must not create a terminal result: %+v", result)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recoverable leased-gate requeue")
+	}
 }

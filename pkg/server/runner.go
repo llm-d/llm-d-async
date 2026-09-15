@@ -172,7 +172,7 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 			wg.Add(1)
 			go func(mergedChan chan pipeline.EmbelishedRequestMessage, poolGate pipeline.Gate) {
 				defer wg.Done()
-				asyncworker.WorkerWithGate(ctx, drainCtx, flow.Characteristics(), inferenceClient, mergedChan, flow.RetryChannel(), flow.ResultChannel(), opts.Worker.RequestTimeout, transforms, poolGate)
+				asyncworker.WorkerWithGateTimeout(ctx, drainCtx, flow.Characteristics(), inferenceClient, mergedChan, flow.RetryChannel(), flow.ResultChannel(), opts.Worker.RequestTimeout, opts.Worker.GateWaitTimeout, transforms, poolGate)
 			}(mergedChan, poolGate)
 		}
 	}
