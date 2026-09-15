@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"cloud.google.com/go/pubsub/v2"
@@ -95,7 +95,11 @@ type Producer struct {
 	deadLetterTopicID        string
 	deadLetterSubscriptionID string
 	createResources          bool
-	receiveMu                sync.Mutex
+	// receiveSlot serializes GetResult calls: Pub/Sub allows a single Receive
+	// per subscriber client. A one-permit channel (not a mutex) lets a caller
+	// with an expired context bail out instead of blocking behind an in-flight
+	// Receive.
+	receiveSlot chan struct{}
 }
 
 // NewProducer creates a Pub/Sub producer. By default it idempotently creates
@@ -116,6 +120,7 @@ func NewProducer(cfg Config, opts ...Option) (*Producer, error) {
 		deadLetterTopicID:        cfg.DeadLetterTopicID,
 		deadLetterSubscriptionID: cfg.DeadLetterSubscriptionID,
 		createResources:          true,
+		receiveSlot:              make(chan struct{}, 1),
 	}
 
 	for _, opt := range opts {
@@ -153,7 +158,9 @@ func (p *Producer) SubmitRequest(ctx context.Context, req api.Request) error {
 	if p.publisher == nil {
 		return errors.New("producer is closed")
 	}
-	if req == nil {
+	// An interface holding a typed nil (e.g. (*api.RequestMessage)(nil)) passes
+	// a plain nil check but panics in the accessors below.
+	if req == nil || (reflect.ValueOf(req).Kind() == reflect.Pointer && reflect.ValueOf(req).IsNil()) {
 		return errors.New("request is required")
 	}
 	if req.ReqID() == "" {
@@ -208,8 +215,12 @@ func (p *Producer) GetResult(ctx context.Context) (*api.ResultMessage, error) {
 		return nil, errors.New("producer is closed")
 	}
 
-	p.receiveMu.Lock()
-	defer p.receiveMu.Unlock()
+	select {
+	case p.receiveSlot <- struct{}{}:
+		defer func() { <-p.receiveSlot }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
+	}
 
 	sub := p.client.Subscriber(p.resultSubscriptionID)
 	sub.ReceiveSettings.MaxOutstandingMessages = 1

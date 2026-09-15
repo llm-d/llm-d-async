@@ -651,6 +651,18 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			if verdict.Result != nil {
 				resultMsg = *verdict.Result
 				resultMsg.Routing = ir.InternalRouting
+				// A gate-provided result may not carry request metadata (the
+				// tier-priority-admission gate builds one without it). The result
+				// route must survive so a filtered result subscription still
+				// receives the terminal result.
+				if route := body.Metadata[api.ResultRouteAttribute]; route != "" {
+					if resultMsg.Metadata == nil {
+						resultMsg.Metadata = make(map[string]string)
+					}
+					if _, ok := resultMsg.Metadata[api.ResultRouteAttribute]; !ok {
+						resultMsg.Metadata[api.ResultRouteAttribute] = route
+					}
+				}
 			} else {
 				resultMsg = api.NewGateDroppedResult(&body, ir.InternalRouting)
 			}

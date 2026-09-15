@@ -336,6 +336,53 @@ func TestGetResultRespectsContext(t *testing.T) {
 	}
 }
 
+func TestSubmitRequestRejectsTypedNil(t *testing.T) {
+	client := newFakeClient(t)
+	p := newTestProducer(t, client, testConfig())
+
+	var req *api.RequestMessage
+	var rreq *api.RedisRequest
+	var preq *api.PubSubRequest
+	for name, r := range map[string]api.Request{"RequestMessage": req, "RedisRequest": rreq, "PubSubRequest": preq} {
+		if err := p.SubmitRequest(context.Background(), r); err == nil {
+			t.Errorf("%s: expected error for typed-nil request, got nil", name)
+		}
+	}
+}
+
+// TestGetResultCancelledCallerDoesNotWaitBehindReceive guards the
+// context-aware receive slot: a second GetResult with a deadline must not
+// block behind an in-flight Receive until that call finishes.
+func TestGetResultCancelledCallerDoesNotWaitBehindReceive(t *testing.T) {
+	client := newFakeClient(t)
+	p := newTestProducer(t, client, testConfig())
+
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer firstCancel()
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := p.GetResult(firstCtx)
+		firstDone <- err
+	}()
+
+	// Let the first call enter Receive and hold the slot.
+	time.Sleep(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := p.GetResult(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("GetResult blocked %v behind an in-flight receive; want prompt deadline", elapsed)
+	}
+
+	firstCancel()
+	<-firstDone
+}
+
 func TestCancelRequests(t *testing.T) {
 	t.Parallel()
 	client := newFakeClient(t)

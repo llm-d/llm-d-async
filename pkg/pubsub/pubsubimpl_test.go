@@ -489,6 +489,66 @@ func TestResultPublishAttributes(t *testing.T) {
 	}
 }
 
+// mockDropGate returns ActionDrop with a caller-supplied result.
+type mockDropGate struct {
+	result *api.ResultMessage
+}
+
+func (m *mockDropGate) Budget(ctx context.Context) float64 { return 1.0 }
+func (m *mockDropGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	return pipeline.Drop(m.result), nil
+}
+
+// TestProcessMessages_DropResultKeepsResultRoute is the regression guard for a
+// gate-provided drop result carrying no request metadata (the
+// tier-priority-admission gate builds one): without the route the result
+// publishes attribute-less, a filtered result subscription never sees it, and
+// the producer hangs while its request is already acked.
+func TestProcessMessages_DropResultKeepsResultRoute(t *testing.T) {
+	flow := &PubSubMQFlow{resultChannel: make(chan api.ResultMessage, 1)}
+	ch := make(chan *api.InternalRequest, 1)
+
+	gate := &mockDropGate{result: &api.ResultMessage{ID: "test-msg", Payload: `{"code":429}`}}
+
+	msgData, _ := json.Marshal(api.RequestMessage{ID: "test-msg"})
+	receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
+		f(ctx, &pubsub.Message{
+			ID:         "msg-drop-1",
+			Data:       msgData,
+			Attributes: map[string]string{api.ResultRouteAttribute: "producer-a"},
+		})
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var got api.ResultMessage
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case got = <-flow.resultChannel:
+			// Simulate the result worker signalling a successful publish.
+			if val, ok := resultChannels.Load("msg-drop-1"); ok {
+				val.(chan bool) <- true
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	// Ack on a hand-built message panics; the result is captured before that.
+	defer func() {
+		_ = recover()
+		<-done
+		if got.Metadata[api.ResultRouteAttribute] != "producer-a" {
+			t.Fatalf("drop result metadata = %v, want result_route=producer-a", got.Metadata)
+		}
+	}()
+
+	_ = flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, gate, nil)
+}
+
 func TestResultWorkerStampsResultRouteAttribute(t *testing.T) {
 	client, _ := newFakePubSub(t)
 	ctx := context.Background()
