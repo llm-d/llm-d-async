@@ -17,6 +17,7 @@ import (
 // default branch of toInternalRequest.
 type customRequest struct {
 	id, endpoint      string
+	model             string
 	created, deadline int64
 	payload           json.RawMessage
 	metadata          map[string]string
@@ -30,6 +31,7 @@ func (r *customRequest) ReqPayload() json.RawMessage    { return r.payload }
 func (r *customRequest) ReqMetadata() map[string]string { return r.metadata }
 func (r *customRequest) ReqHeaders() map[string]string  { return r.headers }
 func (r *customRequest) ReqEndpoint() string            { return r.endpoint }
+func (r *customRequest) ReqModel() string               { return r.model }
 
 func setupTestProducer(t *testing.T) (*RedisSortedSetProducer, *miniredis.Miniredis) {
 	t.Helper()
@@ -106,6 +108,7 @@ func TestToInternalRequest_CustomRequestPreservesHeadersAndEndpoint(t *testing.T
 		metadata: map[string]string{"m": "d"},
 		headers:  map[string]string{"Authorization": "Bearer tok"},
 		endpoint: "/v1/chat/completions",
+		model:    "m1",
 	}
 	ir := toInternalRequest(req)
 	rm, ok := ir.PublicRequest.(*api.RequestMessage)
@@ -114,6 +117,7 @@ func TestToInternalRequest_CustomRequestPreservesHeadersAndEndpoint(t *testing.T
 	assert.Equal(t, map[string]string{"Authorization": "Bearer tok"}, rm.Headers)
 	assert.Equal(t, "/v1/chat/completions", rm.Endpoint)
 	assert.Equal(t, map[string]string{"m": "d"}, rm.Metadata)
+	assert.Equal(t, "m1", rm.Model)
 }
 
 func TestToInternalRequest_RedisQueueFieldsCopyToInternalRouting(t *testing.T) {

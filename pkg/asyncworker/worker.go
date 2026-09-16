@@ -272,6 +272,9 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
 						attribute.Int(uotel.LegacyAttrRetryCount, msg.RetryCount),
 					}
+					if model := msg.PublicRequest.ReqModel(); model != "" {
+						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrRequestModel, model))
+					}
 					if queueID != "" {
 						spanAttrs = append(spanAttrs,
 							attribute.String(uotel.AttrQueueID, queueID),
@@ -288,10 +291,8 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						trace.WithAttributes(spanAttrs...),
 					)
 					defer span.End()
-					if span.IsRecording() {
-						if model := payloadModel(msg.PublicRequest.ReqPayload()); model != "" {
-							span.SetAttributes(attribute.String(uotel.AttrRequestModel, model))
-						}
+					if model := fallbackModel(msg.PublicRequest, span.IsRecording()); model != "" {
+						span.SetAttributes(attribute.String(uotel.AttrRequestModel, model))
 					}
 
 					reqDeadline := time.Now().Add(requestTimeout)
@@ -645,7 +646,14 @@ func expBackoffDuration(retryCount int, secondsToDeadline int) float64 {
 	return half + rand.Float64()*half // #nosec G404 -- non-security jitter, crypto/rand unnecessary
 }
 
-// payloadModel returns the payload's model field, or "" if it has none.
+// fallbackModel reads the model from the payload when Model is unset and the span is recording.
+func fallbackModel(r asyncapi.Request, recording bool) string {
+	if !recording || r.ReqModel() != "" {
+		return ""
+	}
+	return payloadModel(r.ReqPayload())
+}
+
 func payloadModel(payload json.RawMessage) string {
 	var p struct {
 		Model string `json:"model"`

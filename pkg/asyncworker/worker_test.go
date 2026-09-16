@@ -3344,6 +3344,62 @@ func TestValidateAndMarshal_ForwardsPayloadBytes(t *testing.T) {
 	}
 }
 
+func TestWorker_SpanPrefersRequestModel(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go Worker(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-model-field", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload: testPayload(map[string]any{"model": "from-payload"}),
+		Model:   "from-request",
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	s := findSpan(getSpansEventually(t, exporter, 1), "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	assertSpanAttributes(t, s, attribute.String("gen_ai.request.model", "from-request"))
+}
+
+func TestFallbackModel(t *testing.T) {
+	withModel := &asyncapi.RequestMessage{Model: "set", Payload: json.RawMessage(`{"model":"payload"}`)}
+	withoutModel := &asyncapi.RequestMessage{Payload: json.RawMessage(`{"model":"payload"}`)}
+	unparseable := &asyncapi.RequestMessage{Payload: json.RawMessage(`{not json`)}
+
+	for _, tc := range []struct {
+		name      string
+		req       asyncapi.Request
+		recording bool
+		want      string
+	}{
+		{"model set, sampled", withModel, true, ""},
+		{"model set, not sampled", withModel, false, ""},
+		{"no model, not sampled", withoutModel, false, ""},
+		{"no model, sampled", withoutModel, true, "payload"},
+		{"no model, sampled, unparseable payload", unparseable, true, ""},
+	} {
+		if got := fallbackModel(tc.req, tc.recording); got != tc.want {
+			t.Errorf("%s: fallbackModel = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func testPayload(m map[string]any) json.RawMessage {
 	b, err := json.Marshal(m)
 	if err != nil {
