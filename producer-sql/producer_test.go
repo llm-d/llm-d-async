@@ -129,7 +129,7 @@ func TestGetResultsReturnsBatchesInOrder(t *testing.T) {
 	for _, row := range rows {
 		payload, err := json.Marshal(resultEnvelope{ResultMessage: api.ResultMessage{ID: row.ID, StatusCode: 200, Payload: `{}`}, RequestToken: row.Token})
 		require.NoError(t, err)
-		completions = append(completions, sqlqueue.Completion{Key: row.Key(), Route: "results", Payload: string(payload)})
+		completions = append(completions, sqlqueue.Completion{Key: row.Key(), Epoch: row.Epoch, Route: "results", Payload: string(payload)})
 	}
 	acked, err := c.Ack(ctx, completions)
 	require.NoError(t, err)
@@ -168,7 +168,7 @@ func TestGetResultsTurnsUnparsableResultsIntoErrorResults(t *testing.T) {
 		if row.ID == "bad" {
 			payload = `not json`
 		}
-		completions = append(completions, sqlqueue.Completion{Key: row.Key(), Route: "results", Payload: payload})
+		completions = append(completions, sqlqueue.Completion{Key: row.Key(), Epoch: row.Epoch, Route: "results", Payload: payload})
 	}
 	_, err := c.Ack(ctx, completions)
 	require.NoError(t, err)
