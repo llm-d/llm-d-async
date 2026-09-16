@@ -66,6 +66,7 @@ func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 			ID: "plain-1", Created: 1000, Deadline: 2000,
 			Payload:  testPayload(map[string]any{"model": "m1"}),
 			Metadata: map[string]string{"k": "v"},
+			Model:    "m1",
 		},
 	)
 	b, err := json.Marshal(ir)
@@ -91,6 +92,20 @@ func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 	}
 	if rm.Metadata["k"] != "v" {
 		t.Errorf("metadata mismatch: %v", rm.Metadata)
+	}
+	if rm.Model != "m1" {
+		t.Errorf("model mismatch: %q", rm.Model)
+	}
+}
+
+func TestUnmarshal_EnvelopeWithoutModel(t *testing.T) {
+	b := []byte(`{"internal":{},"request_kind":"plain","data":{"id":"a","created":1,"deadline":2,"payload":{"model":"m"}}}`)
+	var got InternalRequest
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m := got.PublicRequest.ReqModel(); m != "" {
+		t.Errorf("ReqModel() = %q, want empty for an envelope written without the field", m)
 	}
 }
 
