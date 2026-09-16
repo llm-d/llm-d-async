@@ -179,13 +179,14 @@ Otherwise, use the user-provided redis.secretName.
 */}}
 {{- define "llm-d-async.redisSecretName" -}}
 {{- $ts := .Values.ap.transportConfig | default dict -}}
+{{- $transport := include "llm-d-async.transport" . -}}
 {{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
 {{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
 {{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
 {{- dig "urlSecret" "name" "" $ts -}}
-{{- else if .Values.ap.redis.url -}}
+{{- else if and (hasPrefix "redis" $transport) .Values.ap.redis.url -}}
 {{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
-{{- else -}}
+{{- else if hasPrefix "redis" $transport -}}
 {{- .Values.ap.redis.secretName -}}
 {{- end -}}
 {{- end }}
@@ -196,13 +197,14 @@ When the chart creates the Secret, the key is always "url".
 */}}
 {{- define "llm-d-async.redisSecretKey" -}}
 {{- $ts := .Values.ap.transportConfig | default dict -}}
+{{- $transport := include "llm-d-async.transport" . -}}
 {{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
 url
 {{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
 {{- dig "urlSecret" "key" "url" $ts | default "url" -}}
-{{- else if .Values.ap.redis.url -}}
+{{- else if and (hasPrefix "redis" $transport) .Values.ap.redis.url -}}
 url
-{{- else -}}
+{{- else if hasPrefix "redis" $transport -}}
 {{- .Values.ap.redis.secretKey -}}
 {{- end -}}
 {{- end }}
