@@ -61,7 +61,7 @@ func TestInternalResultWireCompatibility(t *testing.T) {
 
 func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 	ir := NewInternalRequest(
-		InternalRouting{RetryCount: 2, RequestQueueName: "rq", ResultQueueName: "resq", ResultTTLSeconds: 60, ResultRoutingResolved: true},
+		InternalRouting{RetryCount: 2, DispatchEpoch: 7, RequestQueueName: "rq", ResultQueueName: "resq", ResultTTLSeconds: 60, ResultRoutingResolved: true},
 		&RequestMessage{
 			ID: "plain-1", Created: 1000, Deadline: 2000,
 			Payload:  testPayload(map[string]any{"model": "m1"}),
@@ -333,6 +333,9 @@ func assertRouting(t *testing.T, got, want InternalRouting) {
 	}
 	if got.RequestToken != want.RequestToken {
 		t.Errorf("RequestToken = %q, want %q", got.RequestToken, want.RequestToken)
+	}
+	if got.DispatchEpoch != want.DispatchEpoch {
+		t.Errorf("DispatchEpoch = %d, want %d", got.DispatchEpoch, want.DispatchEpoch)
 	}
 	if got.ResultQueueName != want.ResultQueueName {
 		t.Errorf("ResultQueueName = %q, want %q", got.ResultQueueName, want.ResultQueueName)
