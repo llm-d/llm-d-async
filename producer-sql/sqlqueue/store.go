@@ -345,17 +345,39 @@ func (s *Store) Cancel(ctx context.Context, ids []string) error {
 	return nil
 }
 
-func (s *Store) IsCancelled(ctx context.Context, key Key) (bool, error) {
-	var cancelled int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT cancelled FROM async_requests WHERE id = $1 AND request_token = $2`, key.ID, key.Token).Scan(&cancelled)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+// CancelledKeys returns the subset of keys marked cancelled. A key with no row
+// is absent from the result: an unknown request is not cancelled.
+func (s *Store) CancelledKeys(ctx context.Context, keys []Key) (map[Key]bool, error) {
+	ctx, span := s.span(ctx, "CancelledKeys")
+	defer span.End()
+	out := make(map[Key]bool, len(keys))
+	if len(keys) == 0 {
+		return out, nil
 	}
+	ids, tokens := make([]string, len(keys)), make([]string, len(keys))
+	for i, k := range keys {
+		ids[i], tokens[i] = k.ID, k.Token
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.request_token FROM async_requests r
+		JOIN unnest($1::text[], $2::text[]) AS k(id, request_token)
+			ON r.id = k.id AND r.request_token = k.request_token
+		WHERE r.cancelled = 1`, ids, tokens)
 	if err != nil {
-		return false, fmt.Errorf("sqlqueue: is cancelled %q: %w", key.ID, err)
+		return nil, fmt.Errorf("sqlqueue: cancelled keys for %d requests: %w", len(keys), err)
 	}
-	return cancelled == 1, nil
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var k Key
+		if err := rows.Scan(&k.ID, &k.Token); err != nil {
+			return nil, fmt.Errorf("sqlqueue: cancelled keys scan: %w", err)
+		}
+		out[k] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlqueue: cancelled keys rows: %w", err)
+	}
+	return out, nil
 }
 
 type Completion struct {

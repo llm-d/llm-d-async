@@ -59,6 +59,7 @@ type Flow struct {
 	defaultResultQueueName string
 
 	activeReleases sync.Map
+	cancelChecks   *cancelBatcher
 
 	consumeCancel context.CancelFunc
 	consumeWg     sync.WaitGroup
@@ -102,6 +103,7 @@ func NewWithStore(store *sqlqueue.Store, cfg Config, workerPools []pipeline.Work
 		leaseTTL:               time.Duration(cfg.LeaseTTLSeconds) * time.Second,
 		handoffTimeout:         time.Duration(cfg.HandoffTimeoutSeconds) * time.Second,
 		defaultResultQueueName: cfg.ResultQueueName,
+		cancelChecks:           newCancelBatcher(store, cfg.CancelCheckBatchSize, time.Duration(cfg.CancelCheckLingerMs)*time.Millisecond),
 	}
 	if f.pollInterval <= 0 {
 		f.pollInterval = time.Second
@@ -197,16 +199,16 @@ func (f *Flow) HealthCheck(ctx context.Context) error {
 }
 
 func (f *Flow) CancellationChecker() api.CancellationChecker {
-	return cancellationChecker{store: f.store}
+	return cancellationChecker{batcher: f.cancelChecks}
 }
 
-type cancellationChecker struct{ store *sqlqueue.Store }
+type cancellationChecker struct{ batcher *cancelBatcher }
 
 func (c cancellationChecker) IsCancelled(ctx context.Context, requestID, requestToken string) (bool, error) {
 	if requestID == "" || requestToken == "" {
 		return false, nil
 	}
-	cancelled, err := c.store.IsCancelled(ctx, sqlqueue.Key{ID: requestID, Token: requestToken})
+	cancelled, err := c.batcher.isCancelled(ctx, sqlqueue.Key{ID: requestID, Token: requestToken})
 	if err != nil {
 		return false, fmt.Errorf("check cancellation for %q: %w", requestID, err)
 	}
@@ -265,6 +267,7 @@ func (f *Flow) Shutdown() {
 		f.hbCancel()
 	}
 	f.hbWg.Wait()
+	f.cancelChecks.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 	defer cancel()
 	for _, q := range f.queues {
