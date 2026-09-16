@@ -16,6 +16,7 @@ type Request interface {
 	ReqMetadata() map[string]string
 	ReqHeaders() map[string]string
 	ReqEndpoint() string
+	ReqModel() string
 }
 
 // FairnessIDHeader is the request header llm-d-router's flow control reads to
@@ -45,6 +46,9 @@ type RequestMessage struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 	Headers  map[string]string `json:"headers,omitempty"`
 	Endpoint string            `json:"endpoint,omitempty"`
+	// Model names the model the payload targets, so consumers can label a
+	// request without parsing its payload. Empty when the producer does not set it.
+	Model string `json:"model,omitempty"`
 }
 
 func (r *RequestMessage) ReqID() string                  { return r.ID }
@@ -54,6 +58,7 @@ func (r *RequestMessage) ReqPayload() json.RawMessage    { return r.Payload }
 func (r *RequestMessage) ReqMetadata() map[string]string { return r.Metadata }
 func (r *RequestMessage) ReqHeaders() map[string]string  { return r.Headers }
 func (r *RequestMessage) ReqEndpoint() string            { return r.Endpoint }
+func (r *RequestMessage) ReqModel() string               { return r.Model }
 
 // RedisRequest is the concrete Request implementation for Redis-based flows.
 // Per-message queue fields here override producer defaults; producers merge them

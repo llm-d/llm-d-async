@@ -189,6 +189,7 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 			Metadata: req.ReqMetadata(),
 			Headers:  req.ReqHeaders(),
 			Endpoint: req.ReqEndpoint(),
+			Model:    req.ReqModel(),
 		}
 		return ir
 	}
