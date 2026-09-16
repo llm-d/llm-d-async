@@ -7,9 +7,9 @@ require (
 	cloud.google.com/go/pubsub/v2 v2.7.0
 	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/go-logr/logr v1.4.4
-	github.com/llm-d/llm-d-async/api v0.9.1
-	github.com/llm-d/llm-d-async/pipeline v0.9.1
-	github.com/llm-d/llm-d-async/producer v0.9.1
+	github.com/llm-d/llm-d-async/api v0.10.0
+	github.com/llm-d/llm-d-async/pipeline v0.10.0
+	github.com/llm-d/llm-d-async/producer v0.10.0
 	github.com/onsi/ginkgo/v2 v2.32.2
 	github.com/onsi/gomega v1.43.0
 	github.com/prometheus/client_golang v1.24.1
