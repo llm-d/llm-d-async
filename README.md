@@ -381,6 +381,7 @@ The available gate types, at a glance:
 |------|------|---------|
 | `constant` | budget | Always fully open (budget 1.0) — no throttling. |
 | `redis` | budget | Reads the dispatch budget from a Redis key managed by an external system. |
+| `redis-leased-rate` | admission | Enforces a leased, pool-wide dispatch-attempt rate from Redis. Missing, invalid, unreadable, or expired commands fail closed. |
 | `prometheus-saturation` | budget | Closes when a pool saturation metric reaches a threshold. |
 | `prometheus-budget` | budget | Computes a dispatch budget from a cascade of EPP/vLLM metrics. |
 | `prometheus-query` | budget | Evaluates a user-supplied PromQL expression as the budget. |
@@ -488,6 +489,61 @@ The available gate types, at a glance:
 - `redis`: Queries Redis for the dispatch budget (managed by an external system).
   - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.
   - `budget_key` (optional): Redis key to read the dispatch budget from. Default is `dispatch-gate-budget`.
+
+- `redis-leased-rate`:
+  - `address` (**required**): Redis server address. Gate instances using the same address share a client connection pool.
+  - `control_key` (**required**): Redis hash containing the controller's leased rate command.
+  - `pool_id` (optional): Worker-pool ID the command must match. Defaults to the owning worker pool and is required when no owner is available.
+  - `state_key` (optional): Redis hash used by the shared token bucket. Defaults to `<control_key>:state`.
+  - `burst_seconds` (optional): Token-bucket burst window in seconds. Must be finite and positive; defaults to `1`.
+
+  Configure this as a **pool-level** gate inside `wait-on-refuse`, so a closed
+  lease parks workers in memory and rechecks with bounded jittered backoff instead
+  of repeatedly returning requests to the broker. If `gate-wait-timeout` elapses,
+  the held request is recoverably re-enqueued rather than completed with an error:
+
+  ```json
+  [
+    {
+      "id": "batch-pool",
+      "workers": 64,
+      "gate_type": "wait-on-refuse",
+      "gate_params": {
+        "gate": {
+          "gate_type": "redis-leased-rate",
+          "gate_params": {
+            "address": "batch-gateway-valkey:6379",
+            "control_key": "llm-d-async:drain-limit:batch-pool",
+            "burst_seconds": "0.25"
+          }
+        }
+      }
+    }
+  ]
+  ```
+
+  The controller writes the command as one Redis transaction. The field names
+  and values are the public `llm-d.ai/v1alpha1` wire contract:
+
+  ```text
+  MULTI
+  HSET llm-d-async:drain-limit:batch-pool \
+    api_version llm-d.ai/v1alpha1 \
+    pool_id batch-pool \
+    max_admission_rps 12.5 \
+    valid_until_unix_ms 1787928000000 \
+    decision_id planner-tick-000042
+  PEXPIREAT llm-d-async:drain-limit:batch-pool 1787928000000
+  EXEC
+  ```
+
+  `max_admission_rps` is a ceiling on attempts sent to the downstream inference
+  endpoint, including retries; it is not a promised completion rate. A value of
+  `0` is an explicit pause. The lease timestamp is authoritative even if a Redis
+  deployment retains the key longer than requested. The gate fails closed when
+  the key cannot be read or validated, so controllers should renew leases well
+  before expiry. All Async replicas using the same `control_key` and `state_key`
+  share one aggregate token bucket.
 
 - `prometheus-saturation`: Queries Prometheus for a pool saturation metric. The gate closes (returns `0.0`) when saturation ≥ threshold; when open it returns `(1 - saturation) - (1 - threshold)`, i.e. the margin below the threshold.
   - `pool` (**required**): The inference pool name to filter metrics by.
@@ -984,7 +1040,7 @@ ap:
 
 ## Backend Compatibility
 
-The Async Processor uses the Redis wire protocol for its message queue implementations (`redis-sortedset`, `redis-pubsub`) and dispatch gates (`redis`, `redis-quota`). Redis-protocol-compatible backends such as [Valkey](https://valkey.io/) can be used with the existing Redis configuration surface.
+The Async Processor uses the Redis wire protocol for its message queue implementations (`redis-sortedset`, `redis-pubsub`) and dispatch gates (`redis`, `redis-leased-rate`, `redis-quota`). Redis-protocol-compatible backends such as [Valkey](https://valkey.io/) can be used with the existing Redis configuration surface.
 
 The `url` field in the transport configuration (see [Transport Configuration](#transport-configuration)), the `REDIS_URL` environment variable, and the deprecated `--redis.*` CLI flags all work unchanged with Valkey — point them at your Valkey endpoint the same way you would with Redis.
 
