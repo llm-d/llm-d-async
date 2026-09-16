@@ -360,6 +360,7 @@ func (s *Store) IsCancelled(ctx context.Context, key Key) (bool, error) {
 
 type Completion struct {
 	Key
+	Epoch     int64
 	Route     string
 	Payload   string
 	ExpiresAt int64
@@ -375,37 +376,46 @@ func (s *Store) Ack(ctx context.Context, owner string, completions []Completion)
 		return acked, nil
 	}
 	first := make(map[Key]int, len(completions))
+	position := make(map[Key]int, len(completions))
 	var unique []Completion
 	for i, c := range completions {
-		if _, dup := first[c.Key]; dup {
+		if pos, dup := position[c.Key]; dup {
+			if c.Epoch > unique[pos].Epoch {
+				unique[pos] = c
+				first[c.Key] = i
+			}
 			continue
 		}
 		first[c.Key] = i
+		position[c.Key] = len(unique)
 		unique = append(unique, c)
 	}
 	createdAt := time.Now().UnixMilli()
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		n := len(unique)
 		ids, tokens, routes, payloads := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
-		expires := make([]int64, n)
+		epochs, expires := make([]int64, n), make([]int64, n)
 		for i, c := range unique {
-			ids[i], tokens[i], routes[i], payloads[i], expires[i] = c.ID, c.Token, c.Route, c.Payload, c.ExpiresAt
+			ids[i], tokens[i], epochs[i], routes[i], payloads[i], expires[i] =
+				c.ID, c.Token, c.Epoch, c.Route, c.Payload, c.ExpiresAt
 		}
 		rows, err := tx.QueryContext(ctx, `
 			WITH input AS (
-				SELECT * FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[])
-					AS t(id, request_token, route, payload, expires_at)
+				SELECT * FROM unnest($2::text[], $3::text[], $4::bigint[], $5::text[], $6::text[], $7::bigint[])
+					AS t(id, request_token, epoch, route, payload, expires_at)
 			), done AS (
 				DELETE FROM async_requests r USING input i, async_partitions p
 				WHERE r.id = i.id AND r.request_token = i.request_token
-					AND p.queue = r.queue AND p.partition_id = r.partition_id AND p.owner = $1
+					AND r.dispatch_epoch = i.epoch
+					AND p.queue = r.queue AND p.partition_id = r.partition_id
+					AND p.owner = $1 AND p.epoch = i.epoch
 				RETURNING r.id, r.request_token
 			)
 			INSERT INTO async_results (route, id, request_token, payload, expires_at, created_at)
-			SELECT i.route, i.id, i.request_token, i.payload, i.expires_at, $7::bigint
+			SELECT i.route, i.id, i.request_token, i.payload, i.expires_at, $8::bigint
 			FROM done d JOIN input i ON i.id = d.id AND i.request_token = d.request_token
 			RETURNING id, request_token`,
-			owner, ids, tokens, routes, payloads, expires, createdAt)
+			owner, ids, tokens, epochs, routes, payloads, expires, createdAt)
 		if err != nil {
 			return fmt.Errorf("ack statement: %w", err)
 		}

@@ -377,6 +377,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 		if !ok {
 			ir = &api.InternalRequest{PublicRequest: &api.RequestMessage{ID: row.ID}}
 			ir.RequestToken = row.Token
+			ir.DispatchEpoch = row.Epoch
 			f.stampRouting(ir, cfg)
 			if !f.emit(ctx, api.NewErrorResult(ir.PublicRequest, ir.InternalRouting, api.ErrCodeInvalidRequest, "unparsable queued request")) {
 				stop()
@@ -384,6 +385,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 			}
 			continue
 		}
+		ir.DispatchEpoch = row.Epoch
 		f.stampRouting(ir, cfg)
 		reqID := ir.PublicRequest.ReqID()
 
@@ -439,18 +441,13 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 		}
 
 		if len(releases) > 0 {
-			if prev, loaded := f.activeReleases.Swap(reqID, releases); loaded {
-				if rels, ok := prev.([]pipeline.GateReleaseFunc); ok {
-					pipeline.ReleaseGateReleases(rels)
-				}
-			}
+			f.trackGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Epoch: ir.DispatchEpoch}, releases)
 		}
 		ir.IngestionTime = time.Now()
 		select {
 		case q.channel.Channel <- ir:
 		case <-ctx.Done():
-			f.activeReleases.Delete(reqID)
-			pipeline.ReleaseGateReleases(releases)
+			f.releaseGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Epoch: ir.DispatchEpoch})
 			stop()
 			return
 		}
@@ -516,6 +513,22 @@ func (f *Flow) bounded(ctx context.Context, step func(context.Context)) {
 	step(ctx)
 }
 
+func (f *Flow) trackGateReleases(stamp sqlqueue.Stamp, releases []pipeline.GateReleaseFunc) {
+	if prev, loaded := f.activeReleases.Swap(stamp, releases); loaded {
+		if rels, ok := prev.([]pipeline.GateReleaseFunc); ok {
+			pipeline.ReleaseGateReleases(rels)
+		}
+	}
+}
+
+func (f *Flow) releaseGateReleases(stamp sqlqueue.Stamp) {
+	if val, ok := f.activeReleases.LoadAndDelete(stamp); ok {
+		if rels, ok := val.([]pipeline.GateReleaseFunc); ok {
+			pipeline.ReleaseGateReleases(rels)
+		}
+	}
+}
+
 func withRetries[T any](ctx context.Context, op func(context.Context) (T, error)) (T, error) {
 	var out T
 	var err error
@@ -545,17 +558,14 @@ func (f *Flow) retryWorker(ctx context.Context) {
 			return
 		}
 		reqID := msg.PublicRequest.ReqID()
-		if val, ok := f.activeReleases.LoadAndDelete(reqID); ok {
-			if rels, ok := val.([]pipeline.GateReleaseFunc); ok {
-				pipeline.ReleaseGateReleases(rels)
-			}
-		}
+		stamp := sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: msg.RequestToken}, Epoch: msg.DispatchEpoch}
+		f.releaseGateReleases(stamp)
 		q, ok := f.originQueue(msg.InternalRouting)
 		if !ok {
 			logger.V(logutil.DEFAULT).Info("Retry for a request from an unknown queue; dropped", "id", reqID, "queue", msg.RequestQueueName)
 			return
 		}
-		key := sqlqueue.Key{ID: reqID, Token: msg.RequestToken}
+		key := stamp.Key
 		payload, err := json.Marshal(msg.InternalRequest)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to marshal retry; returning request to the queue", "id", reqID)
@@ -564,7 +574,7 @@ func (f *Flow) retryWorker(ctx context.Context) {
 		}
 		notBefore := time.Now().Unix() + int64(math.Ceil(msg.BackoffDurationSeconds))
 		parked, err := withRetries(ctx, func(ctx context.Context) (bool, error) {
-			return q.consumer.Retry(ctx, key, notBefore, string(payload))
+			return q.consumer.Retry(ctx, stamp, notBefore, string(payload))
 		})
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to park retry; returning request to the queue", "id", reqID)
@@ -598,11 +608,11 @@ func (f *Flow) resultWorker(ctx context.Context) {
 		batch := drainBatch(first, f.resultChannel, f.resultBatchSize)
 		byQueue := map[*queueRuntime][]sqlqueue.Completion{}
 		for _, result := range batch {
-			if val, ok := f.activeReleases.LoadAndDelete(result.ID); ok {
-				if rels, ok := val.([]pipeline.GateReleaseFunc); ok {
-					pipeline.ReleaseGateReleases(rels)
-				}
+			stamp := sqlqueue.Stamp{
+				Key:   sqlqueue.Key{ID: result.ID, Token: result.Routing.RequestToken},
+				Epoch: result.Routing.DispatchEpoch,
 			}
+			f.releaseGateReleases(stamp)
 			q, ok := f.originQueue(result.Routing)
 			if !ok {
 				logger.V(logutil.DEFAULT).Info("Result for a request from an unknown queue; dropped", "id", result.ID, "queue", result.Routing.RequestQueueName)
@@ -617,7 +627,8 @@ func (f *Flow) resultWorker(ctx context.Context) {
 				expiresAt = time.Now().Unix() + result.Routing.ResultTTLSeconds
 			}
 			byQueue[q] = append(byQueue[q], sqlqueue.Completion{
-				Key:       sqlqueue.Key{ID: result.ID, Token: result.Routing.RequestToken},
+				Key:       stamp.Key,
+				Epoch:     stamp.Epoch,
 				Route:     route,
 				Payload:   marshalResult(result),
 				ExpiresAt: expiresAt,

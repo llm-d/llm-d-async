@@ -34,6 +34,22 @@ func inflightOf(c *Consumer) int {
 	return len(c.inflight)
 }
 
+func TestDoneStampDoesNotForgetANewerAttempt(t *testing.T) {
+	key := Key{ID: "same", Token: "generation"}
+	c := &Consumer{
+		leases:   map[int]*partitionState{3: {epoch: 2, inflight: 1}},
+		inflight: map[Key]tracked{key: {partition: 3, epoch: 2}},
+	}
+
+	c.doneStamps([]Stamp{{Key: key, Epoch: 1}})
+	assert.Equal(t, 1, inflightOf(c), "a stale outcome must not forget the current attempt")
+	assert.Equal(t, 1, c.leases[3].inflight)
+
+	c.doneStamps([]Stamp{{Key: key, Epoch: 2}})
+	assert.Zero(t, inflightOf(c))
+	assert.Zero(t, c.leases[3].inflight)
+}
+
 func poll(t *testing.T, c *Consumer, now time.Time) []string {
 	t.Helper()
 	rows, err := c.Poll(context.Background(), now, 10000)
@@ -45,7 +61,12 @@ func poll(t *testing.T, c *Consumer, now time.Time) []string {
 
 func ack(t *testing.T, c *Consumer, id string) bool {
 	t.Helper()
-	acked, err := c.Ack(context.Background(), []Completion{completion(id, "route")})
+	key := Key{ID: id, Token: "t"}
+	stamps := c.stamps([]Key{key})
+	require.Len(t, stamps, 1)
+	comp := completion(id, "route")
+	comp.Epoch = stamps[0].Epoch
+	acked, err := c.Ack(context.Background(), []Completion{comp})
 	require.NoError(t, err)
 	return acked[0]
 }
@@ -277,7 +298,10 @@ func TestConsumerRetriesAbandonedRequestsOnRebalance(t *testing.T) {
 		rebalance(t, a, now)
 		assert.Equal(t, []string{"lost"}, poll(t, a, now))
 
-		ok, err := a.Retry(ctx, Key{ID: "parked", Token: "t"}, now.Unix()+30, `{"retry":1}`)
+		key := Key{ID: "parked", Token: "t"}
+		stamps := a.stamps([]Key{key})
+		require.Len(t, stamps, 1)
+		ok, err := a.Retry(ctx, stamps[0], now.Unix()+30, `{"retry":1}`)
 		require.NoError(t, err)
 		assert.True(t, ok)
 		require.NoError(t, a.Undispatch(ctx, []Key{{ID: "back", Token: "t"}}))
