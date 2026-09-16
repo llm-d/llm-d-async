@@ -28,6 +28,8 @@ type Config struct {
 	BatchSize             int           `json:"batch_size,omitempty"`
 	ResultBatchSize       int           `json:"result_batch_size,omitempty"`
 	EnableTracing         bool          `json:"enable_tracing,omitempty"`
+	CancelCheckBatchSize  int           `json:"cancel_check_batch_size,omitempty"`
+	CancelCheckLingerMs   int           `json:"cancel_check_linger_ms,omitempty"`
 	LeaseTTLSeconds       int64         `json:"lease_ttl_seconds,omitempty"`
 	HandoffTimeoutSeconds int64         `json:"handoff_timeout_seconds,omitempty"`
 	Queues                []QueueConfig `json:"queues"`
@@ -61,6 +63,12 @@ func (c *Config) ApplyDefaults() {
 	if c.ResultBatchSize == 0 {
 		c.ResultBatchSize = 32
 	}
+	if c.CancelCheckBatchSize == 0 {
+		c.CancelCheckBatchSize = 256
+	}
+	if c.CancelCheckLingerMs == 0 {
+		c.CancelCheckLingerMs = 5
+	}
 	if c.LeaseTTLSeconds == 0 {
 		c.LeaseTTLSeconds = 30
 	}
@@ -93,6 +101,12 @@ func (c *Config) Validate() error {
 	}
 	if c.ResultBatchSize < 0 {
 		return fmt.Errorf("result_batch_size must be non-negative")
+	}
+	if c.CancelCheckBatchSize < 1 {
+		return fmt.Errorf("cancel_check_batch_size must be positive")
+	}
+	if c.CancelCheckLingerMs < 0 {
+		return fmt.Errorf("cancel_check_linger_ms must be non-negative")
 	}
 	if c.LeaseTTLSeconds < 0 {
 		return fmt.Errorf("lease_ttl_seconds must be non-negative")

@@ -593,18 +593,20 @@ func TestCancelFlagsLiveGenerationsOnly(t *testing.T) {
 			Request{ID: "r", Token: "gen1", Queue: "q", Deadline: now + 100, Payload: "{}"},
 			Request{ID: "r", Token: "gen2", Queue: "q", Deadline: now + 100, Payload: "{}"}))
 		require.NoError(t, s.Cancel(ctx, []string{"r", "unknown", ""}))
-		for _, gen := range []string{"gen1", "gen2"} {
-			c, err := s.IsCancelled(ctx, Key{ID: "r", Token: gen})
-			require.NoError(t, err)
-			assert.True(t, c, gen)
-		}
-		c, err := s.IsCancelled(ctx, Key{ID: "r", Token: "gen3"})
+		got, err := s.CancelledKeys(ctx, []Key{
+			{ID: "r", Token: "gen1"}, {ID: "r", Token: "gen2"}, {ID: "r", Token: "gen3"},
+		})
 		require.NoError(t, err)
-		assert.False(t, c, "unknown generation is not cancelled")
+		assert.True(t, got[Key{ID: "r", Token: "gen1"}])
+		assert.True(t, got[Key{ID: "r", Token: "gen2"}])
+		assert.False(t, got[Key{ID: "r", Token: "gen3"}], "unknown generation is not cancelled")
 		require.NoError(t, s.Enqueue(ctx, Request{ID: "r", Token: "gen3", Queue: "q", Deadline: now + 100, Payload: "{}"}))
-		c, err = s.IsCancelled(ctx, Key{ID: "r", Token: "gen3"})
+		got, err = s.CancelledKeys(ctx, []Key{{ID: "r", Token: "gen3"}})
 		require.NoError(t, err)
-		assert.False(t, c, "a resubmission after cancel starts clean")
+		assert.False(t, got[Key{ID: "r", Token: "gen3"}], "a resubmission after cancel starts clean")
+		empty, err := s.CancelledKeys(ctx, nil)
+		require.NoError(t, err)
+		assert.Empty(t, empty, "no keys is not a query")
 		require.NoError(t, s.Cancel(ctx, []string{""}))
 	})
 }
