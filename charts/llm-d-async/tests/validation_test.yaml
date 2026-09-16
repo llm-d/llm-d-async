@@ -37,3 +37,15 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: "sql transport has no connection: set ap.transportConfig.urlSecret.url (chart creates a Secret) or ap.transportConfig.urlSecret.name/key (reference an existing Secret), or an inline url in ap.transportConfig (dev only). The resolved Secret is injected as SQL_URL."
+
+  - it: should not use a deprecated Redis secret as the SQL connection
+    set:
+      ap.transport: sql
+      ap.transportConfig:
+        queues:
+          - queue_name: request-sql
+            igw_base_url: "http://igw:80"
+      ap.redis.secretName: stale-redis-credentials
+    asserts:
+      - failedTemplate:
+          errorMessage: "sql transport has no connection: set ap.transportConfig.urlSecret.url (chart creates a Secret) or ap.transportConfig.urlSecret.name/key (reference an existing Secret), or an inline url in ap.transportConfig (dev only). The resolved Secret is injected as SQL_URL."
