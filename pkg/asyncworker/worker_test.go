@@ -497,8 +497,149 @@ func TestWorker_PoolGateActionWaitThrottlesCancellationChecks(t *testing.T) {
 	if got := checker.checkCount(); got > 1 {
 		t.Fatalf("expected throttled cancellation checks during ActionWait, got %d", got)
 	}
+	if got := gate.applyCount.Load(); got > 3 {
+		t.Fatalf("expected bounded backoff to limit gate polls, got %d applies in 220ms", got)
+	}
 	if called.Load() != 0 {
 		t.Fatalf("expected inference client to be skipped, got %d calls", called.Load())
+	}
+}
+
+func TestWorker_PoolGateWaitTimeoutReenqueues(t *testing.T) {
+	var called atomic.Int32
+	inferenceClient := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	}))
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go WorkerWithGateTimeout(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel,
+		10*time.Millisecond, 100*time.Millisecond, nil, &waitingPoolGate{})
+
+	msg := newEmb(asyncapi.RequestMessage{
+		ID:       "gate-wait-timeout",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+	msg.QueueID = "gate-wait-timeout-q"
+	msg.RequestQueueName = "gate-wait-timeout-queue"
+	metric := metrics.GateWaitRequeues.WithLabelValues(msg.QueueID, msg.RequestQueueName, msg.WorkerPoolID)
+	before := testutil.ToFloat64(metric)
+	requestChannel <- msg
+
+	select {
+	case retry := <-retryChannel:
+		if retry.PublicRequest.ReqID() != "gate-wait-timeout" {
+			t.Fatalf("re-enqueued wrong request %q", retry.PublicRequest.ReqID())
+		}
+	case result := <-resultChannel:
+		t.Fatalf("gate wait timeout must be recoverable, got terminal result %+v", result)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for gate-wait requeue")
+	}
+	if called.Load() != 0 {
+		t.Fatalf("expected no inference call while gate stayed closed, got %d", called.Load())
+	}
+	if got := testutil.ToFloat64(metric); got != before+1 {
+		t.Fatalf("gate-wait requeues = %v, want %v", got, before+1)
+	}
+}
+
+func TestWorker_PoolGatePublicDeadlineDoesNotCountWaitTimeout(t *testing.T) {
+	inferenceClient := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		t.Fatal("inference must not be called while the gate stays closed")
+		return nil, nil
+	}))
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go WorkerWithGateTimeout(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel,
+		10*time.Millisecond, 10*time.Second, nil, &waitingPoolGate{})
+
+	msg := newEmb(asyncapi.RequestMessage{
+		ID:       "gate-wait-public-deadline",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Unix() + 1,
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+	msg.QueueID = "gate-wait-public-deadline-q"
+	msg.RequestQueueName = "gate-wait-public-deadline-queue"
+	metric := metrics.GateWaitRequeues.WithLabelValues(msg.QueueID, msg.RequestQueueName, msg.WorkerPoolID)
+	before := testutil.ToFloat64(metric)
+	requestChannel <- msg
+
+	select {
+	case retry := <-retryChannel:
+		t.Fatalf("public deadline must be terminal, got retry for %q", retry.PublicRequest.ReqID())
+	case result := <-resultChannel:
+		if result.ErrorCode != asyncapi.ErrCodeDeadlineExceeded {
+			t.Fatalf("error code = %q, want %q", result.ErrorCode, asyncapi.ErrCodeDeadlineExceeded)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for public deadline result")
+	}
+	if got := testutil.ToFloat64(metric); got != before {
+		t.Fatalf("gate-wait requeues = %v, want unchanged %v", got, before)
+	}
+}
+
+func TestWorker_PoolGateWaitDoesNotConsumeInferenceTimeout(t *testing.T) {
+	var called atomic.Int32
+	inferenceClient := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	}))
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	gate := &waitThenContinueGate{waits: 2}
+	go WorkerWithGateTimeout(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel,
+		10*time.Millisecond, time.Second, nil, gate)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "gate-wait-independent-timeout",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-retryChannel:
+		t.Fatal("request should dispatch after the gate opens")
+	case result := <-resultChannel:
+		if result.ErrorCode != "" {
+			t.Fatalf("expected successful result after gate opened, got %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for inference result")
+	}
+	if called.Load() != 1 {
+		t.Fatalf("expected one inference call, got %d", called.Load())
+	}
+}
+
+func TestGateWaitBackoffIsBoundedAndJittered(t *testing.T) {
+	backoff := gateWaitInitialBackoff
+	for i := 0; i < 10; i++ {
+		delay := jitteredGateWait(backoff)
+		if delay < backoff/2 || delay > backoff {
+			t.Fatalf("jittered wait %v outside [%v, %v]", delay, backoff/2, backoff)
+		}
+		backoff = nextGateWaitBackoff(backoff)
+	}
+	if backoff != gateWaitMaxBackoff {
+		t.Fatalf("backoff = %v, want cap %v", backoff, gateWaitMaxBackoff)
 	}
 }
 
@@ -2479,8 +2620,9 @@ func (g *waitingPoolGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest
 }
 
 type notifyingWaitGate struct {
-	applied  chan struct{}
-	notified atomic.Bool
+	applied    chan struct{}
+	notified   atomic.Bool
+	applyCount atomic.Int32
 }
 
 func (g *notifyingWaitGate) Budget(ctx context.Context) float64 {
@@ -2488,10 +2630,27 @@ func (g *notifyingWaitGate) Budget(ctx context.Context) float64 {
 }
 
 func (g *notifyingWaitGate) Apply(ctx context.Context, _ *asyncapi.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	g.applyCount.Add(1)
 	if g.applied != nil && !g.notified.Swap(true) {
 		close(g.applied)
 	}
 	return pipeline.Wait(), nil
+}
+
+type waitThenContinueGate struct {
+	waits int32
+	calls atomic.Int32
+}
+
+func (g *waitThenContinueGate) Budget(context.Context) float64 {
+	return 1
+}
+
+func (g *waitThenContinueGate) Apply(context.Context, *asyncapi.InternalRequest, *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	if g.calls.Add(1) <= g.waits {
+		return pipeline.Wait(), nil
+	}
+	return pipeline.Continue(), nil
 }
 
 type signalContinueGate struct {
@@ -2540,12 +2699,17 @@ func TestWorker_PoolGateShutdownReenqueues(t *testing.T) {
 		close(done)
 	}()
 
-	requestChannel <- newEmb(asyncapi.RequestMessage{
+	msg := newEmb(asyncapi.RequestMessage{
 		ID:       "gate-shutdown-test",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
 	}, "http://localhost:30800/v1/completions", nil)
+	msg.QueueID = "gate-shutdown-q"
+	msg.RequestQueueName = "gate-shutdown-queue"
+	metric := metrics.GateWaitRequeues.WithLabelValues(msg.QueueID, msg.RequestQueueName, msg.WorkerPoolID)
+	before := testutil.ToFloat64(metric)
+	requestChannel <- msg
 
 	// Let the worker block in poolGate.Apply, then cancel (simulating shutdown).
 	time.Sleep(50 * time.Millisecond)
@@ -2566,6 +2730,9 @@ func TestWorker_PoolGateShutdownReenqueues(t *testing.T) {
 	retryMsg := <-retryChannel
 	if retryMsg.PublicRequest.ReqID() != "gate-shutdown-test" {
 		t.Errorf("re-enqueued wrong message: got ID %q", retryMsg.PublicRequest.ReqID())
+	}
+	if got := testutil.ToFloat64(metric); got != before {
+		t.Errorf("shutdown changed gate-wait requeues to %v, want %v", got, before)
 	}
 }
 
@@ -2588,12 +2755,17 @@ func TestWorker_PoolGateActionWaitShutdownReenqueues(t *testing.T) {
 		close(done)
 	}()
 
-	requestChannel <- newEmb(asyncapi.RequestMessage{
+	msg := newEmb(asyncapi.RequestMessage{
 		ID:       "gate-wait-shutdown-test",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
 		Payload:  map[string]any{"model": "test", "prompt": "hi"},
 	}, "http://localhost:30800/v1/completions", nil)
+	msg.QueueID = "gate-wait-shutdown-q"
+	msg.RequestQueueName = "gate-wait-shutdown-queue"
+	metric := metrics.GateWaitRequeues.WithLabelValues(msg.QueueID, msg.RequestQueueName, msg.WorkerPoolID)
+	before := testutil.ToFloat64(metric)
+	requestChannel <- msg
 
 	// Let the worker enter the ActionWait polling loop, then cancel (simulating shutdown).
 	time.Sleep(50 * time.Millisecond)
@@ -2614,6 +2786,9 @@ func TestWorker_PoolGateActionWaitShutdownReenqueues(t *testing.T) {
 	retryMsg := <-retryChannel
 	if retryMsg.PublicRequest.ReqID() != "gate-wait-shutdown-test" {
 		t.Errorf("re-enqueued wrong message: got ID %q", retryMsg.PublicRequest.ReqID())
+	}
+	if got := testutil.ToFloat64(metric); got != before {
+		t.Errorf("shutdown changed gate-wait requeues to %v, want %v", got, before)
 	}
 }
 

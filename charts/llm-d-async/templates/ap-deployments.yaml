@@ -83,6 +83,7 @@ spec:
           - --request-merge-policy-config-file=/etc/llm-d-async/config/request-merge-policy.json
           {{- end }}
           - --concurrency={{ .Values.ap.concurrency | default 64 }}
+          - --gate-wait-timeout={{ .Values.ap.gateWaitTimeout }}
           - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
           - --health-port={{ .Values.ap.health.port | default 8081 }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}

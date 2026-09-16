@@ -129,6 +129,23 @@ func TestRecordDispatchedReq(t *testing.T) {
 	}
 }
 
+func TestRecordGateWaitRequeue(t *testing.T) {
+	labels := []string{"q-gate-timeout", "queue-gate-timeout", "pool-gate-timeout"}
+	before := testutil.ToFloat64(GateWaitRequeues.WithLabelValues(labels...))
+	RecordGateWaitRequeue(labels[0], labels[1], labels[2])
+	if got := testutil.ToFloat64(GateWaitRequeues.WithLabelValues(labels...)); got != before+1 {
+		t.Errorf("GateWaitRequeues = %v, want %v", got, before+1)
+	}
+}
+
+func TestGetAsyncProcessorCollectors_includesGateWaitRequeues(t *testing.T) {
+	for _, withLatency := range []bool{false, true} {
+		if !containsCollector(GetAsyncProcessorCollectors(withLatency), GateWaitRequeues) {
+			t.Errorf("expected GateWaitRequeues to be present (supportsMessageLatency=%v)", withLatency)
+		}
+	}
+}
+
 func TestSetDrainLimit(t *testing.T) {
 	SetDrainLimit("pool-limited", 12.5, 1_700_000_123_000, true)
 	if got := testutil.ToFloat64(DrainLimitRPS.WithLabelValues("pool-limited")); got != 12.5 {

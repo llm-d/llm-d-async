@@ -200,6 +200,7 @@ make deploy-ap-on-k8s
 | Flag | Default | Description |
 |------|---------|-------------|
 | `concurrency` | `64` | Number of concurrent workers (per pool if unspecified). The processor is I/O-bound (each worker holds one in-flight request for its full duration), so in-flight concurrency caps throughput — see [Queues, Topics, and Worker Pools](#queues-topics-and-worker-pools). |
+| `gate-wait-timeout` | `5m` | Maximum time a worker parks one request at a pool gate before recoverably re-enqueueing it. Independent of `request-timeout`; `0` waits until the request's own deadline. |
 | `transport` | `redis-pubsub` | The transport (message queue) implementation. One of `redis-pubsub` (**deprecated**: it still works but will be removed in a future release), `redis-sortedset`, `gcp-pubsub`. Gating is configured per queue/topic via `gate_type` in the transport config (this replaces the former `gcp-pubsub-gated` implementation). |
 | `transport-config` | — | Inline JSON transport configuration. See [Transport Configuration](#transport-configuration). Mutually exclusive with `transport-config-file`; exactly one of the two is required. |
 | `transport-config-file` | — | Path to a JSON file with the transport configuration. Mutually exclusive with `transport-config`. |
@@ -821,6 +822,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | Metric | Type | Description |
 |--------|------|-------------|
 | `llm_d_async_async_dispatch_budget` | Gauge | Current dispatch budget [0.0–1.0] returned by the queue's gate; the fraction of system capacity available for new requests (0.0 = gate fully closed). Useful for diagnosing why throughput is throttled. |
+| `llm_d_async_async_gate_wait_requeues_total` | Counter | Recoverable requeues caused by the configured pool gate wait timeout. Public request deadlines and shutdown requeues are excluded. |
 | `llm_d_async_async_drain_limit_rps` | Gauge | Maximum dispatch-attempt RPS in the valid lease seen by the most recent gate evaluation. Zero with observed `lease_valid=1` is an explicit pause. Carries only `pool_name`. |
 | `llm_d_async_async_drain_limit_lease_valid` | Gauge | `1` when the most recent gate evaluation observed a valid, unexpired external drain-limit lease; otherwise `0`. This observation does not self-expire while no requests evaluate the gate; combine it with `valid_until_seconds > time()` for current validity. Carries only `pool_name`. |
 | `llm_d_async_async_drain_limit_valid_until_seconds` | Gauge | Unix timestamp when the most recently observed valid external drain-limit lease expires, or zero when that evaluation observed no valid lease. The drain-limit gauges initialize to zero/invalid when the gate starts. Carries only `pool_name`. |

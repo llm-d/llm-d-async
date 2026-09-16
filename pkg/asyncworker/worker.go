@@ -28,7 +28,12 @@ const (
 	baseDelaySeconds = 2
 	maxDelaySeconds  = 60
 
-	gateWaitPollInterval              = 50 * time.Millisecond
+	// DefaultGateWaitTimeout bounds how long one worker parks a message at a
+	// pool gate before recoverably returning it to the broker. It is deliberately
+	// independent of the timeout for a downstream inference attempt.
+	DefaultGateWaitTimeout            = 5 * time.Minute
+	gateWaitInitialBackoff            = 100 * time.Millisecond
+	gateWaitMaxBackoff                = 1 * time.Second
 	cancellationCheckPollInterval     = 1 * time.Second
 	cancellationCheckRetryAfterSecond = 1.0
 )
@@ -40,6 +45,14 @@ func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Cha
 
 func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
 	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain, poolGate pipeline.Gate) {
+	WorkerWithGateTimeout(consumeCtx, requestCtx, characteristics, client, requestChannel, retryChannel, resultChannel, requestTimeout, DefaultGateWaitTimeout, transforms, poolGate)
+}
+
+// WorkerWithGateTimeout runs a worker with separate downstream-request and
+// pool-gate wait timeouts. Expiring gateWaitTimeout requeues the message; only
+// the request's own deadline produces a terminal deadline result.
+func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
+	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout, gateWaitTimeout time.Duration, transforms *transform.Chain, poolGate pipeline.Gate) {
 
 	logger := log.FromContext(requestCtx)
 	for {
@@ -106,18 +119,58 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 				}()
 
 				if poolGate != nil {
-					reqDeadline := time.Now().Add(requestTimeout)
+					var gateDeadline time.Time
+					if gateWaitTimeout > 0 {
+						gateDeadline = time.Now().Add(gateWaitTimeout)
+					}
 					if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
-						if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
-							reqDeadline = msgDeadline
+						if msgDeadline := time.Unix(dline, 0); gateDeadline.IsZero() || msgDeadline.Before(gateDeadline) {
+							gateDeadline = msgDeadline
 						}
 					}
-					gateCtx, cancelGate := context.WithDeadline(requestCtx, reqDeadline)
+					var gateCtx context.Context
+					var cancelGate context.CancelFunc
+					if gateDeadline.IsZero() {
+						gateCtx, cancelGate = context.WithCancel(requestCtx)
+					} else {
+						gateCtx, cancelGate = context.WithDeadline(requestCtx, gateDeadline)
+					}
 					defer cancelGate()
+
+					finishGateContext := func() {
+						// Shutdown/drain cancellation and the operational gate-wait
+						// timeout are recoverable. Only the request's public deadline
+						// is a terminal condition.
+						if requestCtx.Err() == nil && requestDeadlineReached(msg.PublicRequest, time.Now()) {
+							metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+							select {
+							case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+						if requestCtx.Err() == nil && errors.Is(gateCtx.Err(), context.DeadlineExceeded) {
+							metrics.RecordGateWaitRequeue(queueID, queueName, msg.WorkerPoolID)
+						}
+						select {
+						case retryChannel <- pipeline.RetryMessage{
+							EmbelishedRequestMessage: msg,
+							BackoffDurationSeconds:   0,
+						}:
+						case <-requestCtx.Done():
+							// retryWorker outlives workers during normal shutdown, so
+							// preserve the message even after requestCtx is cancelled.
+							retryChannel <- pipeline.RetryMessage{
+								EmbelishedRequestMessage: msg,
+								BackoffDurationSeconds:   0,
+							}
+						}
+					}
 
 					var verdict pipeline.Verdict
 					var err error
 					var waitRecorded bool
+					gateWaitBackoff := gateWaitInitialBackoff
 					for {
 						if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
 							return
@@ -126,18 +179,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						verdict, err = poolGate.Apply(gateCtx, msg.InternalRequest, &poolReleases)
 						if err != nil {
 							if errors.Is(err, context.DeadlineExceeded) || gateCtx.Err() != nil {
-								if requestCtx.Err() != nil && !errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-									retryChannel <- pipeline.RetryMessage{
-										EmbelishedRequestMessage: msg,
-										BackoffDurationSeconds:   0,
-									}
-									return
-								}
-								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
-								select {
-								case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
-								case <-requestCtx.Done():
-								}
+								finishGateContext()
 								return
 							}
 							metrics.RecordGateDecision(metrics.ReasonError, "", "", msg.WorkerPoolID)
@@ -193,23 +235,19 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 								metrics.RecordGateDecision(reason, "", "", msg.WorkerPoolID)
 								waitRecorded = true
 							}
+							waitTimer := time.NewTimer(jitteredGateWait(gateWaitBackoff))
 							select {
 							case <-gateCtx.Done():
-								if requestCtx.Err() != nil && !errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-									retryChannel <- pipeline.RetryMessage{
-										EmbelishedRequestMessage: msg,
-										BackoffDurationSeconds:   0,
+								if !waitTimer.Stop() {
+									select {
+									case <-waitTimer.C:
+									default:
 									}
-									return
 								}
-								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
-								select {
-								case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
-								case <-requestCtx.Done():
-								}
+								finishGateContext()
 								return
-							case <-time.After(gateWaitPollInterval):
-								// poll again
+							case <-waitTimer.C:
+								gateWaitBackoff = nextGateWaitBackoff(gateWaitBackoff)
 							}
 						}
 					}
@@ -390,6 +428,25 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 			processMessage()
 		}
 	}
+}
+
+func requestDeadlineReached(request asyncapi.Request, now time.Time) bool {
+	if request == nil || request.ReqDeadline() <= 0 {
+		return false
+	}
+	return !now.Before(time.Unix(request.ReqDeadline(), 0))
+}
+
+func nextGateWaitBackoff(current time.Duration) time.Duration {
+	if current >= gateWaitMaxBackoff/2 {
+		return gateWaitMaxBackoff
+	}
+	return current * 2
+}
+
+func jitteredGateWait(backoff time.Duration) time.Duration {
+	half := backoff / 2
+	return half + time.Duration(rand.Float64()*float64(backoff-half)) // #nosec G404 -- non-security jitter, crypto/rand unnecessary
 }
 
 // parsing and validating payload. On failure puts an error msg on the result-channel and returns nil

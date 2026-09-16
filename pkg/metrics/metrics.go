@@ -47,6 +47,10 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_dispatched_requests_total",
 		Help: "Total number of downstream inference dispatch attempts, including retries. Apply rate() to this counter to observe the batch admission rate.",
 	}, queueLabels)
+	GateWaitRequeues = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_gate_wait_requeues_total",
+		Help: "Total number of requests recoverably re-enqueued after the configured pool gate wait timeout elapsed.",
+	}, queueLabels)
 	ExceededDeadlineReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_exceeded_deadline_requests_total",
 		Help: "Total number of async requests that exceeded their deadline.",
@@ -351,6 +355,13 @@ func RecordDispatchedReq(queueID, queueName, poolName string) {
 	DispatchedReqs.WithLabelValues(queueID, queueName, poolName).Inc()
 }
 
+// RecordGateWaitRequeue records a recoverable requeue caused specifically by
+// the configured pool gate wait timeout. Shutdown and public request deadlines
+// are deliberately excluded.
+func RecordGateWaitRequeue(queueID, queueName, poolName string) {
+	GateWaitRequeues.WithLabelValues(queueID, queueName, poolName).Inc()
+}
+
 func RecordExceededDeadlineReq(queueID, queueName, poolName string) {
 	ExceededDeadlineReqs.WithLabelValues(queueID, queueName, poolName).Inc()
 }
@@ -521,7 +532,7 @@ func SetGateMetricSourceAvailable(available bool, queueID, queueName, poolName, 
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
-		Retries, AsyncReqs, DispatchedReqs, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests, Tokens,
+		Retries, AsyncReqs, DispatchedReqs, GateWaitRequeues, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests, Tokens,
 		QueueDepth, InflightRequests, BrokerBacklog, BrokerBacklogSourceAvailable, InferenceLatencyTime, QueueResidenceTime,
 		DeadlineProximity,
 		DispatchBudget, PoolWorkerLimit, QueueConfigReloads, QueueConfigLastSuccess,
