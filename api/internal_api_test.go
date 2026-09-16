@@ -64,7 +64,7 @@ func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 		InternalRouting{RetryCount: 2, RequestQueueName: "rq", ResultQueueName: "resq", ResultTTLSeconds: 60, ResultRoutingResolved: true},
 		&RequestMessage{
 			ID: "plain-1", Created: 1000, Deadline: 2000,
-			Payload:  map[string]any{"model": "m1"},
+			Payload:  testPayload(map[string]any{"model": "m1"}),
 			Metadata: map[string]string{"k": "v"},
 		},
 	)
@@ -86,8 +86,8 @@ func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 	if rm.ID != "plain-1" || rm.Created != 1000 || rm.Deadline != 2000 {
 		t.Errorf("field mismatch: %+v", rm)
 	}
-	if rm.Payload["model"] != "m1" {
-		t.Errorf("payload mismatch: %v", rm.Payload)
+	if string(rm.Payload) != `{"model":"m1"}` {
+		t.Errorf("payload mismatch: %s", rm.Payload)
 	}
 	if rm.Metadata["k"] != "v" {
 		t.Errorf("metadata mismatch: %v", rm.Metadata)
@@ -98,7 +98,7 @@ func TestRoundTrip_RedisRequest(t *testing.T) {
 	ir := NewInternalRequest(
 		InternalRouting{RetryCount: 1, RequestQueueName: "rq", ResultQueueName: "resq", TransportCorrelationID: "tc"},
 		&RedisRequest{
-			RequestMessage:   RequestMessage{ID: "redis-1", Created: 100, Deadline: 200, Payload: map[string]any{"p": 1}},
+			RequestMessage:   RequestMessage{ID: "redis-1", Created: 100, Deadline: 200, Payload: testPayload(map[string]any{"p": 1})},
 			RequestQueueName: "per-msg-rq",
 			ResultQueueName:  "per-msg-resq",
 		},
@@ -221,7 +221,7 @@ func TestUnmarshal_EmptyData(t *testing.T) {
 func TestRoundTrip_PublicRequestInterface(t *testing.T) {
 	ir := NewInternalRequest(
 		InternalRouting{},
-		&RequestMessage{ID: "iface-test", Created: 1, Deadline: 2, Payload: map[string]any{"k": "v"}, Metadata: map[string]string{"m": "d"}},
+		&RequestMessage{ID: "iface-test", Created: 1, Deadline: 2, Payload: testPayload(map[string]any{"k": "v"}), Metadata: map[string]string{"m": "d"}},
 	)
 	b, err := json.Marshal(ir)
 	if err != nil {
@@ -245,8 +245,8 @@ func TestRoundTrip_PublicRequestInterface(t *testing.T) {
 	if r.ReqDeadline() != 2 {
 		t.Errorf("ReqDeadlineUnixSec() = %d", r.ReqDeadline())
 	}
-	if r.ReqPayload()["k"] != "v" {
-		t.Errorf("ReqPayload() = %v", r.ReqPayload())
+	if string(r.ReqPayload()) != `{"k":"v"}` {
+		t.Errorf("ReqPayload() = %s", r.ReqPayload())
 	}
 	if r.ReqMetadata()["m"] != "d" {
 		t.Errorf("ReqMetadata() = %v", r.ReqMetadata())
@@ -258,7 +258,7 @@ func TestRoundTrip_EndpointField(t *testing.T) {
 		InternalRouting{RequestQueueName: "rq"},
 		&RequestMessage{
 			ID: "ep-test", Created: 1, Deadline: 2,
-			Payload:  map[string]any{"model": "m"},
+			Payload:  testPayload(map[string]any{"model": "m"}),
 			Endpoint: "/v1/custom",
 		},
 	)
@@ -287,7 +287,7 @@ func TestRoundTrip_EndpointField(t *testing.T) {
 func TestRoundTrip_EndpointOmittedWhenEmpty(t *testing.T) {
 	ir := NewInternalRequest(
 		InternalRouting{},
-		&RequestMessage{ID: "no-ep", Created: 1, Deadline: 2, Payload: map[string]any{}},
+		&RequestMessage{ID: "no-ep", Created: 1, Deadline: 2, Payload: testPayload(map[string]any{})},
 	)
 	b, err := json.Marshal(ir)
 	if err != nil {
@@ -331,4 +331,12 @@ func assertRouting(t *testing.T, got, want InternalRouting) {
 	if got.TransportCorrelationID != want.TransportCorrelationID {
 		t.Errorf("TransportCorrelationID = %q, want %q", got.TransportCorrelationID, want.TransportCorrelationID)
 	}
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

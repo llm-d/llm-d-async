@@ -56,7 +56,7 @@ func TestRandomRobinPolicy_ConcurrentProducers(t *testing.T) {
 						ID:       msgID(idx, m),
 						Created:  time.Now().Unix(),
 						Deadline: time.Now().Add(time.Minute).Unix(),
-						Payload:  map[string]any{"model": "test"},
+						Payload:  testPayload(map[string]any{"model": "test"}),
 					},
 				)
 				channels[idx].Channel <- ir

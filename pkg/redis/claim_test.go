@@ -41,7 +41,7 @@ func claimEnvelope(t *testing.T, id string, deadline int64) (*api.InternalReques
 		ID:       id,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "m", "prompt": "p"},
+		Payload:  testPayload(map[string]any{"model": "m", "prompt": "p"}),
 	})
 	b, err := json.Marshal(ir)
 	if err != nil {
