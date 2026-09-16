@@ -89,33 +89,30 @@ func (c *Consumer) Ack(ctx context.Context, completions []Completion) ([]bool, e
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]Key, len(completions))
+	stamps := make([]Stamp, len(completions))
 	for i, comp := range completions {
-		keys[i] = comp.Key
+		stamps[i] = Stamp{Key: comp.Key, Epoch: comp.Epoch}
 	}
-	c.done(keys)
+	c.doneStamps(stamps)
 	return acked, nil
 }
 
-func (c *Consumer) Retry(ctx context.Context, key Key, notBefore int64, payload string) (bool, error) {
-	stamps := c.stamps([]Key{key})
-	if len(stamps) == 0 {
-		return false, nil
-	}
-	ok, err := c.store.Retry(ctx, c.owner, stamps[0], notBefore, payload)
+func (c *Consumer) Retry(ctx context.Context, stamp Stamp, notBefore int64, payload string) (bool, error) {
+	ok, err := c.store.Retry(ctx, c.owner, stamp, notBefore, payload)
 	if err != nil {
 		return false, err
 	}
-	c.done([]Key{key})
+	c.doneStamps([]Stamp{stamp})
 	return ok, nil
 }
 
 func (c *Consumer) Undispatch(ctx context.Context, keys []Key) error {
-	if err := c.store.Undispatch(ctx, c.owner, c.stamps(keys)); err != nil {
+	stamps := c.stamps(keys)
+	if err := c.store.Undispatch(ctx, c.owner, stamps); err != nil {
 		c.Abandon(keys...)
 		return err
 	}
-	c.done(keys)
+	c.doneStamps(stamps)
 	return nil
 }
 
@@ -152,6 +149,21 @@ func (c *Consumer) done(keys []Key) {
 			continue
 		}
 		delete(c.inflight, k)
+		if st, ok := c.leases[t.partition]; ok && st.inflight > 0 {
+			st.inflight--
+		}
+	}
+}
+
+func (c *Consumer) doneStamps(stamps []Stamp) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, stamp := range stamps {
+		t, ok := c.inflight[stamp.Key]
+		if !ok || t.epoch != stamp.Epoch {
+			continue
+		}
+		delete(c.inflight, stamp.Key)
 		if st, ok := c.leases[t.partition]; ok && st.inflight > 0 {
 			st.inflight--
 		}
