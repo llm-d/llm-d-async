@@ -419,7 +419,7 @@ var _ = ginkgo.Describe("Redis Dispatch Gate E2E", func() {
 			ID:       requestID,
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test-model", "prompt": "cancel me"},
+			Payload:  testPayload(map[string]any{"model": "test-model", "prompt": "cancel me"}),
 		})).To(gomega.Succeed())
 
 		gomega.Eventually(func() int64 {

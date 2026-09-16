@@ -19,7 +19,7 @@ import (
 type customRequest struct {
 	id, endpoint      string
 	created, deadline int64
-	payload           map[string]any
+	payload           json.RawMessage
 	metadata          map[string]string
 	headers           map[string]string
 }
@@ -27,7 +27,7 @@ type customRequest struct {
 func (r *customRequest) ReqID() string                  { return r.id }
 func (r *customRequest) ReqCreated() int64              { return r.created }
 func (r *customRequest) ReqDeadline() int64             { return r.deadline }
-func (r *customRequest) ReqPayload() map[string]any     { return r.payload }
+func (r *customRequest) ReqPayload() json.RawMessage    { return r.payload }
 func (r *customRequest) ReqMetadata() map[string]string { return r.metadata }
 func (r *customRequest) ReqHeaders() map[string]string  { return r.headers }
 func (r *customRequest) ReqEndpoint() string            { return r.endpoint }
@@ -63,10 +63,10 @@ func TestSubmitRequest(t *testing.T) {
 		ID:       "test-123",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload: map[string]interface{}{
+		Payload: testPayload(map[string]interface{}{
 			"model":  "gpt-3.5-turbo",
 			"prompt": "Hello, world!",
-		},
+		}),
 		Metadata: map[string]string{
 			"user": "test-user",
 		},
@@ -267,7 +267,7 @@ func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
 func TestToInternalRequest_CustomRequestPreservesHeadersAndEndpoint(t *testing.T) {
 	req := &customRequest{
 		id: "custom-1", created: 1, deadline: 2,
-		payload:  map[string]any{"k": "v"},
+		payload:  testPayload(map[string]any{"k": "v"}),
 		metadata: map[string]string{"m": "d"},
 		headers:  map[string]string{"Authorization": "Bearer tok"},
 		endpoint: "/v1/chat/completions",
@@ -341,7 +341,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 			req: &api.RequestMessage{
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Unix(),
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "request ID is required",
 		},
@@ -351,7 +351,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: 0,
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "deadline is required",
 		},
@@ -361,7 +361,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: 0,
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "deadline is required",
 		},
@@ -371,7 +371,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(-1 * time.Minute).Unix(),
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "deadline has already expired",
 		},
@@ -426,7 +426,7 @@ func TestSubmitRequest_ClearsStaleCancellationMarker(t *testing.T) {
 		ID:       requestID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]any{"model": "test"},
+		Payload:  testPayload(map[string]any{"model": "test"}),
 	})
 	require.NoError(t, err)
 	assert.False(t, mr.Exists(api.RequestCancellationKey(requestID)))
@@ -590,7 +590,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 		ID:       "alpha-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"tenant": "alpha"},
+		Payload:  testPayload(map[string]interface{}{"tenant": "alpha"}),
 	}
 	err = tenant1Producer.SubmitRequest(ctx, req1)
 	require.NoError(t, err)
@@ -599,7 +599,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 		ID:       "beta-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"tenant": "beta"},
+		Payload:  testPayload(map[string]interface{}{"tenant": "beta"}),
 	}
 	err = tenant2Producer.SubmitRequest(ctx, req2)
 	require.NoError(t, err)
@@ -686,7 +686,7 @@ func TestProducerAuth(t *testing.T) {
 			ID:       "auth-test",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(1 * time.Hour).Unix(),
-			Payload:  map[string]interface{}{"test": true},
+			Payload:  testPayload(map[string]interface{}{"test": true}),
 		}
 		err = producer.SubmitRequest(ctx, req)
 		assert.NoError(t, err)
@@ -774,7 +774,7 @@ func TestWithRedisClient(t *testing.T) {
 			ID:       "inject-test",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(1 * time.Hour).Unix(),
-			Payload:  map[string]interface{}{"test": true},
+			Payload:  testPayload(map[string]interface{}{"test": true}),
 		}
 		err = p.SubmitRequest(ctx, req)
 		assert.NoError(t, err)
@@ -816,7 +816,7 @@ func TestCloseOwnership(t *testing.T) {
 			ID:       "post-close",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(1 * time.Hour).Unix(),
-			Payload:  map[string]interface{}{},
+			Payload:  testPayload(map[string]interface{}{}),
 		})
 		assert.Error(t, err)
 	})
@@ -907,7 +907,7 @@ func TestResultQueueNameNoNamespacing(t *testing.T) {
 		ID:       "short-name-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"job": "batch"},
+		Payload:  testPayload(map[string]interface{}{"job": "batch"}),
 	}
 	require.NoError(t, producer.SubmitRequest(ctx, req))
 
@@ -960,7 +960,7 @@ func TestComplexResultQueueKeyShape(t *testing.T) {
 		ID:       "complex-key-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"pool": "a"},
+		Payload:  testPayload(map[string]interface{}{"pool": "a"}),
 	}
 	require.NoError(t, producer.SubmitRequest(ctx, req))
 
@@ -984,4 +984,12 @@ func TestComplexResultQueueKeyShape(t *testing.T) {
 	result, err := producer.GetResult(ctxT)
 	require.NoError(t, err)
 	assert.Equal(t, "complex-key-request", result.ID)
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

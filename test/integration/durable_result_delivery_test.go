@@ -71,7 +71,7 @@ func TestDurableResultDelivery_RedeliversAfterConsumerLoss(t *testing.T) {
 		ID:       "durable-result",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(time.Minute).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hello"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 	}))
 
 	receiveCtx, receiveCancel := context.WithTimeout(context.Background(), 5*time.Second)
