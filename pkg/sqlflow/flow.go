@@ -492,8 +492,12 @@ func (f *Flow) stampRouting(ir *api.InternalRequest, cfg QueueConfig) {
 
 func parseRequest(row sqlqueue.Request, logger logr.Logger) (*api.InternalRequest, bool) {
 	var ir api.InternalRequest
-	if err := json.Unmarshal([]byte(row.Payload), &ir); err != nil || ir.PublicRequest == nil {
+	if err := json.Unmarshal([]byte(row.Envelope), &ir); err != nil || ir.PublicRequest == nil {
 		logger.V(logutil.DEFAULT).Error(err, "Failed to parse queued request", "id", row.ID)
+		return nil, false
+	}
+	if err := api.AttachPayload(&ir, row.Payload); err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "Failed to attach queued request payload", "id", row.ID)
 		return nil, false
 	}
 	if ir.RequestToken == "" {
@@ -569,7 +573,7 @@ func (f *Flow) retryWorker(ctx context.Context) {
 			return
 		}
 		key := stamp.Key
-		payload, err := json.Marshal(msg.InternalRequest)
+		envelope, _, err := api.SplitPayload(msg.InternalRequest)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to marshal retry; returning request to the queue", "id", reqID)
 			q.consumer.Abandon(key)
@@ -577,7 +581,7 @@ func (f *Flow) retryWorker(ctx context.Context) {
 		}
 		notBefore := time.Now().Unix() + int64(math.Ceil(msg.BackoffDurationSeconds))
 		parked, err := withRetries(ctx, func(ctx context.Context) (bool, error) {
-			return q.consumer.Retry(ctx, stamp, notBefore, string(payload))
+			return q.consumer.Retry(ctx, stamp, notBefore, string(envelope))
 		})
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to park retry; returning request to the queue", "id", reqID)
