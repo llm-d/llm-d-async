@@ -463,7 +463,7 @@ var _ = ginkgo.Describe("Redis Dispatch Gate E2E", func() {
 				ID:       id,
 				Created:  time.Now().Unix(),
 				Deadline: deadline,
-				Payload:  map[string]any{"model": "test-model", "prompt": id},
+				Payload:  testPayload(map[string]any{"model": "test-model", "prompt": id}),
 			})).To(gomega.Succeed())
 			submitted = append(submitted, id)
 		}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -30,7 +29,10 @@ type RedisSortedSetProducer struct {
 	resultClaimReclaimInterval time.Duration
 }
 
-const cancellationMarkerTTL = 7 * 24 * time.Hour
+const (
+	cancellationMarkerTTL = 7 * 24 * time.Hour
+	payloadTTLGrace       = 10 * time.Minute
+)
 
 var markRequestCancelledScript = redis.NewScript(`
 local active = redis.call("GET", KEYS[1])
@@ -50,6 +52,7 @@ redis.call("DEL", KEYS[2])
 redis.call("SET", KEYS[3], ARGV[1], "PX", ARGV[2])
 local score = tonumber(ARGV[6]) + math.min(seq, 2097151) / 2097152
 redis.call("ZADD", KEYS[4], string.format("%.17g", score), ARGV[4] .. seq .. ARGV[5])
+redis.call("SET", KEYS[5], ARGV[7], "PX", ARGV[8])
 return seq
 `)
 
@@ -256,14 +259,15 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 		return fmt.Errorf("failed to create request token: %w", err)
 	}
 	ir.RequestToken = token
+	ir.PayloadRef = api.RequestPayloadKey(r.ReqID(), token)
 
 	ir.EnqueueSeq = enqueueSeqPlaceholder
 
-	msgBytes, err := json.Marshal(ir)
+	envelope, payload, err := api.SplitPayload(ir)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
-	at := bytes.Index(msgBytes, []byte(enqueueSeqPlaceholderJSON))
+	at := bytes.Index(envelope, []byte(enqueueSeqPlaceholderJSON))
 	if at < 0 {
 		return errors.New("marshaled request is missing the enqueue_seq placeholder")
 	}
@@ -278,13 +282,16 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 			api.RequestCancellationKey(r.ReqID()),
 			api.RequestActiveTokenKey(r.ReqID()),
 			targetQueue,
+			ir.PayloadRef,
 		},
 		ir.RequestToken,
 		max(activeTTL.Milliseconds(), 1),
 		time.Unix(deadline, 0).Add(enqueueSeqGrace).Unix(),
-		msgBytes[:at+len(enqueueSeqFieldJSON)],
-		msgBytes[at+len(enqueueSeqPlaceholderJSON):],
+		envelope[:at+len(enqueueSeqFieldJSON)],
+		envelope[at+len(enqueueSeqPlaceholderJSON):],
 		deadline,
+		[]byte(payload),
+		(activeTTL + payloadTTLGrace).Milliseconds(),
 	).Err()
 	if err != nil {
 		return fmt.Errorf("failed to add request to queue: %w", err)

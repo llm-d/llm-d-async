@@ -812,9 +812,14 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 		return
 	}
 
-	for _, z := range zs {
-		member := z.Member.(string)
-		ir, deadline, ok := r.parseMessage(member, logger)
+	peeked, err := r.loadRequests(ctx, zs, currentTime, logger)
+	if err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "Failed to load request payloads", "queue", queueName)
+		return
+	}
+
+	for _, p := range peeked {
+		member, ir, deadline, ok := p.member, p.ir, p.deadline, p.ok
 		if !ok || ir == nil || ir.PublicRequest == nil {
 			// Unparsable entry: no request identity survives to redeliver,
 			// so remove it rather than letting it wedge the peek window.
@@ -911,6 +916,24 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			continue
 		}
 
+		if p.payloadMissing {
+			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
+			if claimErr != nil {
+				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim request with a missing payload", "id", reqID)
+				continue
+			}
+			if !claimed {
+				continue
+			}
+			select {
+			case r.resultChannel <- api.NewErrorResult(rview, ir.InternalRouting, api.ErrCodeInvalidRequest, "request payload is missing"):
+			case <-ctx.Done():
+				releaseOnShutdown(token, ir.RequestToken)
+				return
+			}
+			continue
+		}
+
 		// Apply gate
 		var releases []pipeline.GateReleaseFunc
 		verdict, err := gate.Apply(ctx, ir, &releases)
@@ -997,6 +1020,56 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			return
 		}
 	}
+}
+
+type peekedRequest struct {
+	member         string
+	ir             *api.InternalRequest
+	deadline       float64
+	ok             bool
+	payloadMissing bool
+}
+
+func (r *RedisSortedSetFlow) loadRequests(ctx context.Context, zs []redis.Z, now float64, logger logr.Logger) ([]peekedRequest, error) {
+	out := make([]peekedRequest, len(zs))
+	var refs []string
+	var at []int
+	for i, z := range zs {
+		member, _ := z.Member.(string)
+		ir, deadline, ok := r.parseMessage(member, logger)
+		out[i] = peekedRequest{member: member, ir: ir, deadline: deadline, ok: ok}
+		if ok && ir != nil && ir.PayloadRef != "" && deadline >= now {
+			refs = append(refs, ir.PayloadRef)
+			at = append(at, i)
+		}
+	}
+	if len(refs) == 0 {
+		return out, nil
+	}
+	values, err := r.rdb.MGet(ctx, refs...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("fetch %d request payloads: %w", len(refs), err)
+	}
+	for j, v := range values {
+		p := &out[at[j]]
+		payload, found := v.(string)
+		if !found {
+			p.payloadMissing = true
+			continue
+		}
+		if err := api.AttachPayload(p.ir, json.RawMessage(payload)); err != nil {
+			p.payloadMissing = true
+		}
+	}
+	return out, nil
+}
+
+func encodeRequest(ir *api.InternalRequest) ([]byte, error) {
+	if ir.PayloadRef == "" {
+		return json.Marshal(ir)
+	}
+	envelope, _, err := api.SplitPayload(ir)
+	return envelope, err
 }
 
 func (r *RedisSortedSetFlow) parseMessage(member string, logger logr.Logger) (*api.InternalRequest, float64, bool) {
@@ -1087,7 +1160,7 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 		// Preserve the origin queue in the envelope so the retry mover can
 		// re-enter the message into the right queue once it is due.
 		msg.RequestQueueName = queueName
-		bytes, err := json.Marshal(msg.InternalRequest)
+		bytes, err := encodeRequest(msg.InternalRequest)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to marshal retry")
 			continue
@@ -1233,7 +1306,7 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 		var ok bool
 		err := retryRedisOp(ctx, func(ctx context.Context) error {
 			var aerr error
-			ok, aerr = r.ackResult(ctx, claimQueue, resultQueue, result.ID, result.Routing.RequestToken, r.marshalResult(result), listTTL)
+			ok, aerr = r.ackResult(ctx, claimQueue, resultQueue, result.ID, result.Routing.RequestToken, result.Routing.PayloadRef, r.marshalResult(result), listTTL)
 			return aerr
 		})
 		if err != nil {

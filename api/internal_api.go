@@ -43,6 +43,8 @@ type InternalRouting struct {
 	// EnqueueSeq is the producer's 1-based submission order among requests
 	// sharing this queue and deadline.
 	EnqueueSeq int64 `json:"enqueue_seq,omitempty"`
+	// PayloadRef is empty when the payload travels inline.
+	PayloadRef string `json:"payload_ref,omitempty"`
 	// Labels is the framework's per-message label set. Seeded by the
 	// Flow at pull time from the originating channel's effective
 	// policy read and mutate this map in place. Producer-controlled
