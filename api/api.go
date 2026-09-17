@@ -124,6 +124,11 @@ func RequestActiveTokenKey(requestID string) string {
 	return "request-active:" + requestID
 }
 
+// RequestPayloadKey returns the Redis key holding the payload of one request generation.
+func RequestPayloadKey(requestID, requestToken string) string {
+	return "request-payload:" + requestID + ":" + requestToken
+}
+
 // NewErrorResult builds a non-HTTP error ResultMessage.
 // errorCode must be one of the ErrCode* constants; errMsg is a human-readable description.
 // Payload is populated with a JSON error object for backward compatibility with

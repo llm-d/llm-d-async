@@ -832,3 +832,54 @@ func testPayload(m map[string]any) json.RawMessage {
 	}
 	return b
 }
+
+func TestRedisSortedSetProducer_StoresPayloadApartFromTheQueuedEnvelope(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour)
+	payload := `{"model":"m","prompt":"a long prompt"}`
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: deadline.Unix(), Payload: json.RawMessage(payload)}))
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: deadline.Unix(), Payload: json.RawMessage(`{"prompt":"second"}`)}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 2)
+	refs := map[string]bool{}
+	for _, member := range members {
+		assert.NotContains(t, member, "prompt", "the queued member does not carry the payload")
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		require.NotEmpty(t, ir.RequestToken)
+		assert.Equal(t, api.RequestPayloadKey("r1", ir.RequestToken), ir.PayloadRef)
+
+		stored, err := mr.Get(ir.PayloadRef)
+		require.NoError(t, err, "payload key %q", ir.PayloadRef)
+		ttl := mr.TTL(ir.PayloadRef)
+		assert.Greater(t, ttl, time.Until(deadline), "the payload outlives the deadline")
+		assert.LessOrEqual(t, ttl, time.Until(deadline)+payloadTTLGrace+time.Second)
+
+		var joined api.InternalRequest
+		require.NoError(t, api.JoinPayload([]byte(member), json.RawMessage(stored), &joined))
+		refs[ir.PayloadRef] = true
+		if string(joined.PublicRequest.ReqPayload()) != payload {
+			assert.JSONEq(t, `{"prompt":"second"}`, string(joined.PublicRequest.ReqPayload()))
+		}
+	}
+	assert.Len(t, refs, 2, "each generation of a reused ID gets its own payload key")
+}
+
+func TestRedisSortedSetProducer_StoresAnEmptyPayload(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "empty", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix()}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	stored, err := mr.Get(ir.PayloadRef)
+	require.NoError(t, err)
+	assert.Empty(t, stored)
+}
