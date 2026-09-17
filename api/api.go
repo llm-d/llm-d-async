@@ -101,12 +101,13 @@ type ResultMessage struct {
 // Error codes for non-HTTP failures surfaced in ResultMessage.ErrorCode.
 // These are result-level codes describing why a request could not be completed.
 const (
-	ErrCodeDeadlineExceeded = "DEADLINE_EXCEEDED"
-	ErrCodeCancelled        = "CANCELLED"
-	ErrCodeGateDropped      = "GATE_DROPPED"
-	ErrCodeGateError        = "GATE_ERROR"
-	ErrCodeInferenceError   = "INFERENCE_ERROR"
-	ErrCodeInvalidRequest   = "INVALID_REQUEST"
+	ErrCodeDeadlineExceeded   = "DEADLINE_EXCEEDED"
+	ErrCodeCancelled          = "CANCELLED"
+	ErrCodeGateDropped        = "GATE_DROPPED"
+	ErrCodeGateError          = "GATE_ERROR"
+	ErrCodeInferenceError     = "INFERENCE_ERROR"
+	ErrCodeInvalidRequest     = "INVALID_REQUEST"
+	ErrCodePayloadUnavailable = "PAYLOAD_UNAVAILABLE"
 )
 
 // CancellationChecker reports whether a specific request generation has been cancelled.
