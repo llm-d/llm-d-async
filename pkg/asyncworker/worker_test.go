@@ -3377,25 +3377,19 @@ func TestWorker_SpanPrefersRequestModel(t *testing.T) {
 	assertSpanAttributes(t, s, attribute.String("gen_ai.request.model", "from-request"))
 }
 
-func TestFallbackModel(t *testing.T) {
-	withModel := &asyncapi.RequestMessage{Model: "set", Payload: json.RawMessage(`{"model":"payload"}`)}
-	withoutModel := &asyncapi.RequestMessage{Payload: json.RawMessage(`{"model":"payload"}`)}
-	unparseable := &asyncapi.RequestMessage{Payload: json.RawMessage(`{not json`)}
-
+func TestPayloadModel(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		req       asyncapi.Request
-		recording bool
-		want      string
+		name    string
+		payload string
+		want    string
 	}{
-		{"model set, sampled", withModel, true, ""},
-		{"model set, not sampled", withModel, false, ""},
-		{"no model, not sampled", withoutModel, false, ""},
-		{"no model, sampled", withoutModel, true, "payload"},
-		{"no model, sampled, unparseable payload", unparseable, true, ""},
+		{"model present", `{"model":"payload"}`, "payload"},
+		{"no model key", `{"prompt":"hello"}`, ""},
+		{"unparseable", `{not json`, ""},
+		{"empty", ``, ""},
 	} {
-		if got := fallbackModel(tc.req, tc.recording); got != tc.want {
-			t.Errorf("%s: fallbackModel = %q, want %q", tc.name, got, tc.want)
+		if got := payloadModel(json.RawMessage(tc.payload)); got != tc.want {
+			t.Errorf("%s: payloadModel = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
