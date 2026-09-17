@@ -15,8 +15,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// benchPromptSizes are prompt lengths in whitespace-separated tokens.
-var benchPromptSizes = []int{1_000, 16_000, 128_000}
+// benchPromptSizes are prompt lengths in whitespace-separated tokens. 64 is
+// below the size where storing the payload apart starts to pay.
+var benchPromptSizes = []int{64, 1_000, 16_000, 128_000}
+
+func benchLabel(tokens int) string {
+	if tokens < 1_000 {
+		return fmt.Sprintf("%d_tokens", tokens)
+	}
+	return fmt.Sprintf("%dk_tokens", tokens/1_000)
+}
 
 // benchBatchSize matches the SortedSetQueueConfig.BatchSize default.
 const benchBatchSize = 10
@@ -104,7 +112,7 @@ func BenchmarkPeekAndLoad(b *testing.B) {
 			storage = "payload_ref"
 		}
 		for _, tokens := range benchPromptSizes {
-			b.Run(fmt.Sprintf("%s/%dk_tokens", storage, tokens/1000), func(b *testing.B) {
+			b.Run(fmt.Sprintf("%s/%s", storage, benchLabel(tokens)), func(b *testing.B) {
 				rdb := benchRedis(b)
 				flow := &RedisSortedSetFlow{rdb: rdb}
 				queue := "bench-queue:" + b.Name()
@@ -179,7 +187,7 @@ func BenchmarkPayloadDecode(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		b.Run(fmt.Sprintf("raw_message/%dk_tokens", tokens/1000), func(b *testing.B) {
+		b.Run("raw_message/"+benchLabel(tokens), func(b *testing.B) {
 			b.SetBytes(int64(len(payload)))
 			b.ReportAllocs()
 			for range b.N {
@@ -193,7 +201,7 @@ func BenchmarkPayloadDecode(b *testing.B) {
 			}
 		})
 
-		b.Run(fmt.Sprintf("map_payload/%dk_tokens", tokens/1000), func(b *testing.B) {
+		b.Run("map_payload/"+benchLabel(tokens), func(b *testing.B) {
 			b.SetBytes(int64(len(payload)))
 			b.ReportAllocs()
 			for range b.N {
