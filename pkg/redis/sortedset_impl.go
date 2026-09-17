@@ -865,6 +865,26 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			}
 		}
 
+		// Claims the request and records result as its terminal outcome,
+		// reporting whether the batch must stop.
+		terminate := func(result api.ResultMessage) bool {
+			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
+			if claimErr != nil {
+				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim request", "id", reqID, "outcome", result.ErrorCode)
+				return false
+			}
+			if !claimed {
+				return false
+			}
+			select {
+			case r.resultChannel <- result:
+			case <-ctx.Done():
+				releaseOnShutdown(token, ir.RequestToken)
+				return true
+			}
+			return false
+		}
+
 		if deadline < currentTime {
 			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", reqID)
 			metrics.RecordExceededDeadlineReq(queueID, queueName, poolName)
@@ -899,36 +919,14 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			// authoritative pre-dispatch cancellation check and fails closed.
 			logger.V(logutil.DEFAULT).Error(err, "Failed to check request cancellation", "id", reqID)
 		} else if cancelled {
-			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
-			if claimErr != nil {
-				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim cancelled request", "id", reqID)
-				continue
-			}
-			if !claimed {
-				continue
-			}
-			select {
-			case r.resultChannel <- api.NewCancelledResult(rview, ir.InternalRouting):
-			case <-ctx.Done():
-				releaseOnShutdown(token, ir.RequestToken)
+			if terminate(api.NewCancelledResult(rview, ir.InternalRouting)) {
 				return
 			}
 			continue
 		}
 
-		if p.payloadMissing {
-			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
-			if claimErr != nil {
-				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim request with a missing payload", "id", reqID)
-				continue
-			}
-			if !claimed {
-				continue
-			}
-			select {
-			case r.resultChannel <- api.NewErrorResult(rview, ir.InternalRouting, api.ErrCodeInvalidRequest, "request payload is missing"):
-			case <-ctx.Done():
-				releaseOnShutdown(token, ir.RequestToken)
+		if p.payloadErr != "" {
+			if terminate(api.NewErrorResult(rview, ir.InternalRouting, api.ErrCodePayloadUnavailable, p.payloadErr)) {
 				return
 			}
 			continue
@@ -1023,11 +1021,12 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 }
 
 type peekedRequest struct {
-	member         string
-	ir             *api.InternalRequest
-	deadline       float64
-	ok             bool
-	payloadMissing bool
+	member   string
+	ir       *api.InternalRequest
+	deadline float64
+	ok       bool
+	// payloadErr is empty when the payload is ready to dispatch.
+	payloadErr string
 }
 
 func (r *RedisSortedSetFlow) loadRequests(ctx context.Context, zs []redis.Z, now float64, logger logr.Logger) ([]peekedRequest, error) {
@@ -1053,12 +1052,15 @@ func (r *RedisSortedSetFlow) loadRequests(ctx context.Context, zs []redis.Z, now
 	for j, v := range values {
 		p := &out[at[j]]
 		payload, found := v.(string)
-		if !found {
-			p.payloadMissing = true
-			continue
-		}
-		if err := api.AttachPayload(p.ir, json.RawMessage(payload)); err != nil {
-			p.payloadMissing = true
+		switch {
+		case !found:
+			p.payloadErr = "request payload is missing"
+		case !json.Valid([]byte(payload)):
+			p.payloadErr = "request payload is not valid JSON"
+		default:
+			if err := api.AttachPayload(p.ir, json.RawMessage(payload)); err != nil {
+				p.payloadErr = "request payload could not be attached"
+			}
 		}
 	}
 	return out, nil

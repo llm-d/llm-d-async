@@ -60,20 +60,42 @@ func TestLoadRequests_AttachesReferencedPayloads(t *testing.T) {
 			t.Errorf("entry %d member = %q, want the peeked bytes", i, p.member)
 		}
 	}
-	if !got[0].ok || got[0].payloadMissing || string(got[0].ir.PublicRequest.ReqPayload()) != `{"prompt":"present"}` {
-		t.Errorf("present: ok=%v missing=%v payload=%s", got[0].ok, got[0].payloadMissing, got[0].ir.PublicRequest.ReqPayload())
+	if !got[0].ok || got[0].payloadErr != "" || string(got[0].ir.PublicRequest.ReqPayload()) != `{"prompt":"present"}` {
+		t.Errorf("present: ok=%v err=%q payload=%s", got[0].ok, got[0].payloadErr, got[0].ir.PublicRequest.ReqPayload())
 	}
-	if !got[1].ok || !got[1].payloadMissing {
-		t.Errorf("missing: ok=%v missing=%v", got[1].ok, got[1].payloadMissing)
+	if !got[1].ok || got[1].payloadErr == "" {
+		t.Errorf("missing: ok=%v err=%q", got[1].ok, got[1].payloadErr)
 	}
-	if got[2].payloadMissing || string(got[2].ir.PublicRequest.ReqPayload()) == `{"prompt":"expired"}` {
-		t.Errorf("expired requests are not fetched: missing=%v payload=%s", got[2].payloadMissing, got[2].ir.PublicRequest.ReqPayload())
+	if got[2].payloadErr != "" || string(got[2].ir.PublicRequest.ReqPayload()) == `{"prompt":"expired"}` {
+		t.Errorf("expired requests are not fetched: err=%q payload=%s", got[2].payloadErr, got[2].ir.PublicRequest.ReqPayload())
 	}
-	if !got[3].ok || got[3].payloadMissing || string(got[3].ir.PublicRequest.ReqPayload()) != `{"prompt":"inline"}` {
-		t.Errorf("inline: ok=%v missing=%v payload=%s", got[3].ok, got[3].payloadMissing, got[3].ir.PublicRequest.ReqPayload())
+	if !got[3].ok || got[3].payloadErr != "" || string(got[3].ir.PublicRequest.ReqPayload()) != `{"prompt":"inline"}` {
+		t.Errorf("inline: ok=%v err=%q payload=%s", got[3].ok, got[3].payloadErr, got[3].ir.PublicRequest.ReqPayload())
 	}
 	if got[4].ok {
 		t.Error("an unparsable member is not ok")
+	}
+}
+
+func TestLoadRequests_RejectsAPayloadThatIsNotJSON(t *testing.T) {
+	_, rdb, ctx, cancel := setupTest(t)
+	defer cancel()
+	defer rdb.Close() // nolint:errcheck
+	flow := &RedisSortedSetFlow{rdb: rdb}
+	ir, member := pointerRequest(t, "corrupt", time.Now().Add(time.Hour).Unix(), `{"prompt":"corrupt"}`)
+	if err := rdb.Set(ctx, ir.PayloadRef, `{"prompt":`, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := flow.loadRequests(ctx, []redis.Z{{Member: member}}, float64(time.Now().Unix()), logr.Discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].payloadErr == "" {
+		t.Fatal("a stored payload that is not JSON must not reach dispatch")
+	}
+	if strings.Contains(string(got[0].ir.PublicRequest.ReqPayload()), "prompt") {
+		t.Fatalf("the corrupt payload was attached: %s", got[0].ir.PublicRequest.ReqPayload())
 	}
 }
 
@@ -133,7 +155,7 @@ func TestSortedSetFlow_DispatchesPointerRequestWithItsPayload(t *testing.T) {
 	}
 }
 
-func TestSortedSetFlow_MissingPayloadEndsWithInvalidRequest(t *testing.T) {
+func TestSortedSetFlow_MissingPayloadEndsWithPayloadUnavailable(t *testing.T) {
 	_, rdb, ctx, cancel := setupTest(t)
 	defer cancel()
 	defer rdb.Close() // nolint:errcheck
@@ -154,7 +176,7 @@ func TestSortedSetFlow_MissingPayloadEndsWithInvalidRequest(t *testing.T) {
 
 	select {
 	case res := <-flow.resultChannel:
-		if res.ID != "gone" || res.ErrorCode != api.ErrCodeInvalidRequest {
+		if res.ID != "gone" || res.ErrorCode != api.ErrCodePayloadUnavailable {
 			t.Fatalf("result = %+v", res)
 		}
 		if res.Routing.PayloadRef != ir.PayloadRef {
@@ -229,7 +251,7 @@ func TestFlushRetryBatch_ParksOnlyTheEnvelopeOfAPointerRequest(t *testing.T) {
 		t.Fatalf("payload key = %q, want it kept for the retry", v)
 	}
 	var parked api.InternalRequest
-	if err := api.JoinPayload([]byte(members[0]), json.RawMessage(`{"prompt":"retry me"}`), &parked); err != nil {
+	if err := json.Unmarshal([]byte(members[0]), &parked); err != nil {
 		t.Fatal(err)
 	}
 	if parked.PayloadRef != ir.PayloadRef || parked.PublicRequest.ReqID() != "r1" {

@@ -130,7 +130,7 @@ func BenchmarkPeekAndLoad(b *testing.B) {
 						b.Fatal(err)
 					}
 					for _, p := range peeked {
-						if !p.ok || p.payloadMissing || len(p.ir.PublicRequest.ReqPayload()) != payloadBytes {
+						if !p.ok || p.payloadErr != "" || len(p.ir.PublicRequest.ReqPayload()) != payloadBytes {
 							b.Fatal("payload did not survive the load")
 						}
 					}
