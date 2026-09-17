@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS async_requests (
 	not_before     BIGINT   NOT NULL DEFAULT 0,
 	dispatch_epoch BIGINT   NOT NULL DEFAULT 0,
 	cancelled      SMALLINT NOT NULL DEFAULT 0,
-	payload        TEXT     NOT NULL,
+	envelope       TEXT     NOT NULL,
+	payload        BYTEA    NOT NULL,
 	created_at     BIGINT   NOT NULL,
 	PRIMARY KEY (id, request_token)
 ) WITH (

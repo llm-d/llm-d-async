@@ -49,7 +49,7 @@ func idInPartition(t *testing.T, prefix string, p int) string {
 }
 
 func req(id string, deadline int64) Request {
-	return Request{ID: id, Token: "t", Queue: "q", Deadline: deadline, Payload: `{"id":"` + id + `"}`}
+	return Request{ID: id, Token: "t", Queue: "q", Deadline: deadline, Envelope: `{"id":"` + id + `"}`, Payload: []byte(`{"prompt":"` + id + `"}`)}
 }
 
 func ownAll(t *testing.T, s *Store, owner string, now time.Time) []Lease {
@@ -155,7 +155,7 @@ func TestDispatchOrdersByDeadlineAndHidesInFlight(t *testing.T) {
 		ownAll(t, s, "a", now)
 		dl := now.Unix()
 		require.NoError(t, s.Enqueue(ctx, req("late", dl+300), req("early", dl+10), req("mid", dl+100)))
-		require.NoError(t, s.Enqueue(ctx, Request{ID: "other-queue", Token: "t", Queue: "q2", Deadline: dl, Payload: "{}"}))
+		require.NoError(t, s.Enqueue(ctx, Request{ID: "other-queue", Token: "t", Queue: "q2", Deadline: dl, Envelope: "{}", Payload: []byte("{}")}))
 		require.NoError(t, s.Cancel(ctx, []string{"mid"}))
 
 		rows, err := s.Dispatch(ctx, "q", "a", now, 2)
@@ -164,7 +164,8 @@ func TestDispatchOrdersByDeadlineAndHidesInFlight(t *testing.T) {
 		assert.False(t, rows[0].Cancelled)
 		assert.True(t, rows[1].Cancelled, "cancel flag rides along with the dispatch")
 		assert.Equal(t, partitionOf("mid"), rows[1].Partition)
-		assert.Equal(t, `{"id":"mid"}`, rows[1].Payload)
+		assert.Equal(t, `{"id":"mid"}`, rows[1].Envelope)
+		assert.Equal(t, `{"prompt":"mid"}`, string(rows[1].Payload))
 
 		assert.Equal(t, []string{"late"}, dispatchIDs(t, s, "a", now, 10), "in-flight requests are not dispatched again")
 		assert.Empty(t, dispatchIDs(t, s, "a", now, 10))
@@ -555,7 +556,7 @@ func TestUndispatchReturnsRequestsToPending(t *testing.T) {
 	})
 }
 
-func TestRetryParksWithUpdatedPayload(t *testing.T) {
+func TestRetryParksWithUpdatedEnvelope(t *testing.T) {
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		now := time.Now()
@@ -581,7 +582,8 @@ func TestRetryParksWithUpdatedPayload(t *testing.T) {
 		rows, err := s.Dispatch(ctx, "q", "a", now.Add(5*time.Second), 10)
 		require.NoError(t, err)
 		require.Equal(t, []string{"mid"}, ids(rows))
-		assert.Equal(t, `{"retried":true}`, rows[0].Payload)
+		assert.Equal(t, `{"retried":true}`, rows[0].Envelope)
+		assert.Equal(t, `{"prompt":"mid"}`, string(rows[0].Payload), "a retry keeps the payload")
 	})
 }
 
@@ -590,8 +592,8 @@ func TestCancelFlagsLiveGenerationsOnly(t *testing.T) {
 		ctx := context.Background()
 		now := time.Now().Unix()
 		require.NoError(t, s.Enqueue(ctx,
-			Request{ID: "r", Token: "gen1", Queue: "q", Deadline: now + 100, Payload: "{}"},
-			Request{ID: "r", Token: "gen2", Queue: "q", Deadline: now + 100, Payload: "{}"}))
+			Request{ID: "r", Token: "gen1", Queue: "q", Deadline: now + 100, Envelope: "{}", Payload: []byte("{}")},
+			Request{ID: "r", Token: "gen2", Queue: "q", Deadline: now + 100, Envelope: "{}", Payload: []byte("{}")}))
 		require.NoError(t, s.Cancel(ctx, []string{"r", "unknown", ""}))
 		got, err := s.CancelledKeys(ctx, []Key{
 			{ID: "r", Token: "gen1"}, {ID: "r", Token: "gen2"}, {ID: "r", Token: "gen3"},
@@ -600,7 +602,7 @@ func TestCancelFlagsLiveGenerationsOnly(t *testing.T) {
 		assert.True(t, got[Key{ID: "r", Token: "gen1"}])
 		assert.True(t, got[Key{ID: "r", Token: "gen2"}])
 		assert.False(t, got[Key{ID: "r", Token: "gen3"}], "unknown generation is not cancelled")
-		require.NoError(t, s.Enqueue(ctx, Request{ID: "r", Token: "gen3", Queue: "q", Deadline: now + 100, Payload: "{}"}))
+		require.NoError(t, s.Enqueue(ctx, Request{ID: "r", Token: "gen3", Queue: "q", Deadline: now + 100, Envelope: "{}", Payload: []byte("{}")}))
 		got, err = s.CancelledKeys(ctx, []Key{{ID: "r", Token: "gen3"}})
 		require.NoError(t, err)
 		assert.False(t, got[Key{ID: "r", Token: "gen3"}], "a resubmission after cancel starts clean")
@@ -688,4 +690,30 @@ func TestQueueTablesVacuumOnFixedThresholds(t *testing.T) {
 			assert.Contains(t, opts, want, table)
 		}
 	}
+}
+
+func TestDispatchReturnsPayloadBytesAsStored(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		binary := []byte{0x00, 0xff, 0xfe, '{', 0x80}
+		require.NoError(t, s.Enqueue(ctx,
+			Request{ID: "binary", Token: "t", Queue: "q", Deadline: now.Unix() + 10, Envelope: "{}", Payload: binary},
+			Request{ID: "empty", Token: "t", Queue: "q", Deadline: now.Unix() + 20, Envelope: "{}", Payload: []byte{}}))
+
+		rows, err := s.Dispatch(ctx, "q", "a", now, 10)
+		require.NoError(t, err)
+		require.Equal(t, []string{"binary", "empty"}, ids(rows))
+		assert.Equal(t, binary, rows[0].Payload)
+		assert.NotNil(t, rows[1].Payload)
+		assert.Empty(t, rows[1].Payload)
+	})
+}
+
+func TestEnqueueRejectsMissingPayload(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		err := s.Enqueue(context.Background(), Request{ID: "nil", Token: "t", Queue: "q", Deadline: time.Now().Unix() + 10, Envelope: "{}"})
+		require.Error(t, err, "payload is NOT NULL, so a nil payload is a bug in the caller")
+	})
 }

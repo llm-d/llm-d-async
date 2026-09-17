@@ -97,8 +97,8 @@ func (c *Consumer) Ack(ctx context.Context, completions []Completion) ([]bool, e
 	return acked, nil
 }
 
-func (c *Consumer) Retry(ctx context.Context, stamp Stamp, notBefore int64, payload string) (bool, error) {
-	ok, err := c.store.Retry(ctx, c.owner, stamp, notBefore, payload)
+func (c *Consumer) Retry(ctx context.Context, stamp Stamp, notBefore int64, envelope string) (bool, error) {
+	ok, err := c.store.Retry(ctx, c.owner, stamp, notBefore, envelope)
 	if err != nil {
 		return false, err
 	}

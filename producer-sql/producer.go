@@ -126,16 +126,20 @@ func (p *Producer) toRow(req api.Request) (sqlqueue.Request, error) {
 		return sqlqueue.Request{}, fmt.Errorf("failed to create request token: %w", err)
 	}
 	ir.RequestToken = token
-	payload, err := json.Marshal(ir)
+	envelope, payload, err := api.SplitPayload(ir)
 	if err != nil {
 		return sqlqueue.Request{}, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	if payload == nil {
+		payload = json.RawMessage{}
 	}
 	return sqlqueue.Request{
 		ID:       r.ReqID(),
 		Token:    token,
 		Queue:    ir.RequestQueueName,
 		Deadline: deadline,
-		Payload:  string(payload),
+		Envelope: string(envelope),
+		Payload:  payload,
 	}, nil
 }
 
