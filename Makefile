@@ -104,6 +104,10 @@ test: fmt vet setup-envtest ## Run tests against root, api, and producer modules
 	cd api && go test ./... -coverprofile=cover-api.out
 	cd producer && GOWORK=off go test ./... -coverprofile=cover-producer.out
 
+.PHONY: bench
+bench: ## Run microbenchmarks. Set BENCH_REDIS_ADDR=host:port to measure against a real Redis instead of miniredis.
+	go test -run=^$$ -bench=. -benchmem ./pkg/redis/...
+
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
 .PHONY: create-kind-cluster
