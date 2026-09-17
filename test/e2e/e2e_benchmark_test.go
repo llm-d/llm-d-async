@@ -76,11 +76,11 @@ var _ = ginkgo.Describe("Async Processor Performance Benchmark E2E", ginkgo.Orde
 				ID:       fmt.Sprintf("bench-msg-%d", i),
 				Created:  now,
 				Deadline: now + 600, // 10 minutes deadline
-				Payload: map[string]any{
+				Payload: testPayload(map[string]any{
 					"model":      "test-model",
 					"prompt":     prompt,
 					"max_tokens": 500,
-				},
+				}),
 			}
 		}
 
@@ -162,11 +162,11 @@ var _ = ginkgo.Describe("Async Processor Performance Benchmark E2E", ginkgo.Orde
 				ID:       fmt.Sprintf("bench-pool-msg-%d", i),
 				Created:  now,
 				Deadline: now + 600, // 10 minutes deadline
-				Payload: map[string]any{
+				Payload: testPayload(map[string]any{
 					"model":      "test-model",
 					"prompt":     prompt,
 					"max_tokens": 500,
-				},
+				}),
 			}
 		}
 
@@ -248,11 +248,11 @@ var _ = ginkgo.Describe("Async Processor Performance Benchmark E2E", ginkgo.Orde
 				ID:       fmt.Sprintf("bench-pubsub-msg-%d", i),
 				Created:  now,
 				Deadline: now + 600, // 10 minutes deadline
-				Payload: map[string]any{
+				Payload: testPayload(map[string]any{
 					"model":      "test-model",
 					"prompt":     prompt,
 					"max_tokens": 500,
-				},
+				}),
 			}
 		}
 

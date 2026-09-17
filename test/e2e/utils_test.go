@@ -208,7 +208,7 @@ func makeRequestMessage(id string, deadlineOffset time.Duration) api.RequestMess
 		ID:       id,
 		Created:  time.Now().Unix(),
 		Deadline: deadline.Unix(),
-		Payload:  map[string]any{"model": id, "prompt": "test"},
+		Payload:  testPayload(map[string]any{"model": id, "prompt": "test"}),
 	}
 }
 
@@ -402,4 +402,12 @@ func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string
 
 func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
 	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
