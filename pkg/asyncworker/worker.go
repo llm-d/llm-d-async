@@ -272,7 +272,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
 						attribute.Int(uotel.LegacyAttrRetryCount, msg.RetryCount),
 					}
-					if model, ok := msg.PublicRequest.ReqPayload()["model"].(string); ok && model != "" {
+					if model := msg.PublicRequest.ReqModel(); model != "" {
 						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrRequestModel, model))
 					}
 					if queueID != "" {
@@ -291,6 +291,9 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						trace.WithAttributes(spanAttrs...),
 					)
 					defer span.End()
+					if model := fallbackModel(msg.PublicRequest, span.IsRecording()); model != "" {
+						span.SetAttributes(attribute.String(uotel.AttrRequestModel, model))
+					}
 
 					reqDeadline := time.Now().Add(requestTimeout)
 					if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
@@ -476,14 +479,9 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 		return nil
 	}
 
-	payloadBytes, err := json.Marshal(r.ReqPayload())
-	if err != nil {
-		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
-		select {
-		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to marshal message's payload: %s", err.Error())):
-		case <-ctx.Done():
-		}
-		return nil
+	payloadBytes := []byte(r.ReqPayload())
+	if len(payloadBytes) == 0 {
+		payloadBytes = []byte("null")
 	}
 
 	// Pre-dispatch transform validation (e.g. signed object URL expiry). A
@@ -646,4 +644,22 @@ func expBackoffDuration(retryCount int, secondsToDeadline int) float64 {
 	// equal jitter: [temp/2, temp)
 	half := temp / 2
 	return half + rand.Float64()*half // #nosec G404 -- non-security jitter, crypto/rand unnecessary
+}
+
+// fallbackModel reads the model from the payload when Model is unset and the span is recording.
+func fallbackModel(r asyncapi.Request, recording bool) string {
+	if !recording || r.ReqModel() != "" {
+		return ""
+	}
+	return payloadModel(r.ReqPayload())
+}
+
+func payloadModel(payload json.RawMessage) string {
+	var p struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.Model
 }

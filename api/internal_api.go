@@ -35,11 +35,14 @@ type InternalRouting struct {
 	RetryCount             int    `json:"retry_count,omitempty"`
 	QueueID                string `json:"queue_id,omitempty"`
 	RequestToken           string `json:"request_token,omitempty"`
+	DispatchEpoch          int64  `json:"dispatch_epoch,omitempty"`
 	RequestQueueName       string `json:"request_queue_name,omitempty"`
 	ResultQueueName        string `json:"result_queue_name,omitempty"`
 	ResultTTLSeconds       int64  `json:"result_ttl_seconds,omitempty"`
 	ResultRoutingResolved  bool   `json:"result_routing_resolved,omitempty"`
 	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
+	// PayloadRef is empty when the payload travels inline.
+	PayloadRef string `json:"payload_ref,omitempty"`
 	// Labels is the framework's per-message label set. Seeded by the
 	// Flow at pull time from the originating channel's effective
 	// policy read and mutate this map in place. Producer-controlled

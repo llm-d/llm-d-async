@@ -33,7 +33,7 @@ var _ = ginkgo.Describe("OpenTelemetry tracing", ginkgo.Ordered, func() {
 			ID:       "otel-propagation-test",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(2 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "otel-propagation-test", "prompt": "test"},
+			Payload:  testPayload(map[string]any{"model": "otel-propagation-test", "prompt": "test"}),
 			Metadata: map[string]string{
 				"traceparent": traceparent,
 			},

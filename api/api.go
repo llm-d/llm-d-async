@@ -12,10 +12,11 @@ type Request interface {
 	ReqID() string
 	ReqCreated() int64
 	ReqDeadline() int64
-	ReqPayload() map[string]any
+	ReqPayload() json.RawMessage
 	ReqMetadata() map[string]string
 	ReqHeaders() map[string]string
 	ReqEndpoint() string
+	ReqModel() string
 }
 
 // FairnessIDHeader is the request header llm-d-router's flow control reads to
@@ -41,19 +42,22 @@ type RequestMessage struct {
 	ID       string            `json:"id"`
 	Created  int64             `json:"created"`  // Unix seconds
 	Deadline int64             `json:"deadline"` // Unix seconds
-	Payload  map[string]any    `json:"payload"`
+	Payload  json.RawMessage   `json:"payload"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 	Headers  map[string]string `json:"headers,omitempty"`
 	Endpoint string            `json:"endpoint,omitempty"`
+	// Model is empty when the producer does not set it.
+	Model string `json:"model,omitempty"`
 }
 
 func (r *RequestMessage) ReqID() string                  { return r.ID }
 func (r *RequestMessage) ReqCreated() int64              { return r.Created }
 func (r *RequestMessage) ReqDeadline() int64             { return r.Deadline }
-func (r *RequestMessage) ReqPayload() map[string]any     { return r.Payload }
+func (r *RequestMessage) ReqPayload() json.RawMessage    { return r.Payload }
 func (r *RequestMessage) ReqMetadata() map[string]string { return r.Metadata }
 func (r *RequestMessage) ReqHeaders() map[string]string  { return r.Headers }
 func (r *RequestMessage) ReqEndpoint() string            { return r.Endpoint }
+func (r *RequestMessage) ReqModel() string               { return r.Model }
 
 // RedisRequest is the concrete Request implementation for Redis-based flows.
 // Per-message queue fields here override producer defaults; producers merge them
@@ -118,6 +122,11 @@ func RequestCancellationKey(requestID string) string {
 // RequestActiveTokenKey returns the Redis key tracking the currently active request generation.
 func RequestActiveTokenKey(requestID string) string {
 	return "request-active:" + requestID
+}
+
+// RequestPayloadKey returns the Redis key holding the payload of one request generation.
+func RequestPayloadKey(requestID, requestToken string) string {
+	return "request-payload:" + requestID + ":" + requestToken
 }
 
 // NewErrorResult builds a non-HTTP error ResultMessage.

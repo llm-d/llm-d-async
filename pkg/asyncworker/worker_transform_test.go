@@ -78,7 +78,7 @@ func TestWorker_TransformRewritesOutgoingRequest(t *testing.T) {
 		ID:       "m1",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "whisper", "gcs_uri": "https://storage.example/audio.mp3?signature=test"},
+		Payload:  testPayload(map[string]any{"model": "whisper", "gcs_uri": "https://storage.example/audio.mp3?signature=test"}),
 		Metadata: map[string]string{"provider": "whisper"},
 	}, "http://localhost/v1/audio/transcriptions", map[string]string{})
 
@@ -125,7 +125,7 @@ func TestWorker_SpanOnTransformError(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-transform", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload: map[string]any{"model": "whisper"},
+		Payload: testPayload(map[string]any{"model": "whisper"}),
 	}, "http://localhost/v1/audio/transcriptions", nil)
 
 	select {
@@ -185,7 +185,7 @@ func TestWorker_TransformValidateFatal(t *testing.T) {
 		ID:       "m2",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "whisper"},
+		Payload:  testPayload(map[string]any{"model": "whisper"}),
 		Metadata: map[string]string{"provider": "whisper"},
 	}, "http://localhost/v1/audio/transcriptions", map[string]string{})
 

@@ -66,7 +66,7 @@ func registerTestClaim(ctx context.Context, flow *RedisSortedSetFlow, queueName,
 			ID:       reqID,
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Hour).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	payloadBytes, _ := json.Marshal(ir)
@@ -203,7 +203,7 @@ func TestSortedSetFlow_MessageProcessing(t *testing.T) {
 		ID:       "msg-1",
 		Created:  time.Now().Unix(),
 		Deadline: 9999999999,
-		Payload:  map[string]any{"test": "data"},
+		Payload:  testPayload(map[string]any{"test": "data"}),
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
@@ -1194,7 +1194,7 @@ func TestSortedSetFlow_ZeroBudget(t *testing.T) {
 		ID:       "test-zero-budget",
 		Created:  time.Now().Unix(),
 		Deadline: 9999999999,
-		Payload:  map[string]any{"test": "data"},
+		Payload:  testPayload(map[string]any{"test": "data"}),
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
@@ -1258,7 +1258,7 @@ func TestSortedSetFlow_ClosedGateRecordsGateClosedDecision(t *testing.T) {
 		ID:       "gate-closed-1",
 		Created:  time.Now().Unix(),
 		Deadline: 9999999999,
-		Payload:  map[string]any{"test": "data"},
+		Payload:  testPayload(map[string]any{"test": "data"}),
 	}
 	rdb.ZAdd(ctx, queue, redis.Z{Score: float64(time.Now().Unix()), Member: envelopeJSON(msg)})
 
@@ -1673,7 +1673,7 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 		ID:       "requeue-1",
 		Created:  time.Now().Unix(),
 		Deadline: 9999999999,
-		Payload:  map[string]any{"key": "value"},
+		Payload:  testPayload(map[string]any{"key": "value"}),
 	})
 	msgBytes, _ := json.Marshal(ir)
 	score := float64(time.Now().Unix())
@@ -2358,4 +2358,12 @@ func TestSortedSetFlow_QueueLabelsSetOnDequeue(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

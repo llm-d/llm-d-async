@@ -74,7 +74,7 @@ func TestTierPriorityGate_Integration(t *testing.T) {
 				ID:       "req-drop",
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(5 * time.Minute).Unix(),
-				Payload:  map[string]any{"model": "test"},
+				Payload:  testPayload(map[string]any{"model": "test"}),
 			},
 		)
 		ir.SetClassification(asyncapi.ClassificationOverflow)
@@ -109,7 +109,7 @@ func TestTierPriorityGate_Integration(t *testing.T) {
 				ID:       "req-refuse",
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(5 * time.Minute).Unix(),
-				Payload:  map[string]any{"model": "test"},
+				Payload:  testPayload(map[string]any{"model": "test"}),
 			},
 		)
 		ir.SetClassification(asyncapi.ClassificationOverflow)
@@ -143,7 +143,7 @@ func TestTierPriorityGate_Integration(t *testing.T) {
 				ID:       "req-refuse-batch",
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(5 * time.Minute).Unix(),
-				Payload:  map[string]any{"model": "test"},
+				Payload:  testPayload(map[string]any{"model": "test"}),
 			},
 		)
 		ir.SetClassification(asyncapi.ClassificationOverflow)

@@ -62,7 +62,7 @@ func TestSortedSetDeadlineViews_PollToMetrics(t *testing.T) {
 				ID:       fmt.Sprintf("int-msg-%d", i),
 				Created:  now,
 				Deadline: deadline,
-				Payload:  map[string]any{"prompt": "hi"},
+				Payload:  testPayload(map[string]any{"prompt": "hi"}),
 			},
 		)
 		irBytes, err := json.Marshal(ir)

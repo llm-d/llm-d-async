@@ -154,7 +154,7 @@ func TestSheddedRequest(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -191,7 +191,7 @@ func TestSuccessfulRequest(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -229,7 +229,7 @@ func TestSuccessfulRequest_PreservesActualStatusCode(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -332,7 +332,7 @@ func TestWorker_CancelledRequestSkipsInference(t *testing.T) {
 		ID:       msgID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -383,7 +383,7 @@ func TestWorker_CancellationCheckErrorRequeuesRequest(t *testing.T) {
 		ID:       msgID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -430,7 +430,7 @@ func TestWorker_FastPathChecksCancellationOnce(t *testing.T) {
 		ID:       msgID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -476,7 +476,7 @@ func TestWorker_PoolGateActionWaitThrottlesCancellationChecks(t *testing.T) {
 		ID:       "gate-wait-throttled",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -524,7 +524,7 @@ func TestWorker_PoolGateWaitTimeoutReenqueues(t *testing.T) {
 		ID:       "gate-wait-timeout",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 	msg.QueueID = "gate-wait-timeout-q"
 	msg.RequestQueueName = "gate-wait-timeout-queue"
@@ -568,7 +568,7 @@ func TestWorker_PoolGatePublicDeadlineDoesNotCountWaitTimeout(t *testing.T) {
 		ID:       "gate-wait-public-deadline",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Unix() + 1,
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 	msg.QueueID = "gate-wait-public-deadline-q"
 	msg.RequestQueueName = "gate-wait-public-deadline-queue"
@@ -611,7 +611,7 @@ func TestWorker_PoolGateWaitDoesNotConsumeInferenceTimeout(t *testing.T) {
 		ID:       "gate-wait-independent-timeout",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -663,7 +663,7 @@ func TestFatalError_NoRetry(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -717,7 +717,7 @@ func TestRateLimitRequest(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -753,7 +753,7 @@ func TestRequestTimeout(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -1041,7 +1041,7 @@ func TestRateLimitRequest_WithRetryAfterHeader(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -1141,7 +1141,7 @@ func TestWorker_cancelledCtxExitsPromptly(t *testing.T) {
 		ID:       "worker-cancel-test",
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	// Give the worker a moment to pick up the message and attempt the send,
@@ -1179,7 +1179,7 @@ func TestClientError_NoRetry(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
-		Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -1224,7 +1224,7 @@ func TestWorker_RetriesOnShutdown(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(5 * time.Minute).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	<-reqStarted
@@ -1299,7 +1299,7 @@ func TestWorker_DrainsBufferedMessagesOnShutdown(t *testing.T) {
 					ID:       ids[i],
 					Created:  time.Now().Unix(),
 					Deadline: time.Now().Add(5 * time.Minute).Unix(),
-					Payload:  map[string]any{"model": "test", "prompt": "hi"},
+					Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 				}, "http://localhost:30800/v1/completions", map[string]string{})
 			}
 
@@ -1424,7 +1424,7 @@ func TestMetrics_QueueDepthAndInflightBalance(t *testing.T) {
 				ID:       "depth-msg",
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(100 * time.Second).Unix(),
-				Payload:  map[string]any{"model": "test", "prompt": "hi"},
+				Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 			}, "http://localhost:30800/v1/completions", nil)
 
 			// Wait for the terminal outcome so handling has completed.
@@ -1479,7 +1479,7 @@ func TestMetrics_QueueDepthDecrementsOnDrain(t *testing.T) {
 			ID:       fmt.Sprintf("drain-depth-%d", i),
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test", "prompt": "hi"},
+			Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 		}, "http://localhost:30800/v1/completions", nil)
 	}
 	consumeCancel()
@@ -1539,7 +1539,7 @@ func TestMetrics_SuccessfulRequest(t *testing.T) {
 		ID:       "m-success",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 	// Stamp ingestion time so the worker records queue residence time, mirroring
 	// what the broker producers do when a message enters the in-process buffer.
@@ -1600,7 +1600,7 @@ func TestMetrics_SuccessfulRequestRecordsTokens(t *testing.T) {
 		ID:       "m-tokens",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1645,7 +1645,7 @@ func TestMetrics_PromptOnlyUsageRegistersBothDirections(t *testing.T) {
 		ID:       "m-prompt",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1690,7 +1690,7 @@ func TestMetrics_NoUsageRecordsNoTokens(t *testing.T) {
 		ID:       "m-nousage",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1732,7 +1732,7 @@ func TestMetrics_NonOpenAIEndpointNotTokenized(t *testing.T) {
 		ID:       "m-otherurl",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/embeddings", nil)
 
 	select {
@@ -1774,7 +1774,7 @@ func TestMetrics_RedirectNotTokenized(t *testing.T) {
 		ID:       "m-3xx",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1815,7 +1815,7 @@ func TestMetrics_RateLimited(t *testing.T) {
 		ID:       "m-shedded",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1855,7 +1855,7 @@ func TestMetrics_FatalError(t *testing.T) {
 		ID:       "m-fatal",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1895,7 +1895,7 @@ func TestMetrics_DeadlineExceeded(t *testing.T) {
 		ID:       "m-deadline",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(-10 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1931,7 +1931,7 @@ func TestMetrics_LabelsIsolated(t *testing.T) {
 		QueueID: queueA, RequestQueueName: queueA,
 	}, asyncapi.RequestMessage{
 		ID: "iso-a", Created: time.Now().Unix(), Deadline: deadline,
-		Payload: map[string]any{"model": "test", "prompt": "hi"},
+		Payload: testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -1944,7 +1944,7 @@ func TestMetrics_LabelsIsolated(t *testing.T) {
 		QueueID: queueB, RequestQueueName: queueB,
 	}, asyncapi.RequestMessage{
 		ID: "iso-b", Created: time.Now().Unix(), Deadline: deadline,
-		Payload: map[string]any{"model": "test", "prompt": "hi"},
+		Payload: testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -2048,7 +2048,7 @@ func TestWorker_SpanOnSuccess(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-success", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 		Metadata: map[string]string{"model": "metadata-model"},
 	}, "http://localhost:30800/v1/completions", nil)
 
@@ -2082,12 +2082,12 @@ func TestWorker_SpanOnSuccess(t *testing.T) {
 func TestWorker_SpanOmitsUnavailableModel(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		payload map[string]any
+		payload json.RawMessage
 	}{
-		{name: "missing", payload: map[string]any{"prompt": "hi"}},
-		{name: "empty", payload: map[string]any{"model": ""}},
-		{name: "non-string", payload: map[string]any{"model": 42}},
-		{name: "null", payload: map[string]any{"model": nil}},
+		{name: "missing", payload: testPayload(map[string]any{"prompt": "hi"})},
+		{name: "empty", payload: testPayload(map[string]any{"model": ""})},
+		{name: "non-string", payload: testPayload(map[string]any{"model": 42})},
+		{name: "null", payload: testPayload(map[string]any{"model": nil})},
 		{name: "nil-payload"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2146,7 +2146,7 @@ func TestWorker_SpanOnFatalError(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-fatal", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload: map[string]any{"model": "test", "prompt": "hi"},
+		Payload: testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -2188,7 +2188,7 @@ func TestWorker_SpanOnRetryableError(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-429", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload: map[string]any{"model": "test", "prompt": "hi"},
+		Payload: testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -2227,7 +2227,7 @@ func TestWorker_SpanOnServerError(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-500", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload: map[string]any{"model": "test", "prompt": "hi"},
+		Payload: testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -2272,7 +2272,7 @@ func TestWorker_TraceContextExtraction(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-ctx", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 		Metadata: metadata,
 	}, "http://localhost:30800/v1/completions", nil)
 
@@ -2315,7 +2315,7 @@ func TestWorker_SpanOnShutdownReenqueue(t *testing.T) {
 
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID: "span-shutdown", Created: time.Now().Unix(), Deadline: time.Now().Add(5 * time.Minute).Unix(),
-		Payload: map[string]any{"model": "test", "prompt": "hi"},
+		Payload: testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	<-reqStarted
@@ -2377,7 +2377,7 @@ func TestWorker_SpanIncludesQueueName(t *testing.T) {
 		asyncapi.InternalRouting{QueueID: "my-test-qid", RequestQueueName: "my-test-queue", RetryCount: 3},
 		asyncapi.RequestMessage{
 			ID: "span-queue", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
-			Payload: map[string]any{"model": "test", "prompt": "hi"},
+			Payload: testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 		}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -2433,7 +2433,7 @@ func TestWorker_InFlightCompletesOnConsumeCancel(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(5 * time.Minute).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	<-reqStarted
@@ -2495,7 +2495,7 @@ func TestWorker_DrainTimeoutCancelsInFlight(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(5 * time.Minute).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	<-reqStarted
@@ -2566,7 +2566,7 @@ func TestWorker_DrainWithCancelledRequestCtx(t *testing.T) {
 			ID:       ids[i],
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test", "prompt": "hi"},
+			Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 		}, "http://localhost:30800/v1/completions", map[string]string{})
 	}
 
@@ -2703,7 +2703,7 @@ func TestWorker_PoolGateShutdownReenqueues(t *testing.T) {
 		ID:       "gate-shutdown-test",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 	msg.QueueID = "gate-shutdown-q"
 	msg.RequestQueueName = "gate-shutdown-queue"
@@ -2759,7 +2759,7 @@ func TestWorker_PoolGateActionWaitShutdownReenqueues(t *testing.T) {
 		ID:       "gate-wait-shutdown-test",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 	msg.QueueID = "gate-wait-shutdown-q"
 	msg.RequestQueueName = "gate-wait-shutdown-queue"
@@ -2816,7 +2816,7 @@ func TestWorker_PoolGateActionWaitHonorsCancellation(t *testing.T) {
 		ID:       msgID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -2874,7 +2874,7 @@ func TestWorker_RechecksCancellationAfterGateContinue(t *testing.T) {
 		ID:       msgID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -2933,7 +2933,7 @@ func TestWorker_RechecksCancellationImmediatelyBeforeSend(t *testing.T) {
 		ID:       msgID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(30 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "test", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", nil)
 
 	select {
@@ -3009,7 +3009,7 @@ func TestWorker_QueueGateAndPoolGateRace(t *testing.T) {
 			ID:       "req-race-test",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	var queueReleases []pipeline.GateReleaseFunc
@@ -3101,7 +3101,7 @@ func TestWorker_PoolGateDecisionsMetrics(t *testing.T) {
 			ID:       "req-dropped",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(30 * time.Second).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		}, "http://localhost:30800/v1/completions", nil)
 		msg.WorkerPoolID = poolID
 		requestChannel <- msg
@@ -3139,7 +3139,7 @@ func TestWorker_PoolGateDecisionsMetrics(t *testing.T) {
 			ID:       "req-closed",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(30 * time.Second).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		}, "http://localhost:30800/v1/completions", nil)
 		msg.WorkerPoolID = poolID
 		requestChannel <- msg
@@ -3179,7 +3179,7 @@ func TestWorker_PoolGateDecisionsMetrics(t *testing.T) {
 				ID:       "req-quota",
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(30 * time.Second).Unix(),
-				Payload:  map[string]any{"model": "test"},
+				Payload:  testPayload(map[string]any{"model": "test"}),
 			},
 		)
 		ir.SetClassification(asyncapi.ClassificationOverflow)
@@ -3223,7 +3223,7 @@ func TestWorker_PoolGateDecisionsMetrics(t *testing.T) {
 			ID:       "req-error",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(30 * time.Second).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		}, "http://localhost:30800/v1/completions", nil)
 		msg.WorkerPoolID = poolID
 		requestChannel <- msg
@@ -3261,7 +3261,7 @@ func TestWorker_PoolGateDecisionsMetrics(t *testing.T) {
 			ID:       "req-wait",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(30 * time.Second).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		}, "http://localhost:30800/v1/completions", nil)
 		msg.WorkerPoolID = poolID
 		requestChannel <- msg
@@ -3301,7 +3301,7 @@ func TestDeadlineAbortedSendClassifiedAsDeadlineExceeded(t *testing.T) {
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Second).Unix(),
-		Payload:  map[string]any{"model": "m", "prompt": "hi"},
+		Payload:  testPayload(map[string]any{"model": "m", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
 	select {
@@ -3314,4 +3314,96 @@ func TestDeadlineAbortedSendClassifiedAsDeadlineExceeded(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for result")
 	}
+}
+
+func TestValidateAndMarshal_ForwardsPayloadBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload json.RawMessage
+		want    string
+	}{
+		{name: "verbatim", payload: json.RawMessage(`{"z":1, "a":[2,  3]}`), want: `{"z":1, "a":[2,  3]}`},
+		{name: "missing payload", payload: nil, want: `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resultChannel := make(chan asyncapi.ResultMessage, 1)
+			msg := newEmb(asyncapi.RequestMessage{
+				ID: "fwd", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Minute).Unix(),
+				Payload: tc.payload,
+			}, "http://localhost/v1/completions", nil)
+			got := validateAndMarshal(context.Background(), resultChannel, msg, nil)
+			if string(got) != tc.want {
+				t.Fatalf("body = %s, want %s", got, tc.want)
+			}
+			select {
+			case r := <-resultChannel:
+				t.Fatalf("unexpected result %+v", r)
+			default:
+			}
+		})
+	}
+}
+
+func TestWorker_SpanPrefersRequestModel(t *testing.T) {
+	exporter := setupTestTracer(t)
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go Worker(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "span-model-field", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload: testPayload(map[string]any{"model": "from-payload"}),
+		Model:   "from-request",
+	}, "http://localhost:30800/v1/completions", nil)
+
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	s := findSpan(getSpansEventually(t, exporter, 1), "process-request")
+	if s == nil {
+		t.Fatal("expected 'process-request' span")
+	}
+	assertSpanAttributes(t, s, attribute.String("gen_ai.request.model", "from-request"))
+}
+
+func TestFallbackModel(t *testing.T) {
+	withModel := &asyncapi.RequestMessage{Model: "set", Payload: json.RawMessage(`{"model":"payload"}`)}
+	withoutModel := &asyncapi.RequestMessage{Payload: json.RawMessage(`{"model":"payload"}`)}
+	unparseable := &asyncapi.RequestMessage{Payload: json.RawMessage(`{not json`)}
+
+	for _, tc := range []struct {
+		name      string
+		req       asyncapi.Request
+		recording bool
+		want      string
+	}{
+		{"model set, sampled", withModel, true, ""},
+		{"model set, not sampled", withModel, false, ""},
+		{"no model, not sampled", withoutModel, false, ""},
+		{"no model, sampled", withoutModel, true, "payload"},
+		{"no model, sampled, unparseable payload", unparseable, true, ""},
+	} {
+		if got := fallbackModel(tc.req, tc.recording); got != tc.want {
+			t.Errorf("%s: fallbackModel = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
