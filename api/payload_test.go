@@ -28,7 +28,21 @@ func splitFixtures() map[string]*InternalRequest {
 	}
 }
 
-func TestSplitJoinPayload_RoundTripsEveryRequestKind(t *testing.T) {
+// rejoin decodes an envelope written by SplitPayload and attaches payload, the
+// way a transport that stores the two apart reads a request back.
+func rejoin(t *testing.T, envelope []byte, payload json.RawMessage) *InternalRequest {
+	t.Helper()
+	var ir InternalRequest
+	if err := json.Unmarshal(envelope, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if err := AttachPayload(&ir, payload); err != nil {
+		t.Fatal(err)
+	}
+	return &ir
+}
+
+func TestSplitPayload_RoundTripsEveryRequestKind(t *testing.T) {
 	for name, ir := range splitFixtures() {
 		t.Run(name, func(t *testing.T) {
 			ir.RequestToken = "gen-1"
@@ -43,15 +57,12 @@ func TestSplitJoinPayload_RoundTripsEveryRequestKind(t *testing.T) {
 				t.Fatalf("envelope carries the payload: %s", envelope)
 			}
 
-			var got InternalRequest
-			if err := JoinPayload(envelope, payload, &got); err != nil {
-				t.Fatal(err)
-			}
+			got := rejoin(t, envelope, payload)
 			want, err := json.Marshal(ir)
 			if err != nil {
 				t.Fatal(err)
 			}
-			have, err := json.Marshal(&got)
+			have, err := json.Marshal(got)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,17 +87,14 @@ func TestSplitPayload_LeavesTheRequestUntouched(t *testing.T) {
 	}
 }
 
-func TestJoinPayload_AttachesPayloadBytesAsGiven(t *testing.T) {
+func TestAttachPayload_KeepsPayloadBytesAsGiven(t *testing.T) {
 	ir := splitFixtures()["plain"]
 	envelope, _, err := SplitPayload(ir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	payload := json.RawMessage(`{ "b":2,  "a":1 }`)
-	var got InternalRequest
-	if err := JoinPayload(envelope, payload, &got); err != nil {
-		t.Fatal(err)
-	}
+	got := rejoin(t, envelope, payload)
 	if &got.PublicRequest.ReqPayload()[0] != &payload[0] {
 		t.Fatal("payload was copied")
 	}
@@ -101,22 +109,6 @@ func TestSplitPayload_Errors(t *testing.T) {
 	}
 	if _, _, err := SplitPayload(NewInternalRequest(InternalRouting{}, &unsupportedRequest{})); err == nil {
 		t.Fatal("unsupported request type: want error")
-	}
-}
-
-func TestJoinPayload_RejectsBadEnvelopes(t *testing.T) {
-	for name, envelope := range map[string]string{
-		"not json":         `#lda1:3:{}`,
-		"missing kind":     `{"internal":{},"data":{"id":"x"}}`,
-		"unknown kind":     `{"internal":{},"request_kind":"nope","data":{"id":"x"}}`,
-		"truncated object": `{"internal":{},"request_kind":"plain","data":{"id":"x"`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			var ir InternalRequest
-			if err := JoinPayload([]byte(envelope), json.RawMessage(`{}`), &ir); err == nil {
-				t.Fatal("want error")
-			}
-		})
 	}
 }
 

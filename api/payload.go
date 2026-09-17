@@ -10,23 +10,18 @@ func SplitPayload(ir *InternalRequest) (envelope []byte, payload json.RawMessage
 	if ir == nil || ir.PublicRequest == nil {
 		return nil, nil, fmt.Errorf("api: split payload: request is nil")
 	}
-	header, payload, err := withoutPayload(ir.PublicRequest)
+	msg, err := requestMessageOf(ir.PublicRequest)
 	if err != nil {
 		return nil, nil, err
 	}
-	envelope, err = json.Marshal(&InternalRequest{InternalRouting: ir.InternalRouting, PublicRequest: header})
+	payload = msg.Payload
+	msg.Payload = nil
+	envelope, err = json.Marshal(ir)
+	msg.Payload = payload
 	if err != nil {
 		return nil, nil, fmt.Errorf("api: split payload: %w", err)
 	}
 	return envelope, payload, nil
-}
-
-// JoinPayload decodes an envelope written by SplitPayload into ir and attaches payload as given.
-func JoinPayload(envelope []byte, payload json.RawMessage, ir *InternalRequest) error {
-	if err := json.Unmarshal(envelope, ir); err != nil {
-		return fmt.Errorf("api: join payload: %w", err)
-	}
-	return AttachPayload(ir, payload)
 }
 
 // AttachPayload sets the payload of an already decoded request.
@@ -40,24 +35,6 @@ func AttachPayload(ir *InternalRequest, payload json.RawMessage) error {
 	}
 	msg.Payload = payload
 	return nil
-}
-
-func withoutPayload(r Request) (Request, json.RawMessage, error) {
-	switch m := r.(type) {
-	case *RequestMessage:
-		c := *m
-		c.Payload = nil
-		return &c, m.Payload, nil
-	case *RedisRequest:
-		c := *m
-		c.Payload = nil
-		return &c, m.Payload, nil
-	case *PubSubRequest:
-		c := *m
-		c.Payload = nil
-		return &c, m.Payload, nil
-	}
-	return nil, nil, fmt.Errorf("api: unsupported PublicRequest type %T", r)
 }
 
 func requestMessageOf(r Request) (*RequestMessage, error) {

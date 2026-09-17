@@ -860,7 +860,8 @@ func TestRedisSortedSetProducer_StoresPayloadApartFromTheQueuedEnvelope(t *testi
 		assert.LessOrEqual(t, ttl, time.Until(deadline)+payloadTTLGrace+time.Second)
 
 		var joined api.InternalRequest
-		require.NoError(t, api.JoinPayload([]byte(member), json.RawMessage(stored), &joined))
+		require.NoError(t, json.Unmarshal([]byte(member), &joined))
+		require.NoError(t, api.AttachPayload(&joined, json.RawMessage(stored)))
 		refs[ir.PayloadRef] = true
 		if string(joined.PublicRequest.ReqPayload()) != payload {
 			assert.JSONEq(t, `{"prompt":"second"}`, string(joined.PublicRequest.ReqPayload()))
