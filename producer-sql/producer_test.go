@@ -34,6 +34,14 @@ func message(id string) *api.RequestMessage {
 	return &api.RequestMessage{ID: id, Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: testPayload(map[string]any{"prompt": id})}
 }
 
+func decodeRow(t *testing.T, row sqlqueue.Request) *api.InternalRequest {
+	t.Helper()
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(row.Envelope), &ir))
+	require.NoError(t, api.AttachPayload(&ir, row.Payload))
+	return &ir
+}
+
 func dispatchAll(t *testing.T, store *sqlqueue.Store, queue string) (*sqlqueue.Consumer, []sqlqueue.Request) {
 	t.Helper()
 	ctx := context.Background()
@@ -77,9 +85,11 @@ func TestSubmitRequestsStampsRoutingAndTokens(t *testing.T) {
 	require.Len(t, rows, 2)
 	tokens := map[string]bool{}
 	for _, row := range rows {
-		var ir api.InternalRequest
-		require.NoError(t, json.Unmarshal([]byte(row.Payload), &ir))
+		assert.NotContains(t, row.Envelope, `"prompt"`, "the envelope does not carry the payload")
+		assert.JSONEq(t, `{"prompt":"`+row.ID+`"}`, string(row.Payload))
+		ir := decodeRow(t, row)
 		assert.Equal(t, row.ID, ir.PublicRequest.ReqID())
+		assert.JSONEq(t, `{"prompt":"`+row.ID+`"}`, string(ir.PublicRequest.ReqPayload()))
 		assert.Equal(t, "requests", ir.RequestQueueName)
 		assert.Equal(t, "results", ir.ResultQueueName)
 		assert.Equal(t, row.Token, ir.RequestToken)
@@ -90,8 +100,7 @@ func TestSubmitRequestsStampsRoutingAndTokens(t *testing.T) {
 
 	_, rows = dispatchAll(t, store, "other")
 	require.Len(t, rows, 1)
-	var ir api.InternalRequest
-	require.NoError(t, json.Unmarshal([]byte(rows[0].Payload), &ir))
+	ir := decodeRow(t, rows[0])
 	assert.Equal(t, "elsewhere", ir.ResultQueueName, "per-message queue overrides are kept")
 }
 
@@ -108,11 +117,24 @@ func TestSubmitRequestsKeepsTheModel(t *testing.T) {
 	require.Len(t, rows, 2)
 	models := map[string]string{}
 	for _, row := range rows {
-		var ir api.InternalRequest
-		require.NoError(t, json.Unmarshal([]byte(row.Payload), &ir))
+		ir := decodeRow(t, row)
 		models[row.ID] = ir.PublicRequest.ReqModel()
 	}
 	assert.Equal(t, map[string]string{"plain": "m-plain", "other": "m-other"}, models)
+}
+
+func TestSubmitRequestsStoresAnEmptyPayload(t *testing.T) {
+	p, store := newProducer(t)
+	ctx := context.Background()
+	empty := message("empty")
+	empty.Payload = nil
+	require.NoError(t, p.SubmitRequests(ctx, []api.Request{empty}))
+
+	_, rows := dispatchAll(t, store, "requests")
+	require.Len(t, rows, 1)
+	assert.Empty(t, rows[0].Payload)
+	ir := decodeRow(t, rows[0])
+	assert.Empty(t, ir.PublicRequest.ReqPayload())
 }
 
 func TestGetResultsReturnsBatchesInOrder(t *testing.T) {

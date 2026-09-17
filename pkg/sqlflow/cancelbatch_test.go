@@ -35,7 +35,7 @@ func TestCancelBatcherCoalescesConcurrentChecks(t *testing.T) {
 	reqs := make([]sqlqueue.Request, 0, 20)
 	for i := range 20 {
 		reqs = append(reqs, sqlqueue.Request{
-			ID: "req-" + string(rune('a'+i)), Token: "t", Queue: "q", Deadline: deadline, Payload: "{}",
+			ID: "req-" + string(rune('a'+i)), Token: "t", Queue: "q", Deadline: deadline, Envelope: "{}", Payload: []byte("{}"),
 		})
 	}
 	require.NoError(t, store.Enqueue(ctx, reqs...))
@@ -72,7 +72,7 @@ func TestCancelBatcherRespectsBatchSize(t *testing.T) {
 	store := cancelTestStore(t)
 	ctx := context.Background()
 	require.NoError(t, store.Enqueue(ctx, sqlqueue.Request{
-		ID: "solo", Token: "t", Queue: "q", Deadline: time.Now().Add(time.Hour).Unix(), Payload: "{}",
+		ID: "solo", Token: "t", Queue: "q", Deadline: time.Now().Add(time.Hour).Unix(), Envelope: "{}", Payload: []byte("{}"),
 	}))
 
 	// A batch of one still answers correctly, and every caller costs a query.

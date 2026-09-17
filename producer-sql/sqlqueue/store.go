@@ -116,7 +116,8 @@ type Request struct {
 	Partition int
 	Epoch     int64
 	Deadline  int64
-	Payload   string
+	Envelope  string
+	Payload   []byte
 	Cancelled bool
 	createdAt int64
 }
@@ -152,18 +153,20 @@ func (s *Store) Enqueue(ctx context.Context, reqs ...Request) error {
 			queues := make([]string, len(chunk))
 			parts := make([]int32, len(chunk))
 			deadlines := make([]int64, len(chunk))
-			payloads := make([]string, len(chunk))
+			envelopes := make([]string, len(chunk))
+			payloads := make([][]byte, len(chunk))
 			created := make([]int64, len(chunk))
 			for i, r := range chunk {
 				ids[i], tokens[i], queues[i] = r.ID, r.Token, r.Queue
 				// #nosec G115 -- partitionOf returns 0..Partitions-1
-				parts[i], deadlines[i], payloads[i] = int32(partitionOf(r.ID)), r.Deadline, r.Payload
+				parts[i], deadlines[i] = int32(partitionOf(r.ID)), r.Deadline
+				envelopes[i], payloads[i] = r.Envelope, r.Payload
 				created[i] = createdAt + int64(start+i)
 			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO async_requests (id, request_token, queue, partition_id, deadline, payload, created_at)
-				SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::bigint[], $6::text[], $7::bigint[])`,
-				ids, tokens, queues, parts, deadlines, payloads, created); err != nil {
+				INSERT INTO async_requests (id, request_token, queue, partition_id, deadline, envelope, payload, created_at)
+				SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::bigint[], $6::text[], $7::bytea[], $8::bigint[])`,
+				ids, tokens, queues, parts, deadlines, envelopes, payloads, created); err != nil {
 				return fmt.Errorf("insert chunk: %w", err)
 			}
 		}
@@ -196,7 +199,7 @@ func (s *Store) Dispatch(ctx context.Context, queue, owner string, now time.Time
 			AND (async_requests.id, async_requests.request_token) IN (SELECT id, request_token FROM picked)
 		RETURNING async_requests.id, async_requests.request_token, async_requests.queue,
 			async_requests.partition_id, async_requests.dispatch_epoch, async_requests.deadline,
-			async_requests.payload, async_requests.cancelled, async_requests.created_at`,
+			async_requests.envelope, async_requests.payload, async_requests.cancelled, async_requests.created_at`,
 		owner, queue, now.Unix(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlqueue: dispatch %q: %w", queue, err)
@@ -206,7 +209,7 @@ func (s *Store) Dispatch(ctx context.Context, queue, owner string, now time.Time
 	for rows.Next() {
 		var r Request
 		var cancelled int
-		if err := rows.Scan(&r.ID, &r.Token, &r.Queue, &r.Partition, &r.Epoch, &r.Deadline, &r.Payload, &cancelled, &r.createdAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Token, &r.Queue, &r.Partition, &r.Epoch, &r.Deadline, &r.Envelope, &r.Payload, &cancelled, &r.createdAt); err != nil {
 			return nil, fmt.Errorf("sqlqueue: dispatch scan: %w", err)
 		}
 		r.Cancelled = cancelled == 1
@@ -312,15 +315,16 @@ func (s *Store) Undispatch(ctx context.Context, owner string, stamps []Stamp) er
 	return nil
 }
 
-func (s *Store) Retry(ctx context.Context, owner string, stamp Stamp, notBefore int64, payload string) (bool, error) {
+// Retry parks a dispatched request until notBefore with an updated envelope; its payload is unchanged.
+func (s *Store) Retry(ctx context.Context, owner string, stamp Stamp, notBefore int64, envelope string) (bool, error) {
 	ctx, span := s.span(ctx, "Retry")
 	defer span.End()
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE async_requests SET dispatch_epoch = 0, not_before = $4, payload = $5
+		UPDATE async_requests SET dispatch_epoch = 0, not_before = $4, envelope = $5
 		WHERE id = $1 AND request_token = $2 AND dispatch_epoch = $6 AND EXISTS (
 			SELECT 1 FROM async_partitions p
 			WHERE p.queue = async_requests.queue AND p.partition_id = async_requests.partition_id AND p.owner = $3)`,
-		stamp.ID, stamp.Token, owner, notBefore, payload, stamp.Epoch)
+		stamp.ID, stamp.Token, owner, notBefore, envelope, stamp.Epoch)
 	if err != nil {
 		return false, fmt.Errorf("sqlqueue: retry %q: %w", stamp.ID, err)
 	}
