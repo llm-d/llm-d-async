@@ -77,28 +77,6 @@ func TestLoadRequests_AttachesReferencedPayloads(t *testing.T) {
 	}
 }
 
-func TestLoadRequests_RejectsAPayloadThatIsNotJSON(t *testing.T) {
-	_, rdb, ctx, cancel := setupTest(t)
-	defer cancel()
-	defer rdb.Close() // nolint:errcheck
-	flow := &RedisSortedSetFlow{rdb: rdb}
-	ir, member := pointerRequest(t, "corrupt", time.Now().Add(time.Hour).Unix(), `{"prompt":"corrupt"}`)
-	if err := rdb.Set(ctx, ir.PayloadRef, `{"prompt":`, 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := flow.loadRequests(ctx, []redis.Z{{Member: member}}, float64(time.Now().Unix()), logr.Discard())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got[0].payloadErr == "" {
-		t.Fatal("a stored payload that is not JSON must not reach dispatch")
-	}
-	if strings.Contains(string(got[0].ir.PublicRequest.ReqPayload()), "prompt") {
-		t.Fatalf("the corrupt payload was attached: %s", got[0].ir.PublicRequest.ReqPayload())
-	}
-}
-
 func TestLoadRequests_FetchErrorFailsTheBatch(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer cancel()

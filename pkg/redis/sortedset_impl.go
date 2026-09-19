@@ -1052,15 +1052,12 @@ func (r *RedisSortedSetFlow) loadRequests(ctx context.Context, zs []redis.Z, now
 	for j, v := range values {
 		p := &out[at[j]]
 		payload, found := v.(string)
-		switch {
-		case !found:
+		if !found {
 			p.payloadErr = "request payload is missing"
-		case !json.Valid([]byte(payload)):
-			p.payloadErr = "request payload is not valid JSON"
-		default:
-			if err := api.AttachPayload(p.ir, json.RawMessage(payload)); err != nil {
-				p.payloadErr = "request payload could not be attached"
-			}
+			continue
+		}
+		if err := api.AttachPayload(p.ir, json.RawMessage(payload)); err != nil {
+			p.payloadErr = "request payload could not be attached"
 		}
 	}
 	return out, nil
