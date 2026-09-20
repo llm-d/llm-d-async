@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-async/api"
-	"github.com/llm-d/llm-d-async/producer-gcp"
+	producergcp "github.com/llm-d/llm-d-async/producer-gcp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )

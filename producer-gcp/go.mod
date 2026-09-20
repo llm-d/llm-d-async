@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.7.0
-	github.com/llm-d/llm-d-async/api v0.9.1
+	github.com/llm-d/llm-d-async/api v0.10.0
 	google.golang.org/api v0.297.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
