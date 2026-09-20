@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-async/api"
+	producergcp "github.com/llm-d/llm-d-async/producer-gcp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -99,5 +100,29 @@ var _ = ginkgo.Describe("GCP PubSub Integration", func() {
 		}, 120*time.Second, 1*time.Second).ShouldNot(gomega.BeNil())
 
 		gomega.Expect(result.ID).To(gomega.Equal("pubsub-retry-msg"))
+	})
+
+	ginkgo.It("processes a message via the producer-gcp library", func() {
+		const route = "producer-gcp-e2e"
+		deletePubSubSubscription(ctx, pubsubClient, pubsubProjectID, route)
+
+		p, err := producergcp.NewProducer(producergcp.Config{
+			ProjectID:             pubsubProjectID,
+			RequestTopicID:        pubsubRequestTopic,
+			RequestSubscriptionID: pubsubRequestSub,
+			ResultTopicID:         pubsubResultTopic,
+			ResultRoute:           route,
+		}, producergcp.WithPubSubClient(pubsubClient))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(func() { _ = p.Close() })
+
+		msg := makeRequestMessage("pubsub-producer-lib-1", 5*time.Minute)
+		gomega.Expect(p.SubmitRequest(ctx, &msg)).To(gomega.Succeed())
+
+		getCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		result, err := p.GetResult(getCtx)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(result.ID).To(gomega.Equal("pubsub-producer-lib-1"))
 	})
 })
