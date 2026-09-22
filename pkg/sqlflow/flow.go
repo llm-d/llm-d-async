@@ -294,11 +294,17 @@ func (f *Flow) heartbeat(ctx context.Context) {
 
 func (f *Flow) rebalance(ctx context.Context) {
 	logger := log.FromContext(ctx)
+	var wg sync.WaitGroup
 	for _, q := range f.queues {
-		if err := f.rebalanceQueue(ctx, q); err != nil && ctx.Err() == nil {
-			logger.V(logutil.DEFAULT).Error(err, "Failed to rebalance partitions", "queue", q.config.QueueName)
-		}
+		wg.Add(1)
+		go func(q *queueRuntime) {
+			defer wg.Done()
+			if err := f.rebalanceQueue(ctx, q); err != nil && ctx.Err() == nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to rebalance partitions", "queue", q.config.QueueName)
+			}
+		}(q)
 	}
+	wg.Wait()
 }
 
 func (f *Flow) rebalanceQueue(ctx context.Context, q *queueRuntime) error {
