@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -518,17 +517,28 @@ func (s *Store) HasRequests(ctx context.Context, queue string) (bool, error) {
 }
 
 func (s *Store) Backlog(ctx context.Context, queue string, now int64, windows []int64) (depth int64, expiring []int64, err error) {
-	const count = `
-		SELECT (SELECT COUNT(*) FROM async_requests WHERE queue = $1 AND dispatch_epoch = 0 AND deadline <= $2)
-			+ (SELECT COUNT(*) FROM async_requests WHERE queue = $1 AND dispatch_epoch > 0 AND deadline <= $2)`
-	if err := s.db.QueryRowContext(ctx, count, queue, int64(math.MaxInt64)).Scan(&depth); err != nil {
-		return 0, nil, fmt.Errorf("sqlqueue: backlog depth %q: %w", queue, err)
+	counts := make([]string, len(windows))
+	args := make([]any, 0, len(windows)+1)
+	args = append(args, queue)
+	for i, w := range windows {
+		counts[i] = ", COUNT(*) FILTER (WHERE deadline <= $" + strconv.Itoa(i+2) + ")"
+		args = append(args, now+w)
 	}
 	expiring = make([]int64, len(windows))
-	for i, w := range windows {
-		if err := s.db.QueryRowContext(ctx, count, queue, now+w).Scan(&expiring[i]); err != nil {
-			return 0, nil, fmt.Errorf("sqlqueue: backlog window %q: %w", queue, err)
-		}
+	dest := make([]any, 0, len(windows)+1)
+	dest = append(dest, &depth)
+	for i := range expiring {
+		dest = append(dest, &expiring[i])
+	}
+	// #nosec G202 -- only generated placeholders are concatenated, the windows bind as parameters
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)`+strings.Join(counts, "")+`
+		FROM (
+			SELECT deadline FROM async_requests WHERE queue = $1 AND dispatch_epoch = 0
+			UNION ALL
+			SELECT deadline FROM async_requests WHERE queue = $1 AND dispatch_epoch > 0
+		) r`, args...).Scan(dest...); err != nil {
+		return 0, nil, fmt.Errorf("sqlqueue: backlog %q: %w", queue, err)
 	}
 	return depth, expiring, nil
 }
