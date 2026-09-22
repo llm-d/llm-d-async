@@ -330,7 +330,7 @@ func TestConsumerRepolledOrphanIsNotReset(t *testing.T) {
 	})
 }
 
-func TestConsumerPollDropsRequestsItAlreadyTracks(t *testing.T) {
+func TestConsumerPollHandsOutARedispatchedRequest(t *testing.T) {
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		now := time.Now()
@@ -343,8 +343,40 @@ func TestConsumerPollDropsRequestsItAlreadyTracks(t *testing.T) {
 		ok, err := s.Retry(ctx, "a", stamp, 0, `{"id":"twice"}`)
 		require.NoError(t, err)
 		require.True(t, ok)
-		assert.Empty(t, poll(t, a, now), "a request already in flight is not handed out again")
+		assert.Equal(t, []string{"twice"}, poll(t, a, now), "a request dispatched again is handed out again")
 		assert.Equal(t, 1, inflightOf(a))
+		active, _ := owned(a)
+		inflight := 0
+		for _, p := range active {
+			inflight += a.leases[p].inflight
+		}
+		assert.Equal(t, 1, inflight, "the partition counts the request once")
+		assert.True(t, ack(t, a, "twice"))
+	})
+}
+
+func TestConsumerRedeliversAfterReacquiringAPartition(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		a := newConsumer(s, "a")
+		rebalance(t, a, now)
+		require.NoError(t, s.Enqueue(ctx, req("slow", now.Unix()+3600)))
+		require.Equal(t, []string{"slow"}, poll(t, a, now))
+		old := a.stamps([]Key{{ID: "slow", Token: "t"}})[0]
+
+		require.NoError(t, s.ReleasePartitions(ctx, "q", "a", allPartitionIDs()))
+		rebalance(t, a, now)
+		active, _ := owned(a)
+		require.Len(t, active, Partitions)
+
+		assert.Equal(t, []string{"slow"}, poll(t, a, now), "the reset request is handed out under the new epoch")
+		stale := completion("slow", "route")
+		stale.Epoch = old.Epoch
+		acked, err := a.Ack(ctx, []Completion{stale})
+		require.NoError(t, err)
+		assert.False(t, acked[0], "the attempt from the old epoch is fenced")
+		assert.True(t, ack(t, a, "slow"), "the attempt from the new epoch completes")
 	})
 }
 
