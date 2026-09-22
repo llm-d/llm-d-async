@@ -69,19 +69,19 @@ func (c *Consumer) Poll(ctx context.Context, now time.Time, limit int) ([]Reques
 		c.reconcile = true
 		return nil, err
 	}
-	out := rows[:0]
 	for _, r := range rows {
-		if _, dup := c.inflight[r.Key()]; dup {
-			continue
+		if prev, ok := c.inflight[r.Key()]; ok {
+			if st, ok := c.leases[prev.partition]; ok && st.inflight > 0 {
+				st.inflight--
+			}
 		}
 		delete(c.orphans, r.Key())
 		c.inflight[r.Key()] = tracked{partition: r.Partition, epoch: r.Epoch}
 		if st, ok := c.leases[r.Partition]; ok {
 			st.inflight++
 		}
-		out = append(out, r)
 	}
-	return out, nil
+	return rows, nil
 }
 
 func (c *Consumer) Ack(ctx context.Context, completions []Completion) ([]bool, error) {
