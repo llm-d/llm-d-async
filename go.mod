@@ -7,6 +7,7 @@ require (
 	cloud.google.com/go/pubsub/v2 v2.7.0
 	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/go-logr/logr v1.4.4
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/llm-d/llm-d-async/api v0.10.0
 	github.com/llm-d/llm-d-async/pipeline v0.10.0
 	github.com/llm-d/llm-d-async/producer v0.10.0
@@ -93,7 +94,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.9.2 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect

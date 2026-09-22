@@ -2,11 +2,13 @@ package sqlflow
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -41,7 +43,7 @@ func TestCancelBatcherCoalescesConcurrentChecks(t *testing.T) {
 	require.NoError(t, store.Enqueue(ctx, reqs...))
 	require.NoError(t, store.Cancel(ctx, []string{"req-c"}))
 
-	b := newCancelBatcher(store, 256, 5*time.Millisecond)
+	b := newCancelBatcher(store, 256, 5*time.Millisecond, time.Second)
 	defer b.stop()
 
 	const checks = 200
@@ -76,7 +78,7 @@ func TestCancelBatcherRespectsBatchSize(t *testing.T) {
 	}))
 
 	// A batch of one still answers correctly, and every caller costs a query.
-	b := newCancelBatcher(store, 1, time.Millisecond)
+	b := newCancelBatcher(store, 1, time.Millisecond, time.Second)
 	defer b.stop()
 
 	for range 3 {
@@ -89,7 +91,7 @@ func TestCancelBatcherRespectsBatchSize(t *testing.T) {
 
 func TestCancelBatcherUnknownRequestIsNotCancelled(t *testing.T) {
 	store := cancelTestStore(t)
-	b := newCancelBatcher(store, 256, 5*time.Millisecond)
+	b := newCancelBatcher(store, 256, 5*time.Millisecond, time.Second)
 	defer b.stop()
 
 	cancelled, err := b.isCancelled(context.Background(), sqlqueue.Key{ID: "never-enqueued", Token: "t"})
@@ -105,4 +107,29 @@ func TestCancelBatcherHonoursContext(t *testing.T) {
 	defer cancel()
 	_, err := b.isCancelled(ctx, sqlqueue.Key{ID: "r", Token: "t"})
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestCancelBatcherBoundsAStalledQuery(t *testing.T) {
+	store := cancelTestStore(t)
+	ctx := context.Background()
+	db, err := sql.Open("pgx", os.Getenv("TEST_POSTGRES_URL"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "LOCK TABLE async_requests IN ACCESS EXCLUSIVE MODE")
+	require.NoError(t, err)
+
+	b := newCancelBatcher(store, 256, time.Millisecond, 200*time.Millisecond)
+	defer b.stop()
+
+	start := time.Now()
+	_, err = b.isCancelled(ctx, sqlqueue.Key{ID: "blocked", Token: "t"})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), 5*time.Second)
+
+	require.NoError(t, tx.Rollback())
+	cancelled, err := b.isCancelled(ctx, sqlqueue.Key{ID: "blocked", Token: "t"})
+	require.NoError(t, err, "the batcher recovers once the lock is gone")
+	assert.False(t, cancelled)
 }
