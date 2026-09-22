@@ -194,8 +194,7 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 	}
 }
 
-// SubmitRequest adds a request to the Redis sorted set.
-// The score is the deadline, ensuring earlier deadlines are processed first.
+// SubmitRequest adds a request to the Redis sorted set, scored by QueueScore.
 func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Request) error {
 	if req == nil {
 		return errors.New("request is required")
@@ -228,6 +227,7 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 		return fmt.Errorf("failed to create request token: %w", err)
 	}
 	ir.RequestToken = token
+	ir.EnqueuedAtMs = time.Now().UnixMilli()
 
 	msgBytes, err := json.Marshal(ir)
 	if err != nil {
@@ -238,7 +238,7 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	// This prevents a previously cancelled/completed request ID from poisoning
 	// a later submission that legitimately reuses the same ID.
 	targetQueue := ir.RequestQueueName
-	score := float64(deadline)
+	score := ir.QueueScore()
 	activeTTL := time.Until(time.Unix(deadline, 0))
 	if activeTTL <= 0 {
 		return errors.New("deadline has already expired")

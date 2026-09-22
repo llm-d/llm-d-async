@@ -37,7 +37,7 @@ func newClaimTestFlow(t *testing.T) (*miniredis.Miniredis, *redis.Client, contex
 
 func claimEnvelope(t *testing.T, id string, deadline int64) (*api.InternalRequest, string) {
 	t.Helper()
-	ir := api.NewInternalRequest(api.InternalRouting{RequestQueueName: "q"}, &api.RequestMessage{
+	ir := api.NewInternalRequest(api.InternalRouting{RequestQueueName: "q", EnqueuedAtMs: time.Now().UnixMilli()}, &api.RequestMessage{
 		ID:       id,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
@@ -191,7 +191,7 @@ func TestAckResult_StaleTokenLeavesForeignClaimIntact(t *testing.T) {
 func TestReclaimExpiredClaims_RedeliversOnlyLapsedLeases(t *testing.T) {
 	_, rdb, ctx, flow := newClaimTestFlow(t)
 
-	// Expired claim: redelivered at its original sort score. A negative lease
+	// Expired claim: redelivered at its queue score. A negative lease
 	// TTL puts the expiry in the past deterministically (lease scores have
 	// whole-second granularity).
 	flow.claimLeaseTTL = -2 * time.Second
@@ -216,8 +216,12 @@ func TestReclaimExpiredClaims_RedeliversOnlyLapsedLeases(t *testing.T) {
 	if released != 1 {
 		t.Fatalf("released = %d, want 1", released)
 	}
-	if _, err := rdb.ZScore(ctx, "q", memberE).Result(); err != nil {
+	score, err := rdb.ZScore(ctx, "q", memberE).Result()
+	if err != nil {
 		t.Fatalf("expired request not redelivered: %v", err)
+	}
+	if want := irE.QueueScore(); score != want {
+		t.Errorf("redelivered score = %v, want %v", score, want)
 	}
 	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "live").Result(); !exists {
 		t.Fatal("live claim was reclaimed")

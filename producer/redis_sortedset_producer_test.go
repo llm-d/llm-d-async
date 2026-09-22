@@ -88,6 +88,45 @@ func TestSubmitRequest(t *testing.T) {
 	assert.Equal(t, "test-result-queue", ir.ResultQueueName)
 }
 
+func TestSubmitRequest_ScoresByDeadlineThenEnqueueTime(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	shared := time.Now().Add(24 * time.Hour).Unix()
+
+	submit := func(id string, deadline int64) {
+		t.Helper()
+		require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+			ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+		}))
+	}
+
+	before := time.Now().UnixMilli()
+	submit("first", shared)
+	time.Sleep(70 * time.Millisecond)
+	submit("second", shared)
+	time.Sleep(70 * time.Millisecond)
+	submit("third", shared)
+	submit("earlier-deadline", shared-1)
+	after := time.Now().UnixMilli()
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	var order []string
+	for _, member := range members {
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		order = append(order, ir.PublicRequest.ReqID())
+
+		assert.GreaterOrEqual(t, ir.EnqueuedAtMs, before, "EnqueuedAtMs for %s", ir.PublicRequest.ReqID())
+		assert.LessOrEqual(t, ir.EnqueuedAtMs, after, "EnqueuedAtMs for %s", ir.PublicRequest.ReqID())
+		score, err := mr.ZScore("test-request-queue", member)
+		require.NoError(t, err)
+		assert.Equal(t, ir.QueueScore(), score,
+			"score for %s", ir.PublicRequest.ReqID())
+	}
+	assert.Equal(t, []string{"earlier-deadline", "first", "second", "third"}, order)
+}
+
 func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
 	req := &api.PubSubRequest{
 		RequestMessage: api.RequestMessage{
