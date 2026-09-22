@@ -71,13 +71,11 @@ func (c *Consumer) Poll(ctx context.Context, now time.Time, limit int) ([]Reques
 	}
 	for _, r := range rows {
 		if prev, ok := c.inflight[r.Key()]; ok {
-			if st, ok := c.leases[prev.partition]; ok && st.inflight > 0 {
-				st.inflight--
-			}
+			c.untrackLocked(r.Key(), prev)
 		}
 		delete(c.orphans, r.Key())
 		c.inflight[r.Key()] = tracked{partition: r.Partition, epoch: r.Epoch}
-		if st, ok := c.leases[r.Partition]; ok {
+		if st, ok := c.leases[r.Partition]; ok && st.epoch == r.Epoch {
 			st.inflight++
 		}
 	}
@@ -106,10 +104,9 @@ func (c *Consumer) Retry(ctx context.Context, stamp Stamp, notBefore int64, enve
 	return ok, nil
 }
 
-func (c *Consumer) Undispatch(ctx context.Context, keys []Key) error {
-	stamps := c.stamps(keys)
+func (c *Consumer) Undispatch(ctx context.Context, stamps []Stamp) error {
 	if err := c.store.Undispatch(ctx, c.owner, stamps); err != nil {
-		c.Abandon(keys...)
+		c.Abandon(stamps...)
 		return err
 	}
 	c.doneStamps(stamps)
@@ -117,41 +114,16 @@ func (c *Consumer) Undispatch(ctx context.Context, keys []Key) error {
 }
 
 // Abandon hands requests whose outcome could not be written to the next Rebalance.
-func (c *Consumer) Abandon(keys ...Key) {
-	c.mu.Lock()
-	for _, k := range keys {
-		if t, ok := c.inflight[k]; ok {
-			c.orphans[k] = t.epoch
-		}
-	}
-	c.mu.Unlock()
-	c.done(keys)
-}
-
-func (c *Consumer) stamps(keys []Key) []Stamp {
+func (c *Consumer) Abandon(stamps ...Stamp) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]Stamp, 0, len(keys))
-	for _, k := range keys {
-		if t, ok := c.inflight[k]; ok {
-			out = append(out, Stamp{Key: k, Epoch: t.epoch})
-		}
-	}
-	return out
-}
-
-func (c *Consumer) done(keys []Key) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, k := range keys {
-		t, ok := c.inflight[k]
-		if !ok {
+	for _, stamp := range stamps {
+		t, ok := c.inflight[stamp.Key]
+		if !ok || t.epoch != stamp.Epoch {
 			continue
 		}
-		delete(c.inflight, k)
-		if st, ok := c.leases[t.partition]; ok && st.inflight > 0 {
-			st.inflight--
-		}
+		c.orphans[stamp.Key] = t.epoch
+		c.untrackLocked(stamp.Key, t)
 	}
 }
 
@@ -163,10 +135,14 @@ func (c *Consumer) doneStamps(stamps []Stamp) {
 		if !ok || t.epoch != stamp.Epoch {
 			continue
 		}
-		delete(c.inflight, stamp.Key)
-		if st, ok := c.leases[t.partition]; ok && st.inflight > 0 {
-			st.inflight--
-		}
+		c.untrackLocked(stamp.Key, t)
+	}
+}
+
+func (c *Consumer) untrackLocked(k Key, t tracked) {
+	delete(c.inflight, k)
+	if st, ok := c.leases[t.partition]; ok && st.epoch == t.epoch && st.inflight > 0 {
+		st.inflight--
 	}
 }
 
