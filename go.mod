@@ -10,8 +10,8 @@ require (
 	github.com/llm-d/llm-d-async/api v0.10.0
 	github.com/llm-d/llm-d-async/pipeline v0.10.0
 	github.com/llm-d/llm-d-async/producer v0.10.0
-	github.com/onsi/ginkgo/v2 v2.32.2
-	github.com/onsi/gomega v1.43.0
+	github.com/onsi/ginkgo/v2 v2.33.0
+	github.com/onsi/gomega v1.43.1
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/prometheus/common v0.71.0
@@ -27,8 +27,8 @@ require (
 	go.uber.org/zap v1.28.0
 	golang.org/x/net v0.59.0
 	golang.org/x/oauth2 v0.37.0
-	google.golang.org/api v0.297.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/api v0.298.0
+	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 	k8s.io/client-go v0.34.11
 	sigs.k8s.io/controller-runtime v0.22.5
