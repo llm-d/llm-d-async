@@ -103,7 +103,6 @@ func NewWithStore(store *sqlqueue.Store, cfg Config, workerPools []pipeline.Work
 		leaseTTL:               time.Duration(cfg.LeaseTTLSeconds) * time.Second,
 		handoffTimeout:         time.Duration(cfg.HandoffTimeoutSeconds) * time.Second,
 		defaultResultQueueName: cfg.ResultQueueName,
-		cancelChecks:           newCancelBatcher(store, cfg.CancelCheckBatchSize, time.Duration(cfg.CancelCheckLingerMs)*time.Millisecond),
 	}
 	if f.pollInterval <= 0 {
 		f.pollInterval = time.Second
@@ -120,6 +119,7 @@ func NewWithStore(store *sqlqueue.Store, cfg Config, workerPools []pipeline.Work
 	if f.handoffTimeout <= 0 {
 		f.handoffTimeout = 15 * time.Minute
 	}
+	f.cancelChecks = newCancelBatcher(store, cfg.CancelCheckBatchSize, time.Duration(cfg.CancelCheckLingerMs)*time.Millisecond, f.storeTimeout())
 	for _, q := range cfg.Queues {
 		if !poolExists(workerPools, q.WorkerPoolID) {
 			return nil, fmt.Errorf("worker pool %q specified in queue config not found in pool configuration", q.WorkerPoolID)
