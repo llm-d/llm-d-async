@@ -50,6 +50,18 @@ func TestDoneStampDoesNotForgetANewerAttempt(t *testing.T) {
 	assert.Zero(t, c.leases[3].inflight)
 }
 
+func (c *Consumer) stamps(keys []Key) []Stamp {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Stamp, 0, len(keys))
+	for _, k := range keys {
+		if t, ok := c.inflight[k]; ok {
+			out = append(out, Stamp{Key: k, Epoch: t.epoch})
+		}
+	}
+	return out
+}
+
 func poll(t *testing.T, c *Consumer, now time.Time) []string {
 	t.Helper()
 	rows, err := c.Poll(context.Background(), now, 10000)
@@ -292,7 +304,7 @@ func TestConsumerRetriesAbandonedRequestsOnRebalance(t *testing.T) {
 		require.NoError(t, s.Enqueue(ctx, req("lost", now.Unix()+60), req("parked", now.Unix()+60), req("back", now.Unix()+60)))
 		require.Len(t, poll(t, a, now), 3)
 
-		a.Abandon(Key{ID: "lost", Token: "t"})
+		a.Abandon(a.stamps([]Key{{ID: "lost", Token: "t"}})...)
 		assert.Equal(t, 2, inflightOf(a))
 		assert.Empty(t, poll(t, a, now), "an abandoned request stays in flight until the next rebalance")
 		rebalance(t, a, now)
@@ -304,7 +316,7 @@ func TestConsumerRetriesAbandonedRequestsOnRebalance(t *testing.T) {
 		ok, err := a.Retry(ctx, stamps[0], now.Unix()+30, `{"retry":1}`)
 		require.NoError(t, err)
 		assert.True(t, ok)
-		require.NoError(t, a.Undispatch(ctx, []Key{{ID: "back", Token: "t"}}))
+		require.NoError(t, a.Undispatch(ctx, a.stamps([]Key{{ID: "back", Token: "t"}})))
 		assert.Equal(t, 1, inflightOf(a), "retry and undispatch stop tracking their requests")
 		assert.Equal(t, []string{"back"}, poll(t, a, now))
 		assert.Equal(t, []string{"parked"}, poll(t, a, now.Add(30*time.Second)))
@@ -321,7 +333,7 @@ func TestConsumerRepolledOrphanIsNotReset(t *testing.T) {
 		require.Equal(t, []string{"flaky"}, poll(t, a, now))
 
 		require.NoError(t, s.Undispatch(ctx, "a", a.stamps([]Key{{ID: "flaky", Token: "t"}})))
-		a.Abandon(Key{ID: "flaky", Token: "t"})
+		a.Abandon(a.stamps([]Key{{ID: "flaky", Token: "t"}})...)
 		require.Equal(t, []string{"flaky"}, poll(t, a, now), "the request is dispatched again")
 
 		rebalance(t, a, now)
@@ -468,7 +480,7 @@ func TestConsumerCloseHandsOverImmediately(t *testing.T) {
 		rebalance(t, a, now)
 		require.NoError(t, s.Enqueue(ctx, req("unfinished", now.Unix()+60), req("abandoned", now.Unix()+60)))
 		require.Len(t, poll(t, a, now), 2)
-		a.Abandon(Key{ID: "abandoned", Token: "t"})
+		a.Abandon(a.stamps([]Key{{ID: "abandoned", Token: "t"}})...)
 		require.NoError(t, a.Close(ctx))
 		active, _ := owned(a)
 		assert.Empty(t, active)
@@ -505,5 +517,66 @@ func TestConsumerWithMorePeersThanPartitionsIdlesExtras(t *testing.T) {
 		}
 		assert.Equal(t, Partitions, total)
 		assert.Equal(t, 6, idle)
+	})
+}
+
+func TestConsumerStaleOutcomeKeepsTheNewEpochsCount(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		a := newConsumer(s, "a")
+		rebalance(t, a, now)
+		old := idInPartition(t, "old", 7)
+		require.NoError(t, s.Enqueue(ctx, req(old, now.Unix()+3600)))
+		require.Equal(t, []string{old}, poll(t, a, now))
+		stale := a.stamps([]Key{{ID: old, Token: "t"}})[0]
+
+		require.NoError(t, s.ReleasePartitions(ctx, "q", "a", allPartitionIDs()))
+		_, err := s.db.ExecContext(ctx, `DELETE FROM async_requests WHERE id = $1`, old)
+		require.NoError(t, err, "a peer completed the old attempt in the meantime")
+		rebalance(t, a, now)
+		fresh := idInPartition(t, "fresh", 7)
+		require.NoError(t, s.Enqueue(ctx, req(fresh, now.Unix()+3600)))
+		require.Equal(t, []string{fresh}, poll(t, a, now))
+
+		comp := completion(old, "route")
+		comp.Epoch = stale.Epoch
+		acked, err := a.Ack(ctx, []Completion{comp})
+		require.NoError(t, err)
+		assert.False(t, acked[0])
+		a.mu.Lock()
+		count := a.leases[7].inflight
+		a.mu.Unlock()
+		assert.Equal(t, 1, count, "the fenced outcome must not uncount the request dispatched under the new epoch")
+
+		a.Stop()
+		rebalance(t, a, now)
+		active, draining := owned(a)
+		assert.Empty(t, active)
+		assert.Equal(t, []int{7}, draining, "only the partition with work in flight is kept")
+		assert.True(t, ack(t, a, fresh))
+	})
+}
+
+func TestConsumerStaleAbandonLeavesTheNewAttempt(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		a := newConsumer(s, "a")
+		rebalance(t, a, now)
+		require.NoError(t, s.Enqueue(ctx, req("bounced", now.Unix()+3600)))
+		require.Equal(t, []string{"bounced"}, poll(t, a, now))
+		stale := a.stamps([]Key{{ID: "bounced", Token: "t"}})[0]
+
+		require.NoError(t, s.ReleasePartitions(ctx, "q", "a", allPartitionIDs()))
+		rebalance(t, a, now)
+		require.Equal(t, []string{"bounced"}, poll(t, a, now))
+
+		a.Abandon(stale)
+		require.NoError(t, a.Undispatch(ctx, []Stamp{stale}))
+		rebalance(t, a, now)
+		assert.Empty(t, poll(t, a, now), "the stale attempt's failure must not return the live attempt to pending")
+		assert.Equal(t, 1, inflightOf(a))
+		assert.True(t, ack(t, a, "bounced"))
 	})
 }

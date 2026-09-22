@@ -357,7 +357,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 		return
 	}
 
-	var undispatch []sqlqueue.Key
+	var undispatch []sqlqueue.Stamp
 	defer func() {
 		if len(undispatch) == 0 {
 			return
@@ -373,7 +373,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 	for i, row := range rows {
 		stop := func() {
 			for _, r := range rows[i:] {
-				undispatch = append(undispatch, r.Key())
+				undispatch = append(undispatch, r.Stamp())
 			}
 		}
 		ir, ok := parseRequest(row, logger)
@@ -415,7 +415,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
 			metrics.RecordGateDecision(metrics.ReasonError, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
 			pipeline.ReleaseGateReleases(releases)
-			undispatch = append(undispatch, row.Key())
+			undispatch = append(undispatch, row.Stamp())
 			continue
 		}
 		switch verdict.Action {
@@ -426,7 +426,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 			}
 			metrics.RecordGateDecision(reason, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
 			pipeline.ReleaseGateReleases(releases)
-			undispatch = append(undispatch, row.Key())
+			undispatch = append(undispatch, row.Stamp())
 			continue
 		case pipeline.ActionDrop:
 			metrics.RecordGateDecision(metrics.ReasonDropped, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
@@ -572,11 +572,10 @@ func (f *Flow) retryWorker(ctx context.Context) {
 			logger.V(logutil.DEFAULT).Info("Retry for a request from an unknown queue; dropped", "id", reqID, "queue", msg.RequestQueueName)
 			return
 		}
-		key := stamp.Key
 		envelope, _, err := api.SplitPayload(msg.InternalRequest)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to marshal retry; returning request to the queue", "id", reqID)
-			q.consumer.Abandon(key)
+			q.consumer.Abandon(stamp)
 			return
 		}
 		notBefore := time.Now().Unix() + int64(math.Ceil(msg.BackoffDurationSeconds))
@@ -585,7 +584,7 @@ func (f *Flow) retryWorker(ctx context.Context) {
 		})
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to park retry; returning request to the queue", "id", reqID)
-			q.consumer.Abandon(key)
+			q.consumer.Abandon(stamp)
 			return
 		}
 		if !parked {
@@ -647,11 +646,11 @@ func (f *Flow) resultWorker(ctx context.Context) {
 			})
 			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to write results; returning requests to the queue", "queue", q.config.QueueName, "count", len(completions))
-				keys := make([]sqlqueue.Key, len(completions))
+				stamps := make([]sqlqueue.Stamp, len(completions))
 				for i, c := range completions {
-					keys[i] = c.Key
+					stamps[i] = sqlqueue.Stamp{Key: c.Key, Epoch: c.Epoch}
 				}
-				q.consumer.Abandon(keys...)
+				q.consumer.Abandon(stamps...)
 				continue
 			}
 			for i, ok := range acked {
