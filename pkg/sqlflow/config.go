@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 )
 
 type QueueConfig struct {
@@ -31,6 +32,7 @@ type Config struct {
 	CancelCheckBatchSize  int           `json:"cancel_check_batch_size,omitempty"`
 	CancelCheckLingerMs   int           `json:"cancel_check_linger_ms,omitempty"`
 	LeaseTTLSeconds       int64         `json:"lease_ttl_seconds,omitempty"`
+	MaxConnections        int           `json:"max_connections,omitempty"`
 	HandoffTimeoutSeconds int64         `json:"handoff_timeout_seconds,omitempty"`
 	Queues                []QueueConfig `json:"queues"`
 }
@@ -72,6 +74,9 @@ func (c *Config) ApplyDefaults() {
 	if c.LeaseTTLSeconds == 0 {
 		c.LeaseTTLSeconds = 30
 	}
+	if c.MaxConnections == 0 {
+		c.MaxConnections = sqlqueue.DefaultMaxConns
+	}
 	if c.HandoffTimeoutSeconds == 0 {
 		c.HandoffTimeoutSeconds = 900
 	}
@@ -110,6 +115,9 @@ func (c *Config) Validate() error {
 	}
 	if c.LeaseTTLSeconds < 0 {
 		return fmt.Errorf("lease_ttl_seconds must be non-negative")
+	}
+	if c.MaxConnections < 0 {
+		return fmt.Errorf("max_connections must be non-negative")
 	}
 	if c.HandoffTimeoutSeconds < 0 {
 		return fmt.Errorf("handoff_timeout_seconds must be non-negative")
