@@ -3,6 +3,7 @@ package sqlflow
 import (
 	"testing"
 
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,6 +18,7 @@ func TestLoadConfigAppliesDefaults(t *testing.T) {
 	assert.Equal(t, 32, cfg.ResultBatchSize)
 	assert.Equal(t, 256, cfg.CancelCheckBatchSize)
 	assert.Equal(t, 5, cfg.CancelCheckLingerMs)
+	assert.Equal(t, sqlqueue.DefaultMaxConns, cfg.MaxConnections)
 	assert.EqualValues(t, 30, cfg.LeaseTTLSeconds)
 	assert.EqualValues(t, 900, cfg.HandoffTimeoutSeconds)
 	require.Len(t, cfg.Queues, 1)
@@ -44,6 +46,7 @@ func TestLoadConfigRejectsInvalid(t *testing.T) {
 		"negative lease":         `{"url":"postgres://u@h/db","lease_ttl_seconds":-1,"queues":[{"queue_name":"q","igw_base_url":"http://igw"}]}`,
 		"zero cancel batch":      `{"url":"postgres://u@h/db","cancel_check_batch_size":-1,"queues":[{"queue_name":"q","igw_base_url":"http://igw"}]}`,
 		"negative cancel linger": `{"url":"postgres://u@h/db","cancel_check_linger_ms":-1,"queues":[{"queue_name":"q","igw_base_url":"http://igw"}]}`,
+		"negative max conns":     `{"url":"postgres://u@h/db","max_connections":-1,"queues":[{"queue_name":"q","igw_base_url":"http://igw"}]}`,
 		"negative handoff":       `{"url":"postgres://u@h/db","handoff_timeout_seconds":-1,"queues":[{"queue_name":"q","igw_base_url":"http://igw"}]}`,
 		"malformed json":         `{`,
 	} {
