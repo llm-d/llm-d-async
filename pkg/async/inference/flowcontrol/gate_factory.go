@@ -35,11 +35,14 @@ const DefaultCacheTTL = 5 * time.Second
 
 var _ pipeline.GateFactory = (*GateFactory)(nil)
 
+var _ QuotaStore = (*redisgate.QuotaStore)(nil)
+
 // GateFactory creates DispatchGate instances based on configuration.
 type GateFactory struct {
 	prometheusURL string
 	cacheTTL      time.Duration
 	redisClients  map[string]*goredis.Client
+	sqlQuota      QuotaStore
 	logger        logr.Logger
 }
 
@@ -71,6 +74,13 @@ func (f *GateFactory) WithLogger(logger logr.Logger) *GateFactory {
 	return f
 }
 
+// WithSQLQuota sets the store behind sql-quota gates, which share the sql
+// transport's database.
+func (f *GateFactory) WithSQLQuota(store QuotaStore) *GateFactory {
+	f.sqlQuota = store
+	return f
+}
+
 // Close closes all Redis clients created by this factory.
 func (f *GateFactory) Close() error {
 	var firstErr error
@@ -86,6 +96,12 @@ func (f *GateFactory) Close() error {
 // Supported gate types:
 //   - "constant": Always returns budget 1.0 (fully open)
 //   - "redis": Queries Redis for dispatch budget
+//   - "redis-quota": Limits requests per value of a metadata attribute, counted in Redis.
+//     Params: address (required), attribute (default userid), mode (rate-limit or
+//     concurrency), limit (required), window (default 1m), prefix (default quota:),
+//     gating_mode (blocking or classifying, default blocking)
+//   - "sql-quota": redis-quota counted in the sql transport's Postgres database.
+//     Takes the same params without address; window is unused in concurrency mode.
 //   - "redis-leased-rate": Enforces a fail-closed, externally leased absolute
 //     dispatch-rate ceiling shared through Redis.
 //   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
@@ -236,33 +252,21 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			client = goredis.NewClient(&goredis.Options{Addr: addr})
 			f.redisClients[addr] = client
 		}
-
-		attr := paramString(params, "attribute", "userid")
-
-		mode := redisgate.QuotaMode(paramString(params, "mode", string(redisgate.QuotaModeRateLimit)))
-
-		limit, err := paramInt(params, "limit", 0)
+		q, err := quotaParams(cfg.GateType, params)
 		if err != nil {
-			return nil, fmt.Errorf("redis-quota gate requires a valid 'limit': %w", err)
+			return nil, err
 		}
-		if limit <= 0 {
-			return nil, fmt.Errorf("redis-quota gate requires a positive 'limit', got %d", limit)
-		}
+		return q.gate(redisgate.NewQuotaStore(client, q.window)), nil
 
-		window, err := paramDuration(params, "window", 1*time.Minute)
+	case "sql-quota":
+		if f.sqlQuota == nil {
+			return nil, fmt.Errorf("sql-quota gate requires the sql transport")
+		}
+		q, err := quotaParams(cfg.GateType, params)
 		if err != nil {
-			return nil, fmt.Errorf("redis-quota gate requires a valid 'window' duration: %w", err)
+			return nil, err
 		}
-
-		prefix := paramString(params, "prefix", "quota:")
-
-		gate := redisgate.NewRedisQuotaGate(client, attr, mode, limit, window, prefix)
-		gatingMode := redisgate.GatingMode(paramString(params, "gating_mode", ""))
-		if gatingMode != "" {
-			gate.WithGatingMode(gatingMode)
-		}
-
-		return gate, nil
+		return q.gate(f.sqlQuota), nil
 
 	case "prometheus-saturation":
 		if f.prometheusURL == "" {
@@ -692,4 +696,48 @@ func paramMapAny(params map[string]any, key string) (map[string]any, error) {
 	default:
 		return nil, fmt.Errorf("unsupported type %T for key %q", v, key)
 	}
+}
+
+type quotaConfig struct {
+	attribute  string
+	mode       QuotaMode
+	gatingMode GatingMode
+	limit      int
+	window     time.Duration
+	prefix     string
+}
+
+func quotaParams(gateType string, params map[string]any) (quotaConfig, error) {
+	q := quotaConfig{
+		attribute:  paramString(params, "attribute", "userid"),
+		mode:       QuotaMode(paramString(params, "mode", string(QuotaModeRateLimit))),
+		gatingMode: GatingMode(paramString(params, "gating_mode", string(GatingModeBlocking))),
+		prefix:     paramString(params, "prefix", "quota:"),
+	}
+	if q.mode != QuotaModeRateLimit && q.mode != QuotaModeConcurrency {
+		return q, fmt.Errorf("%s gate: mode must be %q or %q, got %q", gateType, QuotaModeRateLimit, QuotaModeConcurrency, q.mode)
+	}
+	if q.gatingMode != GatingModeBlocking && q.gatingMode != GatingModeClassifying {
+		return q, fmt.Errorf("%s gate: gating_mode must be %q or %q, got %q", gateType, GatingModeBlocking, GatingModeClassifying, q.gatingMode)
+	}
+	var err error
+	q.limit, err = paramInt(params, "limit", 0)
+	if err != nil {
+		return q, fmt.Errorf("%s gate requires a valid 'limit': %w", gateType, err)
+	}
+	if q.limit <= 0 {
+		return q, fmt.Errorf("%s gate requires a positive 'limit', got %d", gateType, q.limit)
+	}
+	q.window, err = paramDuration(params, "window", 1*time.Minute)
+	if err != nil {
+		return q, fmt.Errorf("%s gate requires a valid 'window' duration: %w", gateType, err)
+	}
+	if q.mode == QuotaModeRateLimit && q.window <= 0 {
+		return q, fmt.Errorf("%s gate requires a positive 'window' in rate-limit mode, got %s", gateType, q.window)
+	}
+	return q, nil
+}
+
+func (q quotaConfig) gate(store QuotaStore) *QuotaGate {
+	return NewQuotaGate(store, q.attribute, q.mode, q.limit, q.window, q.prefix).WithGatingMode(q.gatingMode)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"go.opentelemetry.io/otel"
@@ -45,6 +46,7 @@ type queueRuntime struct {
 
 type Flow struct {
 	store         *sqlqueue.Store
+	quota         *QuotaStore
 	queues        []*queueRuntime
 	queuesByID    map[string]*queueRuntime
 	queuesByName  map[string]*queueRuntime
@@ -69,7 +71,7 @@ type Flow struct {
 	hbWg          sync.WaitGroup
 }
 
-func New(ctx context.Context, cfg Config, workerPools []pipeline.WorkerPoolConfig, gateFactory pipeline.GateFactory) (*Flow, error) {
+func New(ctx context.Context, cfg Config, workerPools []pipeline.WorkerPoolConfig, gateFactory *flowcontrol.GateFactory) (*Flow, error) {
 	var opts []sqlqueue.OpenOption
 	if cfg.EnableTracing {
 		opts = append(opts, sqlqueue.WithTracerProvider(otel.GetTracerProvider()))
@@ -78,7 +80,7 @@ func New(ctx context.Context, cfg Config, workerPools []pipeline.WorkerPoolConfi
 	if err != nil {
 		return nil, fmt.Errorf("open sql transport store: %w", err)
 	}
-	f, err := NewWithStore(store, cfg, workerPools, gateFactory)
+	f, err := NewWithStore(ctx, store, cfg, workerPools, gateFactory)
 	if err != nil {
 		_ = store.Close()
 		return nil, err
@@ -86,7 +88,9 @@ func New(ctx context.Context, cfg Config, workerPools []pipeline.WorkerPoolConfi
 	return f, nil
 }
 
-func NewWithStore(store *sqlqueue.Store, cfg Config, workerPools []pipeline.WorkerPoolConfig, gateFactory pipeline.GateFactory) (*Flow, error) {
+// NewWithStore registers the flow's quota store with gateFactory before it
+// creates any queue gate, so sql-quota gates count in store.
+func NewWithStore(ctx context.Context, store *sqlqueue.Store, cfg Config, workerPools []pipeline.WorkerPoolConfig, gateFactory *flowcontrol.GateFactory) (_ *Flow, err error) {
 	owner, err := newOwner()
 	if err != nil {
 		return nil, err
@@ -120,6 +124,16 @@ func NewWithStore(store *sqlqueue.Store, cfg Config, workerPools []pipeline.Work
 		f.handoffTimeout = 15 * time.Minute
 	}
 	f.cancelChecks = newCancelBatcher(store, cfg.CancelCheckBatchSize, time.Duration(cfg.CancelCheckLingerMs)*time.Millisecond, f.storeTimeout())
+	f.quota = NewQuotaStore(store, f.leaseTTL, f.storeTimeout(), log.FromContext(ctx))
+	defer func() {
+		if err != nil {
+			f.cancelChecks.stop()
+			f.quota.Close()
+		}
+	}()
+	if gateFactory != nil {
+		gateFactory.WithSQLQuota(f.quota)
+	}
 	for _, q := range cfg.Queues {
 		if !poolExists(workerPools, q.WorkerPoolID) {
 			return nil, fmt.Errorf("worker pool %q specified in queue config not found in pool configuration", q.WorkerPoolID)
@@ -268,6 +282,7 @@ func (f *Flow) Shutdown() {
 	}
 	f.hbWg.Wait()
 	f.cancelChecks.stop()
+	f.quota.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 	defer cancel()
 	for _, q := range f.queues {

@@ -686,7 +686,7 @@ func (s *Store) Leave(ctx context.Context, queue, owner string) error {
 }
 
 func (s *Store) TruncateForTest(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, "TRUNCATE async_requests, async_results, async_partitions, async_dispatchers"); err != nil {
+	if _, err := s.db.ExecContext(ctx, "TRUNCATE async_requests, async_results, async_partitions, async_dispatchers, async_quota_keys, async_quota_holders, async_quota_slots, async_quota_admits"); err != nil {
 		return fmt.Errorf("sqlqueue: truncate: %w", err)
 	}
 	return nil

@@ -126,7 +126,7 @@ flowchart TD
 
 ### Reserved and Overflow
 
-Quota gates can run in *classifying* mode: instead of blocking a message that exceeds its quota, they tag it with a classification label — `reserved` (within quota) or `overflow` (over quota). Downstream components then act on the tag: the `tier-priority` merge policy buckets reserved traffic ahead of overflow traffic, and the `tier-priority-admission` gate parks reserved requests but sheds overflow requests when the pool is saturated. A message with no classification is treated as overflow by the merge policy. The `redis-quota` gate classifies when `gating_mode` is set to `classifying`.
+Quota gates can run in *classifying* mode: instead of blocking a message that exceeds its quota, they tag it with a classification label — `reserved` (within quota) or `overflow` (over quota). Downstream components then act on the tag: the `tier-priority` merge policy buckets reserved traffic ahead of overflow traffic, and the `tier-priority-admission` gate parks reserved requests but sheds overflow requests when the pool is saturated. A message with no classification is treated as overflow by the merge policy. The `redis-quota` and `sql-quota` gates classify when `gating_mode` is set to `classifying`.
 
 ### Tiers and Priority Lanes
 
@@ -293,7 +293,7 @@ Queue hot reload is enabled with `--transport redis-sortedset --transport-config
 }
 ```
 
-The `sql` transport stores requests, results, and partition leases in tables it creates on startup (`async_requests`, `async_results`, `async_partitions`, `async_dispatchers`). Each request hashes by ID into one of 64 partitions per queue, and processors sharing a database split the partitions evenly between them, so they never contend for the same requests. Each processor dispatches earliest-deadline-first from its own partitions. When a processor joins or stops, the partitions it gives up stop taking new work and move once their in-flight requests finish, so a rolling restart redelivers nothing. If a processor dies, its partitions move after `lease_ttl_seconds` and the new owner redelivers whatever it had in flight. A processor that is alive but not dispatching (its gate closed, its workers stuck) keeps its partitions, so requests hashed to them wait even when peers are idle. `url` accepts `postgres://` (via pgx). Producers use the `producer-sql` module against the same database and can submit a batch of requests in one transaction with `SubmitRequests`.
+The `sql` transport stores requests, results, and partition leases in tables it creates on startup (`async_requests`, `async_results`, `async_partitions`, `async_dispatchers`, and the `async_quota_*` tables behind `sql-quota`). Each request hashes by ID into one of 64 partitions per queue, and processors sharing a database split the partitions evenly between them, so they never contend for the same requests. Each processor dispatches earliest-deadline-first from its own partitions. When a processor joins or stops, the partitions it gives up stop taking new work and move once their in-flight requests finish, so a rolling restart redelivers nothing. If a processor dies, its partitions move after `lease_ttl_seconds` and the new owner redelivers whatever it had in flight. A processor that is alive but not dispatching (its gate closed, its workers stuck) keeps its partitions, so requests hashed to them wait even when peers are idle. `url` accepts `postgres://` (via pgx). Producers use the `producer-sql` module against the same database and can submit a batch of requests in one transaction with `SubmitRequests`.
 
 **`gcp-pubsub`:**
 ```json
@@ -412,6 +412,7 @@ The available gate types, at a glance:
 | `endpoint-scrape` | budget | Scrapes a raw `/metrics` endpoint directly — no Prometheus server required. |
 | `local-max-concurrency` | admission | Caps concurrent in-flight requests per queue using in-process state. |
 | `redis-quota` | admission | Per-attribute quota (rate limit or concurrency) via Redis. |
+| `sql-quota` | admission | `redis-quota` counted in the `sql` transport's Postgres database. |
 | `tier-priority-admission` | admission | Three-way verdict from saturation × tier × classification. |
 | `composite` | combinator | Combines multiple gates: minimum budget across all inner dispatch gates, all-or-nothing quota acquisition across inner attribute gates. |
 | `wait-on-refuse` | combinator | Wraps an inner gate and converts `ActionRefuse` into `ActionWait` (parking in-memory instead of broker redelivery). |
@@ -702,6 +703,8 @@ The available gate types, at a glance:
   - `window` (optional): The time window for rate limiting (e.g., `1m`, `10s`). Default is `1m`.
   - `prefix` (optional): Redis key prefix. Default is `quota:`.
   - `gating_mode` (optional): `blocking` or `classifying`. In `classifying` mode, the gate never blocks but tags the message with its quota status (`reserved` or `overflow`) in the internal metadata — see [Reserved and Overflow](#reserved-and-overflow). Default is `blocking`.
+
+- `sql-quota`: The same quota as `redis-quota`, counted in the database of the `sql` transport, so it needs no Redis and works only with `--transport sql`. It takes the same parameters except `address`; `prefix` namespaces keys in the quota tables, and `window` applies only to `rate-limit` mode. Limits are exact across every processor sharing the database: each processor sends one query per quota key at a time, and requests that arrive meanwhile share the next query. A rate limit admits at most `limit` requests in any `window`. Concurrency slots belong to the processor that took them and stop counting once it stops heartbeating for `lease_ttl_seconds`, so a crashed processor's slots come back without a TTL on the counter.
 
 - `tier-priority-admission`: Implements a three-way admission verdict based on saturation, queue tier, and reservation classification. Saturation is determined by evaluating an inner gate: if the inner gate returns `ActionRefuse`, the pool is considered saturated. If the pool is saturated: (1) returns `ActionWait` if classification is `reserved` (parking worker threads cleanly); (2) drops immediately with a `429` status payload if tier is `interactive` and classification is `overflow`; (3) otherwise — including `async`/`batch` overflow and unclassified requests — returns `ActionRefuse` to place the request back in the queue. If not saturated, returns `ActionContinue`.
   - `saturation_gate` (**required**): The type string of the inner gate used to evaluate pool saturation (e.g. `"prometheus-query"`).
@@ -1126,7 +1129,7 @@ This transport does not support per-queue dispatch gates (see [Queue and Topic E
 
 ### SQL (Postgres)
 
-A persisted implementation on Postgres, selected with `--transport sql`. It keeps the `redis-sortedset` semantics (earliest-deadline-first dispatch, fenced claims with lease-based redelivery, per-queue gates, exact backlog and deadline-proximity metrics) without a Redis dependency: several processors share one database. Producers submit with the `producer-sql` module against the same database. The `redis` and `redis-quota` gate types still need Redis; every other gate type works unchanged.
+A persisted implementation on Postgres, selected with `--transport sql`. It keeps the `redis-sortedset` semantics (earliest-deadline-first dispatch, fenced claims with lease-based redelivery, per-queue gates, exact backlog and deadline-proximity metrics) without a Redis dependency: several processors share one database. Producers submit with the `producer-sql` module against the same database. The `redis` and `redis-leased-rate` gate types still need Redis; use `sql-quota` in place of `redis-quota`. Every other gate type works unchanged.
 
 ### GCP Pub/Sub
 

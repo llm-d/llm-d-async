@@ -301,7 +301,7 @@ func TestConcurrentOpenCreatesSchemaOnce(t *testing.T) {
 	var tables int
 	require.NoError(t, admin.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1`, schema).Scan(&tables))
-	assert.Equal(t, 4, tables)
+	assert.Equal(t, 8, tables)
 }
 
 func TestResetStaleIsScopedAndSkipsLockedRows(t *testing.T) {
