@@ -17,9 +17,9 @@ import (
 func TestGateReleasesAreScopedToRequestAttempt(t *testing.T) {
 	var first, second, redelivery atomic.Int32
 	f := &Flow{}
-	key1 := sqlqueue.Stamp{Key: sqlqueue.Key{ID: "same-id", Token: "generation-1"}, Epoch: 1}
-	key2 := sqlqueue.Stamp{Key: sqlqueue.Key{ID: "same-id", Token: "generation-2"}, Epoch: 1}
-	key3 := sqlqueue.Stamp{Key: key1.Key, Epoch: 2}
+	key1 := sqlqueue.Stamp{Key: sqlqueue.Key{ID: "same-id", Token: "generation-1"}, Attempt: 1}
+	key2 := sqlqueue.Stamp{Key: sqlqueue.Key{ID: "same-id", Token: "generation-2"}, Attempt: 1}
+	key3 := sqlqueue.Stamp{Key: key1.Key, Attempt: 2}
 
 	f.trackGateReleases(key1, []pipeline.GateReleaseFunc{func() { first.Add(1) }})
 	f.trackGateReleases(key2, []pipeline.GateReleaseFunc{func() { second.Add(1) }})

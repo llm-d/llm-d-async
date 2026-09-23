@@ -35,6 +35,7 @@ type Consumer struct {
 type tracked struct {
 	partition int
 	epoch     int64
+	attempt   int64
 }
 
 type partitionState struct {
@@ -74,7 +75,7 @@ func (c *Consumer) Poll(ctx context.Context, now time.Time, limit int) ([]Reques
 			c.untrackLocked(r.Key(), prev)
 		}
 		delete(c.orphans, r.Key())
-		c.inflight[r.Key()] = tracked{partition: r.Partition, epoch: r.Epoch}
+		c.inflight[r.Key()] = tracked{partition: r.Partition, epoch: r.Epoch, attempt: r.Attempt}
 		if st, ok := c.leases[r.Partition]; ok && st.epoch == r.Epoch {
 			st.inflight++
 		}
@@ -89,7 +90,7 @@ func (c *Consumer) Ack(ctx context.Context, completions []Completion) ([]bool, e
 	}
 	stamps := make([]Stamp, len(completions))
 	for i, comp := range completions {
-		stamps[i] = Stamp{Key: comp.Key, Epoch: comp.Epoch}
+		stamps[i] = Stamp{Key: comp.Key, Attempt: comp.Attempt}
 	}
 	c.doneStamps(stamps)
 	return acked, nil
@@ -119,10 +120,10 @@ func (c *Consumer) Abandon(stamps ...Stamp) {
 	defer c.mu.Unlock()
 	for _, stamp := range stamps {
 		t, ok := c.inflight[stamp.Key]
-		if !ok || t.epoch != stamp.Epoch {
+		if !ok || t.attempt != stamp.Attempt {
 			continue
 		}
-		c.orphans[stamp.Key] = t.epoch
+		c.orphans[stamp.Key] = t.attempt
 		c.untrackLocked(stamp.Key, t)
 	}
 }
@@ -132,7 +133,7 @@ func (c *Consumer) doneStamps(stamps []Stamp) {
 	defer c.mu.Unlock()
 	for _, stamp := range stamps {
 		t, ok := c.inflight[stamp.Key]
-		if !ok || t.epoch != stamp.Epoch {
+		if !ok || t.attempt != stamp.Attempt {
 			continue
 		}
 		c.untrackLocked(stamp.Key, t)
@@ -284,8 +285,8 @@ func (c *Consumer) Close(ctx context.Context) error {
 func (c *Consumer) undispatchOrphans(ctx context.Context) error {
 	c.mu.Lock()
 	stamps := make([]Stamp, 0, len(c.orphans))
-	for k, epoch := range c.orphans {
-		stamps = append(stamps, Stamp{Key: k, Epoch: epoch})
+	for k, attempt := range c.orphans {
+		stamps = append(stamps, Stamp{Key: k, Attempt: attempt})
 	}
 	c.mu.Unlock()
 	if len(stamps) == 0 {
@@ -297,7 +298,7 @@ func (c *Consumer) undispatchOrphans(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, st := range stamps {
-		if c.orphans[st.Key] == st.Epoch {
+		if c.orphans[st.Key] == st.Attempt {
 			delete(c.orphans, st.Key)
 		}
 	}
@@ -318,7 +319,7 @@ func (c *Consumer) reconcileInFlight(ctx context.Context) error {
 	c.mu.Lock()
 	var untracked []Stamp
 	for _, st := range stamped {
-		if t, ok := c.inflight[st.Key]; !ok || t.epoch != st.Epoch {
+		if t, ok := c.inflight[st.Key]; !ok || t.attempt != st.Attempt {
 			untracked = append(untracked, st)
 		}
 	}
