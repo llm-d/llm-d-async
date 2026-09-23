@@ -90,14 +90,90 @@ CREATE INDEX IF NOT EXISTS async_results_route_seq ON async_results (route, seq)
 CREATE INDEX IF NOT EXISTS async_results_expiry ON async_results (route, expires_at) WHERE expires_at > 0;
 
 CREATE SEQUENCE IF NOT EXISTS async_dispatch_attempts;
+
+CREATE TABLE IF NOT EXISTS async_quota_keys (
+	key  TEXT   PRIMARY KEY,
+	used BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS async_quota_holders (
+	holder     TEXT   PRIMARY KEY,
+	expires_ms BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS async_quota_slots (
+	key    TEXT    NOT NULL,
+	holder TEXT    NOT NULL,
+	used   INTEGER NOT NULL,
+	PRIMARY KEY (key, holder)
+);
+CREATE INDEX IF NOT EXISTS async_quota_slots_holder ON async_quota_slots (holder);
+
+CREATE TABLE IF NOT EXISTS async_quota_admits (
+	key   TEXT    NOT NULL,
+	at_ms BIGINT  NOT NULL,
+	n     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS async_quota_admits_key ON async_quota_admits (key, at_ms);
 `
+
+var postgresFunctions = []string{`
+CREATE OR REPLACE FUNCTION async_quota_acquire(p_key TEXT, p_holder TEXT, p_n INTEGER, p_limit INTEGER)
+RETURNS INTEGER LANGUAGE plpgsql AS $$
+DECLARE
+	v_now   BIGINT;
+	v_used  BIGINT;
+	v_grant INTEGER;
+BEGIN
+	INSERT INTO async_quota_keys (key) VALUES (p_key) ON CONFLICT (key) DO NOTHING;
+	PERFORM 1 FROM async_quota_keys WHERE key = p_key FOR UPDATE;
+	v_now := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+	PERFORM 1 FROM async_quota_holders WHERE holder = p_holder AND expires_ms > v_now;
+	IF NOT FOUND THEN
+		RETURN -1;
+	END IF;
+	SELECT coalesce(sum(s.used), 0) INTO v_used
+	FROM async_quota_slots s JOIN async_quota_holders h ON h.holder = s.holder
+	WHERE s.key = p_key AND h.expires_ms > v_now;
+	v_grant := least(p_n, greatest(p_limit - v_used, 0));
+	IF v_grant > 0 THEN
+		INSERT INTO async_quota_slots (key, holder, used) VALUES (p_key, p_holder, v_grant)
+		ON CONFLICT (key, holder) DO UPDATE SET used = async_quota_slots.used + EXCLUDED.used;
+	END IF;
+	RETURN v_grant;
+END $$`, `
+CREATE OR REPLACE FUNCTION async_quota_admit(p_key TEXT, p_n INTEGER, p_limit INTEGER, p_window_ms BIGINT)
+RETURNS INTEGER LANGUAGE plpgsql AS $$
+DECLARE
+	v_now     BIGINT;
+	v_used    BIGINT;
+	v_expired BIGINT;
+	v_grant   INTEGER;
+BEGIN
+	INSERT INTO async_quota_keys (key) VALUES (p_key) ON CONFLICT (key) DO NOTHING;
+	SELECT used INTO v_used FROM async_quota_keys WHERE key = p_key FOR UPDATE;
+	v_now := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+	WITH gone AS (
+		DELETE FROM async_quota_admits WHERE key = p_key AND at_ms <= v_now - p_window_ms RETURNING n
+	)
+	SELECT coalesce(sum(n), 0) INTO v_expired FROM gone;
+	v_used := v_used - v_expired;
+	v_grant := least(p_n, greatest(p_limit - v_used, 0));
+	IF v_grant > 0 THEN
+		INSERT INTO async_quota_admits (key, at_ms, n) VALUES (p_key, v_now, v_grant);
+	END IF;
+	IF v_grant > 0 OR v_expired > 0 THEN
+		UPDATE async_quota_keys SET used = v_used + v_grant WHERE key = p_key;
+	END IF;
+	RETURN v_grant;
+END $$`}
 
 const migrateLockID = 0x6173796e6371 // "asyncq"
 
 // Migrate is safe to run concurrently; an existing schema takes no DDL locks.
 func (s *Store) Migrate(ctx context.Context) error {
 	var present bool
-	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('async_dispatch_attempts') IS NOT NULL`).Scan(&present); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT to_regproc('async_quota_admit') IS NOT NULL`).Scan(&present); err != nil {
 		return fmt.Errorf("sqlqueue: migrate: check schema: %w", err)
 	}
 	if present {
@@ -113,6 +189,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	if err := execDDL(ctx, tx, postgresDDL); err != nil {
 		return err
+	}
+	for _, fn := range postgresFunctions {
+		if _, err := tx.ExecContext(ctx, fn); err != nil {
+			return fmt.Errorf("sqlqueue: migrate: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sqlqueue: migrate: commit: %w", err)

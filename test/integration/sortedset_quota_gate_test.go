@@ -11,6 +11,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
 	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -29,7 +30,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 	ctx := context.Background()
 	const queueName = "test-sortedset"
 
-	gate := redisgate.NewRedisQuotaGate(rdb, "userid", redisgate.QuotaModeConcurrency, 1, 10*time.Second, "integ:")
+	gate := flowcontrol.NewQuotaGate(redisgate.NewQuotaStore(rdb, 10*time.Second), "userid", flowcontrol.QuotaModeConcurrency, 1, 10*time.Second, "integ:")
 
 	// Enqueue two messages for the same user.
 	for i, id := range []string{"msg-1", "msg-2"} {
@@ -118,7 +119,7 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 	const queueName = "test-ratelimit-sortedset"
 
 	// Allow 1 request per 2 seconds.
-	gate := redisgate.NewRedisQuotaGate(rdb, "userid", redisgate.QuotaModeRateLimit, 1, 2*time.Second, "rl-integ:")
+	gate := flowcontrol.NewQuotaGate(redisgate.NewQuotaStore(rdb, 2*time.Second), "userid", flowcontrol.QuotaModeRateLimit, 1, 2*time.Second, "rl-integ:")
 
 	ir := api.NewInternalRequest(
 		api.InternalRouting{RequestQueueName: queueName},
