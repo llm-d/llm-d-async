@@ -127,6 +127,31 @@ func TestQuotaHolderRenewKeepsSlots(t *testing.T) {
 	})
 }
 
+func TestDeleteQuotaHolderFreesItsSlots(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		require.NoError(t, s.RegisterQuotaHolder(ctx, "a", leaseTTL))
+		require.NoError(t, s.RegisterQuotaHolder(ctx, "b", leaseTTL))
+		for _, h := range []string{"a", "b"} {
+			got, err := s.AcquireQuotaSlots(ctx, h, "k", 2, 4)
+			require.NoError(t, err)
+			require.Equal(t, 2, got)
+		}
+
+		require.NoError(t, s.DeleteQuotaHolder(ctx, "a"))
+		require.NoError(t, s.DeleteQuotaHolder(ctx, "a"), "deleting twice is harmless")
+		assert.Equal(t, 2, quotaSlotsHeld(t, s, "k"))
+		_, err := s.AcquireQuotaSlots(ctx, "a", "k", 1, 4)
+		require.ErrorIs(t, err, ErrQuotaHolderLapsed, "a deleted holder cannot take slots")
+		ok, err := s.RenewQuotaHolder(ctx, "a", leaseTTL)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		got, err := s.AcquireQuotaSlots(ctx, "b", "k", 4, 4)
+		require.NoError(t, err)
+		assert.Equal(t, 2, got)
+	})
+}
+
 func TestReapQuotaHoldersDeletesLongLapsedHolders(t *testing.T) {
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()

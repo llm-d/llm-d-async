@@ -77,6 +77,19 @@ func (s *Store) AdmitQuota(ctx context.Context, key string, n, limit int, window
 	return granted, nil
 }
 
+// DeleteQuotaHolder deletes a holder and its slots, freeing everything it still counts.
+func (s *Store) DeleteQuotaHolder(ctx context.Context, holder string) error {
+	_, err := s.db.ExecContext(ctx, `
+WITH gone AS (
+	DELETE FROM async_quota_holders WHERE holder = $1 RETURNING holder
+)
+DELETE FROM async_quota_slots s USING gone WHERE s.holder = gone.holder`, holder)
+	if err != nil {
+		return fmt.Errorf("sqlqueue: delete quota holder: %w", err)
+	}
+	return nil
+}
+
 // ReapQuotaHolders deletes holders whose lease lapsed more than grace ago,
 // along with their slots.
 func (s *Store) ReapQuotaHolders(ctx context.Context, grace time.Duration) error {
