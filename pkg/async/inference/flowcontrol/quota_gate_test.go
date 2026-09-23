@@ -2,6 +2,9 @@ package flowcontrol_test
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -37,17 +40,29 @@ var quotaBackends = []struct {
 	}},
 }
 
+// openSQLStore opens a store in a schema of its own, dropped when the test ends.
 func openSQLStore(t *testing.T) *sqlqueue.Store {
 	t.Helper()
 	pgURL := os.Getenv("TEST_POSTGRES_URL")
 	if pgURL == "" {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
-	ctx := context.Background()
-	store, err := sqlqueue.Open(ctx, pgURL)
+	admin, err := sql.Open("pgx", pgURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	schema := fmt.Sprintf("quota_gate_%d", time.Now().UnixNano())
+	_, err = admin.Exec("CREATE SCHEMA " + schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
+
+	u, err := url.Parse(pgURL)
+	require.NoError(t, err)
+	query := u.Query()
+	query.Set("search_path", schema)
+	u.RawQuery = query.Encode()
+	store, err := sqlqueue.Open(context.Background(), u.String())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	require.NoError(t, store.TruncateForTest(ctx))
 	return store
 }
 
