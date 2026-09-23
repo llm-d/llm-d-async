@@ -114,6 +114,7 @@ type Request struct {
 	Queue     string
 	Partition int
 	Epoch     int64
+	Attempt   int64
 	Deadline  int64
 	Envelope  string
 	Payload   []byte
@@ -121,14 +122,15 @@ type Request struct {
 	createdAt int64
 }
 
+// Stamp names one dispatch of a request; every dispatch draws a fresh attempt.
 type Stamp struct {
 	Key
-	Epoch int64
+	Attempt int64
 }
 
 func (r Request) Key() Key { return Key{ID: r.ID, Token: r.Token} }
 
-func (r Request) Stamp() Stamp { return Stamp{Key: r.Key(), Epoch: r.Epoch} }
+func (r Request) Stamp() Stamp { return Stamp{Key: r.Key(), Attempt: r.Attempt} }
 
 func partitionOf(id string) int {
 	h := fnv.New32a()
@@ -191,13 +193,13 @@ func (s *Store) Dispatch(ctx context.Context, queue, owner string, now time.Time
 			ORDER BY r.deadline, r.created_at
 			LIMIT $4
 		)
-		UPDATE async_requests SET dispatch_epoch = p.epoch
+		UPDATE async_requests SET dispatch_epoch = p.epoch, dispatch_attempt = nextval('async_dispatch_attempts')
 		FROM async_partitions p
 		WHERE p.queue = async_requests.queue AND p.partition_id = async_requests.partition_id
 			AND p.owner = $1 AND p.draining = 0 AND async_requests.dispatch_epoch = 0
 			AND (async_requests.id, async_requests.request_token) IN (SELECT id, request_token FROM picked)
 		RETURNING async_requests.id, async_requests.request_token, async_requests.queue,
-			async_requests.partition_id, async_requests.dispatch_epoch, async_requests.deadline,
+			async_requests.partition_id, async_requests.dispatch_epoch, async_requests.dispatch_attempt, async_requests.deadline,
 			async_requests.envelope, async_requests.payload, async_requests.cancelled, async_requests.created_at`,
 		owner, queue, now.Unix(), limit)
 	if err != nil {
@@ -208,7 +210,7 @@ func (s *Store) Dispatch(ctx context.Context, queue, owner string, now time.Time
 	for rows.Next() {
 		var r Request
 		var cancelled int
-		if err := rows.Scan(&r.ID, &r.Token, &r.Queue, &r.Partition, &r.Epoch, &r.Deadline, &r.Envelope, &r.Payload, &cancelled, &r.createdAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Token, &r.Queue, &r.Partition, &r.Epoch, &r.Attempt, &r.Deadline, &r.Envelope, &r.Payload, &cancelled, &r.createdAt); err != nil {
 			return nil, fmt.Errorf("sqlqueue: dispatch scan: %w", err)
 		}
 		r.Cancelled = cancelled == 1
@@ -230,7 +232,7 @@ func (s *Store) InFlight(ctx context.Context, queue, owner string) ([]Stamp, err
 	ctx, span := s.span(ctx, "InFlight")
 	defer span.End()
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.id, r.request_token, r.dispatch_epoch
+		SELECT r.id, r.request_token, r.dispatch_attempt
 		FROM async_requests r
 		JOIN async_partitions p ON p.queue = r.queue AND p.partition_id = r.partition_id
 		WHERE r.queue = $1 AND r.dispatch_epoch > 0 AND p.owner = $2 AND r.dispatch_epoch = p.epoch`, queue, owner)
@@ -241,7 +243,7 @@ func (s *Store) InFlight(ctx context.Context, queue, owner string) ([]Stamp, err
 	var out []Stamp
 	for rows.Next() {
 		var st Stamp
-		if err := rows.Scan(&st.ID, &st.Token, &st.Epoch); err != nil {
+		if err := rows.Scan(&st.ID, &st.Token, &st.Attempt); err != nil {
 			return nil, fmt.Errorf("sqlqueue: in flight scan: %w", err)
 		}
 		out = append(out, st)
@@ -293,17 +295,17 @@ func (s *Store) Undispatch(ctx context.Context, owner string, stamps []Stamp) er
 		return nil
 	}
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		ids, tokens, epochs := make([]string, len(stamps)), make([]string, len(stamps)), make([]int64, len(stamps))
+		ids, tokens, attempts := make([]string, len(stamps)), make([]string, len(stamps)), make([]int64, len(stamps))
 		for i, st := range stamps {
-			ids[i], tokens[i], epochs[i] = st.ID, st.Token, st.Epoch
+			ids[i], tokens[i], attempts[i] = st.ID, st.Token, st.Attempt
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE async_requests SET dispatch_epoch = 0
-			FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, epoch), async_partitions p
+			FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt), async_partitions p
 			WHERE async_requests.id = k.id AND async_requests.request_token = k.request_token
-				AND async_requests.dispatch_epoch = k.epoch
+				AND async_requests.dispatch_epoch > 0 AND async_requests.dispatch_attempt = k.attempt
 				AND p.queue = async_requests.queue AND p.partition_id = async_requests.partition_id
-				AND p.owner = $1`, owner, ids, tokens, epochs); err != nil {
+				AND p.owner = $1`, owner, ids, tokens, attempts); err != nil {
 			return fmt.Errorf("update: %w", err)
 		}
 		return nil
@@ -320,10 +322,10 @@ func (s *Store) Retry(ctx context.Context, owner string, stamp Stamp, notBefore 
 	defer span.End()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE async_requests SET dispatch_epoch = 0, not_before = $4, envelope = $5
-		WHERE id = $1 AND request_token = $2 AND dispatch_epoch = $6 AND EXISTS (
+		WHERE id = $1 AND request_token = $2 AND dispatch_epoch > 0 AND dispatch_attempt = $6 AND EXISTS (
 			SELECT 1 FROM async_partitions p
 			WHERE p.queue = async_requests.queue AND p.partition_id = async_requests.partition_id AND p.owner = $3)`,
-		stamp.ID, stamp.Token, owner, notBefore, envelope, stamp.Epoch)
+		stamp.ID, stamp.Token, owner, notBefore, envelope, stamp.Attempt)
 	if err != nil {
 		return false, fmt.Errorf("sqlqueue: retry %q: %w", stamp.ID, err)
 	}
@@ -385,7 +387,7 @@ func (s *Store) CancelledKeys(ctx context.Context, keys []Key) (map[Key]bool, er
 
 type Completion struct {
 	Key
-	Epoch     int64
+	Attempt   int64
 	Route     string
 	Payload   string
 	ExpiresAt int64
@@ -405,7 +407,7 @@ func (s *Store) Ack(ctx context.Context, owner string, completions []Completion)
 	var unique []Completion
 	for i, c := range completions {
 		if pos, dup := position[c.Key]; dup {
-			if c.Epoch > unique[pos].Epoch {
+			if c.Attempt > unique[pos].Attempt {
 				unique[pos] = c
 				first[c.Key] = i
 			}
@@ -419,28 +421,28 @@ func (s *Store) Ack(ctx context.Context, owner string, completions []Completion)
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		n := len(unique)
 		ids, tokens, routes, payloads := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
-		epochs, expires := make([]int64, n), make([]int64, n)
+		attempts, expires := make([]int64, n), make([]int64, n)
 		for i, c := range unique {
-			ids[i], tokens[i], epochs[i], routes[i], payloads[i], expires[i] =
-				c.ID, c.Token, c.Epoch, c.Route, c.Payload, c.ExpiresAt
+			ids[i], tokens[i], attempts[i], routes[i], payloads[i], expires[i] =
+				c.ID, c.Token, c.Attempt, c.Route, c.Payload, c.ExpiresAt
 		}
 		rows, err := tx.QueryContext(ctx, `
 			WITH input AS (
 				SELECT * FROM unnest($2::text[], $3::text[], $4::bigint[], $5::text[], $6::text[], $7::bigint[])
-					AS t(id, request_token, epoch, route, payload, expires_at)
+					AS t(id, request_token, attempt, route, payload, expires_at)
 			), done AS (
 				DELETE FROM async_requests r USING input i, async_partitions p
 				WHERE r.id = i.id AND r.request_token = i.request_token
-					AND r.dispatch_epoch = i.epoch
+					AND r.dispatch_epoch > 0 AND r.dispatch_attempt = i.attempt
 					AND p.queue = r.queue AND p.partition_id = r.partition_id
-					AND p.owner = $1 AND p.epoch = i.epoch
+					AND p.owner = $1 AND p.epoch = r.dispatch_epoch
 				RETURNING r.id, r.request_token
 			)
 			INSERT INTO async_results (route, id, request_token, payload, expires_at, created_at)
 			SELECT i.route, i.id, i.request_token, i.payload, i.expires_at, $8::bigint
 			FROM done d JOIN input i ON i.id = d.id AND i.request_token = d.request_token
 			RETURNING id, request_token`,
-			owner, ids, tokens, epochs, routes, payloads, expires, createdAt)
+			owner, ids, tokens, attempts, routes, payloads, expires, createdAt)
 		if err != nil {
 			return fmt.Errorf("ack statement: %w", err)
 		}
