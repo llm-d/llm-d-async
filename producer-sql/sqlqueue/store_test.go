@@ -77,8 +77,16 @@ func ids(rs []Request) []string {
 	return out
 }
 
-func completion(id, route string) Completion {
-	return Completion{Key: Key{ID: id, Token: "t"}, Epoch: 1, Route: route, Payload: `{"id":"` + id + `"}`}
+func completion(st Stamp, route string) Completion {
+	return Completion{Key: st.Key, Attempt: st.Attempt, Route: route, Payload: `{"id":"` + st.ID + `"}`}
+}
+
+func stampOf(t *testing.T, s *Store, id string) Stamp {
+	t.Helper()
+	st := Stamp{Key: Key{ID: id}}
+	require.NoError(t, s.db.QueryRowContext(context.Background(),
+		`SELECT request_token, dispatch_attempt FROM async_requests WHERE id = $1`, id).Scan(&st.Token, &st.Attempt))
+	return st
 }
 
 func TestValidateDSN(t *testing.T) {
@@ -345,6 +353,7 @@ func TestAcquireAfterLapseRedeliversAndFencesOldOwner(t *testing.T) {
 		}
 		require.NoError(t, s.Enqueue(ctx, req("x", now.Unix()+3600)))
 		require.Equal(t, []string{"x"}, dispatchIDs(t, s, "a", now, 10))
+		old := stampOf(t, s, "x")
 
 		live, err := s.AcquirePartitions(ctx, "q", "b", now.Add(leaseTTL-time.Second), leaseTTL, Partitions)
 		require.NoError(t, err)
@@ -371,20 +380,21 @@ func TestAcquireAfterLapseRedeliversAndFencesOldOwner(t *testing.T) {
 		require.NoError(t, s.ResetStale(ctx, "q", "b", nil))
 		assert.Equal(t, []string{"x"}, dispatchIDs(t, s, "b", later, 10))
 		assert.Empty(t, dispatchIDs(t, s, "a", later, 10))
+		current := stampOf(t, s, "x")
 
-		acked, err := s.Ack(ctx, "a", []Completion{completion("x", "route")})
+		acked, err := s.Ack(ctx, "a", []Completion{completion(old, "route")})
 		require.NoError(t, err)
 		assert.Equal(t, []bool{false}, acked, "old owner's ack is fenced")
-		current := Stamp{Key: Key{ID: "x", Token: "t"}, Epoch: 2}
+		acked, err = s.Ack(ctx, "a", []Completion{completion(current, "route")})
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false}, acked, "the current attempt acked by a non-owner is fenced")
 		ok, err := s.Retry(ctx, "a", current, 0, "{}")
 		require.NoError(t, err)
 		assert.False(t, ok, "old owner's retry is fenced")
 		require.NoError(t, s.Undispatch(ctx, "a", []Stamp{current}))
 		assert.Empty(t, dispatchIDs(t, s, "b", later, 10), "old owner's undispatch is fenced")
 
-		currentCompletion := completion("x", "route")
-		currentCompletion.Epoch = 2
-		acked, err = s.Ack(ctx, "b", []Completion{currentCompletion})
+		acked, err = s.Ack(ctx, "b", []Completion{completion(current, "route")})
 		require.NoError(t, err)
 		assert.Equal(t, []bool{true}, acked)
 		res, err := s.PopResults(ctx, "route", later.Unix(), 10)
@@ -409,20 +419,19 @@ func TestAckFromEarlierEpochIsFencedAfterSameOwnerReacquires(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, reacquired, 1)
 		require.EqualValues(t, 2, reacquired[0].Epoch)
+		acked, err := s.Ack(ctx, "a", []Completion{completion(first[0].Stamp(), "route")})
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false}, acked, "a row stamped under an older epoch is fenced before it is reset")
 		require.NoError(t, s.ResetStale(ctx, "q", "a", []int{first[0].Partition}))
 		second, err := s.Dispatch(ctx, "q", "a", now, 1)
 		require.NoError(t, err)
 		require.Len(t, second, 1)
 
-		stale := completion("reacquired", "route")
-		stale.Epoch = first[0].Epoch
-		acked, err := s.Ack(ctx, "a", []Completion{stale})
+		acked, err = s.Ack(ctx, "a", []Completion{completion(first[0].Stamp(), "route")})
 		require.NoError(t, err)
 		assert.Equal(t, []bool{false}, acked)
 
-		current := completion("reacquired", "route")
-		current.Epoch = second[0].Epoch
-		acked, err = s.Ack(ctx, "a", []Completion{current})
+		acked, err = s.Ack(ctx, "a", []Completion{completion(second[0].Stamp(), "route")})
 		require.NoError(t, err)
 		assert.Equal(t, []bool{true}, acked)
 	})
@@ -506,17 +515,18 @@ func TestAckIsBatchedFencedAndDeduplicated(t *testing.T) {
 		ownAll(t, s, "a", now)
 		require.NoError(t, s.Enqueue(ctx, req("a1", now.Unix()+100), req("a2", now.Unix()+100)))
 		require.Len(t, dispatchIDs(t, s, "a", now, 10), 2)
+		a1, a2 := stampOf(t, s, "a1"), stampOf(t, s, "a2")
 
 		acked, err := s.Ack(ctx, "a", []Completion{
-			completion("a1", "r1"),
-			completion("a1", "r1"),
-			{Key: Key{ID: "a2", Token: "t"}, Epoch: 1, Route: "r2", Payload: "two", ExpiresAt: now.Unix() + 60},
-			completion("unknown", "r1"),
+			completion(a1, "r1"),
+			completion(a1, "r1"),
+			{Key: a2.Key, Attempt: a2.Attempt, Route: "r2", Payload: "two", ExpiresAt: now.Unix() + 60},
+			completion(Stamp{Key: Key{ID: "unknown", Token: "t"}, Attempt: a1.Attempt}, "r1"),
 		})
 		require.NoError(t, err)
 		assert.Equal(t, []bool{true, false, true, false}, acked)
 
-		acked, err = s.Ack(ctx, "a", []Completion{completion("a1", "r1")})
+		acked, err = s.Ack(ctx, "a", []Completion{completion(a1, "r1")})
 		require.NoError(t, err)
 		assert.Equal(t, []bool{false}, acked, "a second ack of the same request writes nothing")
 
@@ -537,6 +547,41 @@ func TestAckIsBatchedFencedAndDeduplicated(t *testing.T) {
 	})
 }
 
+func TestRedispatchUnderTheSameEpochDrawsANewAttempt(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		require.NoError(t, s.Enqueue(ctx, req("again", now.Unix()+100)))
+		first, err := s.Dispatch(ctx, "q", "a", now, 10)
+		require.NoError(t, err)
+		require.Len(t, first, 1)
+		ok, err := s.Retry(ctx, "a", first[0].Stamp(), now.Unix(), `{"id":"again"}`)
+		require.NoError(t, err)
+		require.True(t, ok)
+		second, err := s.Dispatch(ctx, "q", "a", now, 10)
+		require.NoError(t, err)
+		require.Len(t, second, 1)
+		require.Equal(t, first[0].Epoch, second[0].Epoch)
+		require.NotEqual(t, first[0].Attempt, second[0].Attempt, "every dispatch draws a fresh attempt")
+
+		inflight, err := s.InFlight(ctx, "q", "a")
+		require.NoError(t, err)
+		assert.Equal(t, []Stamp{second[0].Stamp()}, inflight)
+		ok, err = s.Retry(ctx, "a", first[0].Stamp(), now.Unix(), `{}`)
+		require.NoError(t, err)
+		assert.False(t, ok, "a retry of the first dispatch is fenced")
+		require.NoError(t, s.Undispatch(ctx, "a", []Stamp{first[0].Stamp()}))
+		assert.Empty(t, dispatchIDs(t, s, "a", now, 10), "an undispatch of the first dispatch is fenced")
+		acked, err := s.Ack(ctx, "a", []Completion{completion(first[0].Stamp(), "route")})
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false}, acked, "an ack of the first dispatch is fenced")
+		acked, err = s.Ack(ctx, "a", []Completion{completion(second[0].Stamp(), "route")})
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true}, acked)
+	})
+}
+
 func TestUndispatchReturnsRequestsToPending(t *testing.T) {
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
@@ -547,7 +592,7 @@ func TestUndispatchReturnsRequestsToPending(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, rows, 2)
 		stale := rows[0].Stamp()
-		stale.Epoch--
+		stale.Attempt--
 		require.NoError(t, s.Undispatch(ctx, "a", []Stamp{stale}))
 		assert.Empty(t, dispatchIDs(t, s, "a", now, 10), "an undispatch naming an older dispatch is fenced")
 		require.NoError(t, s.Undispatch(ctx, "a", []Stamp{rows[0].Stamp(), rows[1].Stamp(), rows[0].Stamp()}))
@@ -567,14 +612,14 @@ func TestRetryParksWithUpdatedEnvelope(t *testing.T) {
 		require.Equal(t, []string{"mid", "late"}, ids(dispatched))
 
 		stale := dispatched[0].Stamp()
-		stale.Epoch--
+		stale.Attempt--
 		ok, err := s.Retry(ctx, "a", stale, now.Unix()+5, `{"stale":true}`)
 		require.NoError(t, err)
 		assert.False(t, ok, "a retry naming an older dispatch is fenced")
 		ok, err = s.Retry(ctx, "a", dispatched[0].Stamp(), now.Unix()+5, `{"retried":true}`)
 		require.NoError(t, err)
 		require.True(t, ok)
-		ok, err = s.Retry(ctx, "a", Stamp{Key: Key{ID: "missing", Token: "t"}, Epoch: 1}, now.Unix()+5, `{}`)
+		ok, err = s.Retry(ctx, "a", Stamp{Key: Key{ID: "missing", Token: "t"}, Attempt: 1}, now.Unix()+5, `{}`)
 		require.NoError(t, err)
 		assert.False(t, ok)
 
@@ -620,7 +665,8 @@ func TestExpiredResultsAreDropped(t *testing.T) {
 		ownAll(t, s, "a", now)
 		require.NoError(t, s.Enqueue(ctx, req("a", now.Unix()+100)))
 		require.Len(t, dispatchIDs(t, s, "a", now, 10), 1)
-		acked, err := s.Ack(ctx, "a", []Completion{{Key: Key{ID: "a", Token: "t"}, Epoch: 1, Route: "route", Payload: "{}", ExpiresAt: now.Unix() + 10}})
+		st := stampOf(t, s, "a")
+		acked, err := s.Ack(ctx, "a", []Completion{{Key: st.Key, Attempt: st.Attempt, Route: "route", Payload: "{}", ExpiresAt: now.Unix() + 10}})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true}, acked)
 		res, err := s.PopResults(ctx, "route", now.Unix()+11, 10)
@@ -666,7 +712,7 @@ func TestPopResultsDrainsInOrder(t *testing.T) {
 		for _, id := range []string{"a", "b", "c"} {
 			require.NoError(t, s.Enqueue(ctx, req(id, now.Unix()+100)))
 			require.Len(t, dispatchIDs(t, s, "a", now, 10), 1)
-			acked, err := s.Ack(ctx, "a", []Completion{completion(id, "route")})
+			acked, err := s.Ack(ctx, "a", []Completion{completion(stampOf(t, s, id), "route")})
 			require.NoError(t, err)
 			require.Equal(t, []bool{true}, acked)
 		}

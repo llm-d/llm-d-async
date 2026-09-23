@@ -386,7 +386,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 		if !ok {
 			ir = &api.InternalRequest{PublicRequest: &api.RequestMessage{ID: row.ID}}
 			ir.RequestToken = row.Token
-			ir.DispatchEpoch = row.Epoch
+			ir.DispatchAttempt = row.Attempt
 			f.stampRouting(ir, cfg)
 			if !f.emit(ctx, api.NewErrorResult(ir.PublicRequest, ir.InternalRouting, api.ErrCodeInvalidRequest, "unparsable queued request")) {
 				stop()
@@ -394,7 +394,7 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 			}
 			continue
 		}
-		ir.DispatchEpoch = row.Epoch
+		ir.DispatchAttempt = row.Attempt
 		f.stampRouting(ir, cfg)
 		reqID := ir.PublicRequest.ReqID()
 
@@ -450,13 +450,13 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 		}
 
 		if len(releases) > 0 {
-			f.trackGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Epoch: ir.DispatchEpoch}, releases)
+			f.trackGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Attempt: ir.DispatchAttempt}, releases)
 		}
 		ir.IngestionTime = time.Now()
 		select {
 		case q.channel.Channel <- ir:
 		case <-ctx.Done():
-			f.releaseGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Epoch: ir.DispatchEpoch})
+			f.releaseGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Attempt: ir.DispatchAttempt})
 			stop()
 			return
 		}
@@ -571,7 +571,7 @@ func (f *Flow) retryWorker(ctx context.Context) {
 			return
 		}
 		reqID := msg.PublicRequest.ReqID()
-		stamp := sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: msg.RequestToken}, Epoch: msg.DispatchEpoch}
+		stamp := sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: msg.RequestToken}, Attempt: msg.DispatchAttempt}
 		f.releaseGateReleases(stamp)
 		q, ok := f.originQueue(msg.InternalRouting)
 		if !ok {
@@ -621,8 +621,8 @@ func (f *Flow) resultWorker(ctx context.Context) {
 		byQueue := map[*queueRuntime][]sqlqueue.Completion{}
 		for _, result := range batch {
 			stamp := sqlqueue.Stamp{
-				Key:   sqlqueue.Key{ID: result.ID, Token: result.Routing.RequestToken},
-				Epoch: result.Routing.DispatchEpoch,
+				Key:     sqlqueue.Key{ID: result.ID, Token: result.Routing.RequestToken},
+				Attempt: result.Routing.DispatchAttempt,
 			}
 			f.releaseGateReleases(stamp)
 			q, ok := f.originQueue(result.Routing)
@@ -640,7 +640,7 @@ func (f *Flow) resultWorker(ctx context.Context) {
 			}
 			byQueue[q] = append(byQueue[q], sqlqueue.Completion{
 				Key:       stamp.Key,
-				Epoch:     stamp.Epoch,
+				Attempt:   stamp.Attempt,
 				Route:     route,
 				Payload:   marshalResult(result),
 				ExpiresAt: expiresAt,
@@ -654,7 +654,7 @@ func (f *Flow) resultWorker(ctx context.Context) {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to write results; returning requests to the queue", "queue", q.config.QueueName, "count", len(completions))
 				stamps := make([]sqlqueue.Stamp, len(completions))
 				for i, c := range completions {
-					stamps[i] = sqlqueue.Stamp{Key: c.Key, Epoch: c.Epoch}
+					stamps[i] = sqlqueue.Stamp{Key: c.Key, Attempt: c.Attempt}
 				}
 				q.consumer.Abandon(stamps...)
 				continue
