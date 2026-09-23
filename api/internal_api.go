@@ -35,7 +35,7 @@ type InternalRouting struct {
 	RetryCount             int    `json:"retry_count,omitempty"`
 	QueueID                string `json:"queue_id,omitempty"`
 	RequestToken           string `json:"request_token,omitempty"`
-	DispatchEpoch          int64  `json:"dispatch_epoch,omitempty"`
+	DispatchAttempt        int64  `json:"dispatch_attempt,omitempty"`
 	RequestQueueName       string `json:"request_queue_name,omitempty"`
 	ResultQueueName        string `json:"result_queue_name,omitempty"`
 	ResultTTLSeconds       int64  `json:"result_ttl_seconds,omitempty"`

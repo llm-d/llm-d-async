@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS async_requests (
 	deadline       BIGINT   NOT NULL,
 	not_before     BIGINT   NOT NULL DEFAULT 0,
 	dispatch_epoch BIGINT   NOT NULL DEFAULT 0,
+	dispatch_attempt BIGINT NOT NULL DEFAULT 0,
 	cancelled      SMALLINT NOT NULL DEFAULT 0,
 	envelope       TEXT     NOT NULL,
 	payload        BYTEA    NOT NULL,
@@ -87,6 +88,8 @@ CREATE TABLE IF NOT EXISTS async_results (
 );
 CREATE INDEX IF NOT EXISTS async_results_route_seq ON async_results (route, seq);
 CREATE INDEX IF NOT EXISTS async_results_expiry ON async_results (route, expires_at) WHERE expires_at > 0;
+
+CREATE SEQUENCE IF NOT EXISTS async_dispatch_attempts;
 `
 
 const migrateLockID = 0x6173796e6371 // "asyncq"
@@ -94,7 +97,7 @@ const migrateLockID = 0x6173796e6371 // "asyncq"
 // Migrate is safe to run concurrently; an existing schema takes no DDL locks.
 func (s *Store) Migrate(ctx context.Context) error {
 	var present bool
-	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('async_results_expiry') IS NOT NULL`).Scan(&present); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('async_dispatch_attempts') IS NOT NULL`).Scan(&present); err != nil {
 		return fmt.Errorf("sqlqueue: migrate: check schema: %w", err)
 	}
 	if present {

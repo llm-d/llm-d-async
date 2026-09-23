@@ -38,14 +38,14 @@ func TestDoneStampDoesNotForgetANewerAttempt(t *testing.T) {
 	key := Key{ID: "same", Token: "generation"}
 	c := &Consumer{
 		leases:   map[int]*partitionState{3: {epoch: 2, inflight: 1}},
-		inflight: map[Key]tracked{key: {partition: 3, epoch: 2}},
+		inflight: map[Key]tracked{key: {partition: 3, epoch: 2, attempt: 9}},
 	}
 
-	c.doneStamps([]Stamp{{Key: key, Epoch: 1}})
+	c.doneStamps([]Stamp{{Key: key, Attempt: 8}})
 	assert.Equal(t, 1, inflightOf(c), "a stale outcome must not forget the current attempt")
 	assert.Equal(t, 1, c.leases[3].inflight)
 
-	c.doneStamps([]Stamp{{Key: key, Epoch: 2}})
+	c.doneStamps([]Stamp{{Key: key, Attempt: 9}})
 	assert.Zero(t, inflightOf(c))
 	assert.Zero(t, c.leases[3].inflight)
 }
@@ -56,7 +56,7 @@ func (c *Consumer) stamps(keys []Key) []Stamp {
 	out := make([]Stamp, 0, len(keys))
 	for _, k := range keys {
 		if t, ok := c.inflight[k]; ok {
-			out = append(out, Stamp{Key: k, Epoch: t.epoch})
+			out = append(out, Stamp{Key: k, Attempt: t.attempt})
 		}
 	}
 	return out
@@ -76,9 +76,7 @@ func ack(t *testing.T, c *Consumer, id string) bool {
 	key := Key{ID: id, Token: "t"}
 	stamps := c.stamps([]Key{key})
 	require.Len(t, stamps, 1)
-	comp := completion(id, "route")
-	comp.Epoch = stamps[0].Epoch
-	acked, err := c.Ack(context.Background(), []Completion{comp})
+	acked, err := c.Ack(context.Background(), []Completion{completion(stamps[0], "route")})
 	require.NoError(t, err)
 	return acked[0]
 }
@@ -384,7 +382,7 @@ func TestConsumerRetryBookkeepingKeepsTheAttemptPollHandedOut(t *testing.T) {
 		a.doneStamps([]Stamp{stamp})
 		assert.Equal(t, 1, inflightOf(a), "the retry's bookkeeping must not forget the attempt Poll handed out")
 
-		a.Abandon(stamp)
+		a.Abandon(a.stamps([]Key{{ID: "raced", Token: "t"}})...)
 		assert.Equal(t, []string{"raced"}, redelivered(t, a, now), "an attempt whose outcome could not be written is handed out again")
 	})
 }
@@ -409,7 +407,6 @@ func TestConsumerReconcileIgnoresTheBookkeepingOfAFinishedRetry(t *testing.T) {
 		redispatched, err := s.Dispatch(ctx, "q", "a", now, 10)
 		require.NoError(t, err)
 		require.Len(t, redispatched, 1)
-		require.Equal(t, stamp, redispatched[0].Stamp(), "the lost dispatch reuses the retried stamp")
 		rebalance(t, a, now)
 		a.doneStamps([]Stamp{stamp})
 
@@ -443,9 +440,7 @@ func TestConsumerRedeliversAfterReacquiringAPartition(t *testing.T) {
 		require.Len(t, active, Partitions)
 
 		assert.Equal(t, []string{"slow"}, poll(t, a, now), "the reset request is handed out under the new epoch")
-		stale := completion("slow", "route")
-		stale.Epoch = old.Epoch
-		acked, err := a.Ack(ctx, []Completion{stale})
+		acked, err := a.Ack(ctx, []Completion{completion(old, "route")})
 		require.NoError(t, err)
 		assert.False(t, acked[0], "the attempt from the old epoch is fenced")
 		assert.True(t, ack(t, a, "slow"), "the attempt from the new epoch completes")
@@ -599,9 +594,7 @@ func TestConsumerStaleOutcomeKeepsTheNewEpochsCount(t *testing.T) {
 		require.NoError(t, s.Enqueue(ctx, req(fresh, now.Unix()+3600)))
 		require.Equal(t, []string{fresh}, poll(t, a, now))
 
-		comp := completion(old, "route")
-		comp.Epoch = stale.Epoch
-		acked, err := a.Ack(ctx, []Completion{comp})
+		acked, err := a.Ack(ctx, []Completion{completion(stale, "route")})
 		require.NoError(t, err)
 		assert.False(t, acked[0])
 		a.mu.Lock()
