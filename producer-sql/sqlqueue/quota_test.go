@@ -267,6 +267,27 @@ func TestAdmitQuotaSlidingWindow(t *testing.T) {
 	})
 }
 
+// A short-window gate on the same key must not delete a long-window gate's
+// admissions as expired for its own window.
+func TestAdmitQuotaWindowsCountSeparately(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		const long, short = time.Minute, 200 * time.Millisecond
+
+		got, err := s.AdmitQuota(ctx, "k", 2, 2, long)
+		require.NoError(t, err)
+		require.Equal(t, 2, got)
+		time.Sleep(short + 100*time.Millisecond)
+
+		got, err = s.AdmitQuota(ctx, "k", 1, 2, short)
+		require.NoError(t, err)
+		assert.Equal(t, 1, got, "the short window counts only its own admissions")
+		got, err = s.AdmitQuota(ctx, "k", 2, 2, long)
+		require.NoError(t, err)
+		assert.Zero(t, got, "the long window still holds its two admissions")
+	})
+}
+
 func TestAdmitQuotaIsExactUnderContention(t *testing.T) {
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
