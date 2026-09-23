@@ -73,7 +73,7 @@ func TestPoolGating_Blocking(t *testing.T) {
 				ID:       id,
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(5 * time.Minute).Unix(),
-				Payload:  map[string]any{"model": "test", "prompt": "hello"},
+				Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 			},
 		)
 		requestChannel <- pipeline.EmbelishedRequestMessage{
@@ -159,7 +159,7 @@ func TestPoolGating_Timeout(t *testing.T) {
 			ID:       "req-slow",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	requestChannel <- pipeline.EmbelishedRequestMessage{
@@ -174,7 +174,7 @@ func TestPoolGating_Timeout(t *testing.T) {
 			ID:       "req-timeout",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(100 * time.Millisecond).Unix(), // 100ms deadline
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	requestChannel <- pipeline.EmbelishedRequestMessage{
@@ -260,7 +260,7 @@ func TestPoolGating_ActionWait(t *testing.T) {
 			ID:       "req-wait",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	requestChannel <- pipeline.EmbelishedRequestMessage{
@@ -324,7 +324,7 @@ func TestPoolGating_ActionRefuse(t *testing.T) {
 			ID:       "req-refuse",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	requestChannel <- pipeline.EmbelishedRequestMessage{
@@ -414,7 +414,7 @@ func TestPoolGating_RedisLeasedRateWaitsUntilLeasePermits(t *testing.T) {
 
 	requestChannel <- pipeline.EmbelishedRequestMessage{
 		InternalRequest: asyncapi.NewInternalRequest(asyncapi.InternalRouting{RequestQueueName: "batch-queue"}, &asyncapi.RequestMessage{
-			ID: "leased-wait", Created: time.Now().Unix(), Deadline: time.Now().Add(30 * time.Second).Unix(), Payload: map[string]any{"model": "test"},
+			ID: "leased-wait", Created: time.Now().Unix(), Deadline: time.Now().Add(30 * time.Second).Unix(), Payload: testPayload(map[string]any{"model": "test"}),
 		}),
 		RequestURL:   server.URL,
 		WorkerPoolID: "batch-pool",
@@ -461,7 +461,7 @@ func TestPoolGating_RedisLeasedRateWaitTimeoutRequeues(t *testing.T) {
 
 	requestChannel <- pipeline.EmbelishedRequestMessage{
 		InternalRequest: asyncapi.NewInternalRequest(asyncapi.InternalRouting{RequestQueueName: "batch-queue"}, &asyncapi.RequestMessage{
-			ID: "leased-timeout", Created: time.Now().Unix(), Deadline: time.Now().Add(30 * time.Second).Unix(), Payload: map[string]any{"model": "test"},
+			ID: "leased-timeout", Created: time.Now().Unix(), Deadline: time.Now().Add(30 * time.Second).Unix(), Payload: testPayload(map[string]any{"model": "test"}),
 		}),
 		RequestURL:   "http://unused.invalid",
 		WorkerPoolID: "batch-pool",

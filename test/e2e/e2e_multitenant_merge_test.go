@@ -33,7 +33,7 @@ func makeTeamMessages(team string, n int) []api.RequestMessage {
 	for i := 0; i < n; i++ {
 		m := makeRequestMessage(fmt.Sprintf("%s-%d", team, i), 5*time.Minute)
 		m.Metadata = map[string]string{"team": team}
-		m.Payload = map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 64}
+		m.Payload = testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 64})
 		msgs = append(msgs, m)
 	}
 	return msgs

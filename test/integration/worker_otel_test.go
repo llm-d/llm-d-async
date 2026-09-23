@@ -76,7 +76,7 @@ func TestWorkerDispatch_TraceparentInjected(t *testing.T) {
 			ID:       "traceparent-inject-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test", "prompt": "hello"},
+			Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 		},
 	)
 
@@ -134,7 +134,7 @@ func TestWorkerDispatch_SpanHierarchy(t *testing.T) {
 			ID:       "hierarchy-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test", "prompt": "hello"},
+			Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 		},
 	)
 
@@ -218,7 +218,7 @@ func TestWorkerDispatch_MetadataTraceContextPropagation(t *testing.T) {
 			ID:       "e2e-propagation-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test", "prompt": "hello"},
+			Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 			Metadata: metadata,
 		},
 	)
