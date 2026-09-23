@@ -332,3 +332,55 @@ func assertRouting(t *testing.T, got, want InternalRouting) {
 		t.Errorf("TransportCorrelationID = %q, want %q", got.TransportCorrelationID, want.TransportCorrelationID)
 	}
 }
+
+func TestQueueScore(t *testing.T) {
+	const d = int64(1_790_000_000)
+	start := d*1000 - queueScoreHorizonMs
+	type at struct{ deadline, enqueuedAtMs int64 }
+
+	tests := []struct {
+		name        string
+		lower, high at
+		tie         bool
+	}{
+		{name: "unstamped ties the start of the window", lower: at{d, 0}, high: at{d, start}, tie: true},
+		{name: "before the window clamps to its start", lower: at{d, start - 1}, high: at{d, start}, tie: true},
+		{name: "one 62.5ms step ties", lower: at{d, start}, high: at{d, start + 62}, tie: true},
+		{name: "63ms apart orders by enqueue time", lower: at{d, start}, high: at{d, start + 63}},
+		{name: "after the deadline stays below the next deadline", lower: at{d, d*1000 + 3_600_000}, high: at{d + 1, 0}},
+		{name: "adjacent steps stay distinct at the largest 32-bit deadline", lower: at{1<<32 - 1, (1<<32-1)*1000 - 1000}, high: at{1<<32 - 1, (1<<32-1)*1000 - 937}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lo := queueScore(tt.lower.deadline, tt.lower.enqueuedAtMs)
+			hi := queueScore(tt.high.deadline, tt.high.enqueuedAtMs)
+			if tt.tie && lo != hi {
+				t.Errorf("scores %v and %v, want equal", lo, hi)
+			}
+			if !tt.tie && lo >= hi {
+				t.Errorf("scores %v and %v, want strictly increasing", lo, hi)
+			}
+		})
+	}
+
+	t.Run("method scores the envelope's deadline and stamp", func(t *testing.T) {
+		ir := NewInternalRequest(InternalRouting{EnqueuedAtMs: start + 5000}, &RequestMessage{Deadline: d})
+		if got, want := ir.QueueScore(), queueScore(d, start+5000); got != want {
+			t.Errorf("QueueScore() = %v, want %v", got, want)
+		}
+		if got := (&InternalRequest{}).QueueScore(); got != 0 {
+			t.Errorf("QueueScore() without a PublicRequest = %v, want 0", got)
+		}
+	})
+
+	t.Run("strictly increasing across the whole window", func(t *testing.T) {
+		prev := queueScore(d, start)
+		for enq := start + 63; enq < d*1000; enq += 63 {
+			got := queueScore(d, enq)
+			if got <= prev || got >= float64(d+1) {
+				t.Fatalf("queueScore(d, %d) = %v after %v, want increasing and below d+1", enq, got, prev)
+			}
+			prev = got
+		}
+	})
+}

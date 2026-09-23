@@ -40,6 +40,8 @@ type InternalRouting struct {
 	ResultTTLSeconds       int64  `json:"result_ttl_seconds,omitempty"`
 	ResultRoutingResolved  bool   `json:"result_routing_resolved,omitempty"`
 	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
+	// EnqueuedAtMs is the producer's submit time in Unix milliseconds.
+	EnqueuedAtMs int64 `json:"enqueued_at_ms,omitempty"`
 	// Labels is the framework's per-message label set. Seeded by the
 	// Flow at pull time from the originating channel's effective
 	// policy read and mutate this map in place. Producer-controlled
@@ -92,6 +94,29 @@ type InternalResult struct {
 // routing fields may be zero; PublicRequest must be non-nil.
 func NewInternalRequest(routing InternalRouting, typedReq Request) *InternalRequest {
 	return &InternalRequest{InternalRouting: routing, PublicRequest: typedReq}
+}
+
+const (
+	queueScoreHorizonMs    = (1 << 17) * 1000
+	queueScoreFractionBits = 21
+)
+
+func queueScore(deadline, enqueuedAtMs int64) float64 {
+	if enqueuedAtMs <= 0 {
+		return float64(deadline)
+	}
+	offset := enqueuedAtMs - (deadline*1000 - queueScoreHorizonMs)
+	offset = min(max(offset, 0), queueScoreHorizonMs-1)
+	step := offset * (1 << queueScoreFractionBits) / queueScoreHorizonMs
+	return float64(deadline) + float64(step)/(1<<queueScoreFractionBits)
+}
+
+// QueueScore orders by deadline, then by EnqueuedAtMs in 62.5ms steps.
+func (ir *InternalRequest) QueueScore() float64 {
+	if ir.PublicRequest == nil {
+		return 0
+	}
+	return queueScore(ir.PublicRequest.ReqDeadline(), ir.EnqueuedAtMs)
 }
 
 // --- JSON wire format (Redis, etc.) ---

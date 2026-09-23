@@ -441,4 +441,46 @@ var _ = ginkgo.Describe("Redis Dispatch Gate E2E", func() {
 		gomega.Expect(result.ErrorMessage).To(gomega.Equal("cancelled"))
 		gomega.Expect(result.StatusCode).To(gomega.Equal(0))
 	})
+
+	ginkgo.It("dispatches requests sharing a deadline in submission order", func() {
+		setDispatchGateBudget(ctx, rdb, "0.0")
+
+		producer, err := producerpkg.NewRedisSortedSetProducer(producerpkg.RedisSortedSetConfig{
+			RedisURL:         "redis://localhost:" + redisPort,
+			RequestQueueName: redisGateRequestQueue,
+			ResultQueueName:  redisGateResultQueue,
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(func() {
+			gomega.Expect(producer.Close()).To(gomega.Succeed())
+		})
+
+		deadline := time.Now().Add(24 * time.Hour).Unix()
+		var submitted []string
+		for i := range 8 {
+			id := fmt.Sprintf("fifo-%d", i)
+			gomega.Expect(producer.SubmitRequest(ctx, &api.RequestMessage{
+				ID:       id,
+				Created:  time.Now().Unix(),
+				Deadline: deadline,
+				Payload:  map[string]any{"model": "test-model", "prompt": id},
+			})).To(gomega.Succeed())
+			submitted = append(submitted, id)
+			time.Sleep(80 * time.Millisecond)
+		}
+		gomega.Expect(rdb.ZCard(ctx, redisGateRequestQueue).Val()).To(gomega.Equal(int64(len(submitted))))
+
+		setDispatchGateBudget(ctx, rdb, "1.0")
+
+		var dispatched []string
+		for range submitted {
+			resultCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			result, err := producer.GetResult(resultCtx)
+			cancel()
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(result).NotTo(gomega.BeNil())
+			dispatched = append(dispatched, result.ID)
+		}
+		gomega.Expect(dispatched).To(gomega.Equal(submitted))
+	})
 })

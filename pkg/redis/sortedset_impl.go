@@ -643,7 +643,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 			cardCmd = pipe.ZCard(ctx, cd.queueName)
 			for _, b := range buckets {
 				countCmds = append(countCmds, pipe.ZCount(ctx, cd.queueName, "-inf",
-					strconv.FormatInt(now+int64(b.Seconds()), 10)))
+					"("+strconv.FormatInt(now+int64(b.Seconds())+1, 10)))
 			}
 			return nil
 		})
@@ -854,7 +854,7 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 		// Runs off the cancelled ctx so the hand-back still reaches Redis.
 		releaseOnShutdown := func(token string, requestToken string) {
 			if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
-				return r.releaseClaim(ctx, queueName, reqID, requestToken, member, deadline, token)
+				return r.releaseClaim(ctx, queueName, reqID, requestToken, member, ir.QueueScore(), token)
 			}); err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to release claim on shutdown", "id", reqID)
 			}
@@ -1332,7 +1332,7 @@ func (r *RedisSortedSetFlow) retryMover(ctx context.Context) {
 					queueName = r.fallbackRequestQueue()
 				}
 				if err := r.rdb.ZAdd(ctx, queueName, redis.Z{
-					Score:  float64(ir.PublicRequest.ReqDeadline()),
+					Score:  ir.QueueScore(),
 					Member: member,
 				}).Err(); err != nil {
 					logger.V(logutil.DEFAULT).Error(err, "Failed to re-enter due retry", "queue", queueName)

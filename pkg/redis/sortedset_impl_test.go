@@ -543,14 +543,16 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 
 	go flow.retryWorker(ctx)
 
+	deadline := time.Now().Add(24 * time.Hour).Unix()
+	enqueuedAtMs := time.Now().UnixMilli()
 	retryMsg := pipeline.RetryMessage{
 		EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
 			InternalRequest: api.NewInternalRequest(
-				api.InternalRouting{RetryCount: 1, RequestQueueName: queue},
+				api.InternalRouting{RetryCount: 1, RequestQueueName: queue, EnqueuedAtMs: enqueuedAtMs},
 				&api.RequestMessage{
 					ID:       "retry-1",
 					Created:  time.Now().Unix(),
-					Deadline: 9999999999,
+					Deadline: deadline,
 				},
 			),
 		},
@@ -575,8 +577,8 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 		t.Errorf("Retry due-time score incorrect: expected ~%f, got %f", expectedScore, results[0].Score)
 	}
 
-	// Once due, the mover re-enters it into the request queue with the
-	// original deadline as the score. The mover compares scores against
+	// Once due, the mover re-enters it into the request queue at its
+	// original queue score. The mover compares scores against
 	// wall-clock time (miniredis.FastForward cannot advance time.Now()), so
 	// this waits out the 2s backoff in real time.
 	go flow.retryMover(ctx)
@@ -584,8 +586,8 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 	for {
 		entries, _ := rdb.ZRangeWithScores(ctx, queue, 0, -1).Result()
 		if len(entries) == 1 {
-			if entries[0].Score != 9999999999 {
-				t.Errorf("Re-entered retry should carry deadline score, got %f", entries[0].Score)
+			if want := retryMsg.QueueScore(); entries[0].Score != want {
+				t.Errorf("Re-entered retry score = %v, want %v", entries[0].Score, want)
 			}
 			if n, _ := rdb.ZCard(ctx, flow.retryQueue()).Result(); n != 0 {
 				t.Errorf("Retry queue should be empty after move, got %d", n)
@@ -1669,10 +1671,12 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 		gate:         noopGate(),
 	}
 
-	ir := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{
+	reqDeadline := time.Now().Add(24 * time.Hour).Unix()
+	enqueuedAtMs := time.Now().UnixMilli()
+	ir := api.NewInternalRequest(api.InternalRouting{EnqueuedAtMs: enqueuedAtMs}, &api.RequestMessage{
 		ID:       "requeue-1",
 		Created:  time.Now().Unix(),
-		Deadline: 9999999999,
+		Deadline: reqDeadline,
 		Payload:  map[string]any{"key": "value"},
 	})
 	msgBytes, _ := json.Marshal(ir)
@@ -1717,9 +1721,9 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	}
 
 	results, _ := rdb.ZRangeWithScores(ctx, queue, 0, -1).Result()
-	// Re-queue restores message to pending at its deadline score (9999999999).
-	if results[0].Score != 9999999999 {
-		t.Errorf("Expected re-queued score 9999999999 (deadline), got %f", results[0].Score)
+	// Re-queue restores message to pending at its queue score.
+	if want := ir.QueueScore(); results[0].Score != want {
+		t.Errorf("re-queued score = %v, want %v", results[0].Score, want)
 	}
 	var restored api.InternalRequest
 	json.Unmarshal([]byte(results[0].Member.(string)), &restored) // nolint:errcheck
@@ -2149,7 +2153,8 @@ func TestQueueBacklogDeadlineViews(t *testing.T) {
 	// which may be up to a second ahead of the test's.
 	offsets := []int64{-10, 0, 10, 40, 100, 400, 1000, 4000}
 	for i, off := range offsets {
-		rdb.ZAdd(ctx, "queue-a", redis.Z{Score: float64(now + off), Member: fmt.Sprintf("m%d", i)})
+		ir := api.NewInternalRequest(api.InternalRouting{EnqueuedAtMs: now * 1000}, &api.RequestMessage{Deadline: now + off})
+		rdb.ZAdd(ctx, "queue-a", redis.Z{Score: ir.QueueScore(), Member: fmt.Sprintf("m%d", i)})
 	}
 
 	stats, err := flow.QueueBacklog(ctx)
