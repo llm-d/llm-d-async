@@ -72,7 +72,7 @@ type Flow struct {
 }
 
 func New(ctx context.Context, cfg Config, workerPools []pipeline.WorkerPoolConfig, gateFactory *flowcontrol.GateFactory) (*Flow, error) {
-	var opts []sqlqueue.OpenOption
+	opts := []sqlqueue.OpenOption{sqlqueue.WithMaxConns(cfg.MaxConnections)}
 	if cfg.EnableTracing {
 		opts = append(opts, sqlqueue.WithTracerProvider(otel.GetTracerProvider()))
 	}

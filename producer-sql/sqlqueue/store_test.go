@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -767,4 +768,44 @@ func TestEnqueueRejectsMissingPayload(t *testing.T) {
 		err := s.Enqueue(context.Background(), Request{ID: "nil", Token: "t", Queue: "q", Deadline: time.Now().Unix() + 10, Envelope: "{}"})
 		require.Error(t, err, "payload is NOT NULL, so a nil payload is a bug in the caller")
 	})
+}
+
+func TestOpenCapsAndReusesConnections(t *testing.T) {
+	pgURL := os.Getenv("TEST_POSTGRES_URL")
+	if pgURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+	ctx := context.Background()
+	admin := openStore(t)
+	sessions := func() int64 {
+		var n int64
+		require.NoError(t, admin.db.QueryRowContext(ctx,
+			`SELECT sessions FROM pg_stat_database WHERE datname = current_database()`).Scan(&n))
+		return n
+	}
+	const maxConns = 4
+	s, err := Open(ctx, pgURL, WithMaxConns(maxConns))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	before := sessions()
+	var peak atomic.Int64
+	for range 3 {
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, err := s.db.ExecContext(ctx, `SELECT pg_sleep(0.02)`)
+				assert.NoError(t, err)
+				if n := int64(s.db.Stats().OpenConnections); n > peak.Load() {
+					peak.Store(n)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	assert.LessOrEqual(t, peak.Load(), int64(maxConns))
+	assert.LessOrEqual(t, sessions()-before, int64(maxConns), "bursts reuse idle connections instead of starting new backends")
+	assert.Equal(t, maxConns, s.db.Stats().Idle)
 }
