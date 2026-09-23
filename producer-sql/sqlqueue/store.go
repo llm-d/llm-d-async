@@ -28,6 +28,10 @@ const Partitions = 64
 
 const enqueueChunk = 1000
 
+// DefaultMaxConns is how many connections a Store opens and keeps when Open
+// is not given WithMaxConns.
+const DefaultMaxConns = 32
+
 type Store struct {
 	db     *sql.DB
 	tracer trace.Tracer
@@ -35,10 +39,17 @@ type Store struct {
 
 type openOptions struct {
 	tracerProvider trace.TracerProvider
+	maxConns       int
 }
 
 // OpenOption configures Open.
 type OpenOption func(*openOptions)
+
+// WithMaxConns caps the Store's open connections and keeps that many idle;
+// n <= 0 means DefaultMaxConns.
+func WithMaxConns(n int) OpenOption {
+	return func(o *openOptions) { o.maxConns = n }
+}
 
 // WithTracerProvider records a span per database statement.
 func WithTracerProvider(tp trace.TracerProvider) OpenOption {
@@ -61,6 +72,12 @@ func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
 		cfg.Tracer = otelpgx.NewTracer(otelpgx.WithTracerProvider(o.tracerProvider))
 	}
 	db := stdlib.OpenDB(*cfg)
+	maxConns := o.maxConns
+	if maxConns <= 0 {
+		maxConns = DefaultMaxConns
+	}
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns)
 	s := &Store{db: db, tracer: noop.NewTracerProvider().Tracer("")}
 	if o.tracerProvider != nil {
 		s.tracer = o.tracerProvider.Tracer("github.com/llm-d/llm-d-async/producer-sql/sqlqueue")
