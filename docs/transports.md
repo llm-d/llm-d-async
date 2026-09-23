@@ -44,7 +44,7 @@ Queue hot reload is enabled with `--transport redis-sortedset --transport-config
 }
 ```
 
-The `sql` transport stores requests, results, and partition leases in tables it creates on startup (`async_requests`, `async_results`, `async_partitions`, `async_dispatchers`). Each request hashes by ID into one of 64 partitions per queue, and processors sharing a database split the partitions evenly between them, so they never contend for the same requests. Each processor dispatches earliest-deadline-first from its own partitions. When a processor joins or stops, the partitions it gives up stop taking new work and move once their in-flight requests finish, so a rolling restart redelivers nothing. If a processor dies, its partitions move after `lease_ttl_seconds` and the new owner redelivers whatever it had in flight. A processor that is alive but not dispatching (its gate closed, its workers stuck) keeps its partitions, so requests hashed to them wait even when peers are idle. `url` accepts `postgres://` (via pgx). Producers use the `producer-sql` module against the same database and can submit a batch of requests in one transaction with `SubmitRequests`.
+The `sql` transport stores requests, results, and partition leases in tables it creates on startup (`async_requests`, `async_results`, `async_partitions`, `async_dispatchers`, and the `async_quota_*` tables behind `sql-quota`). Each request hashes by ID into one of 64 partitions per queue, and processors sharing a database split the partitions evenly between them, so they never contend for the same requests. Each processor dispatches earliest-deadline-first from its own partitions. When a processor joins or stops, the partitions it gives up stop taking new work and move once their in-flight requests finish, so a rolling restart redelivers nothing. If a processor dies, its partitions move after `lease_ttl_seconds` and the new owner redelivers whatever it had in flight. A processor that is alive but not dispatching (its gate closed, its workers stuck) keeps its partitions, so requests hashed to them wait even when peers are idle. `url` accepts `postgres://` (via pgx). Producers use the `producer-sql` module against the same database and can submit a batch of requests in one transaction with `SubmitRequests`.
 
 **`gcp-pubsub`:**
 ```json
@@ -299,7 +299,7 @@ This transport does not support per-queue dispatch gates (see [Queue and Topic E
 
 ### SQL (Postgres)
 
-A persisted implementation on Postgres, selected with `--transport sql`. It keeps the `redis-sortedset` semantics (earliest-deadline-first dispatch, fenced claims with lease-based redelivery, per-queue gates, exact backlog and deadline-proximity metrics) without a Redis dependency: several processors share one database. Producers submit with the `producer-sql` module against the same database. The `redis` and `redis-quota` gate types still need Redis; every other gate type works unchanged.
+A persisted implementation on Postgres, selected with `--transport sql`. It keeps the `redis-sortedset` semantics (earliest-deadline-first dispatch, fenced claims with lease-based redelivery, per-queue gates, exact backlog and deadline-proximity metrics) without a Redis dependency: several processors share one database. Producers submit with the `producer-sql` module against the same database. The `redis` and `redis-leased-rate` gate types still need Redis; use `sql-quota` in place of `redis-quota`. Every other gate type works unchanged.
 
 ### GCP Pub/Sub
 

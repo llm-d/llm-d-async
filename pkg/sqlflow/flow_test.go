@@ -46,9 +46,10 @@ func TestRebalanceRunsQueuesConcurrently(t *testing.T) {
 	for _, name := range []string{"q1", "q2", "q3"} {
 		cfg.Queues = append(cfg.Queues, QueueConfig{ID: name, QueueName: name, WorkerPoolID: "default"})
 	}
-	f, err := NewWithStore(store, cfg, []pipeline.WorkerPoolConfig{{ID: "default"}}, nil)
+	f, err := NewWithStore(context.Background(), store, cfg, []pipeline.WorkerPoolConfig{{ID: "default"}}, nil)
 	require.NoError(t, err)
 	t.Cleanup(f.cancelChecks.stop)
+	t.Cleanup(f.quota.Close)
 	require.Equal(t, time.Second, f.storeTimeout())
 
 	db, err := sql.Open("pgx", os.Getenv("TEST_POSTGRES_URL"))
