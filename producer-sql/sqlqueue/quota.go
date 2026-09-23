@@ -67,7 +67,9 @@ WHERE s.holder = $1 AND s.key = r.key`, holder, keys, counts)
 }
 
 // AdmitQuota admits up to n requests for key while fewer than limit were
-// admitted in the trailing window, and returns how many it admitted.
+// admitted in the trailing window, and returns how many it admitted. Each
+// window keeps its own log, so gates with different windows on one key count
+// only their own admissions.
 func (s *Store) AdmitQuota(ctx context.Context, key string, n, limit int, window time.Duration) (int, error) {
 	var granted int
 	err := s.db.QueryRowContext(ctx, `SELECT async_quota_admit($1, $2, $3, $4)`, key, n, limit, window.Milliseconds()).Scan(&granted)
