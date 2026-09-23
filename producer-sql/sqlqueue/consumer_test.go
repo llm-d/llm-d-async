@@ -367,6 +367,33 @@ func TestConsumerPollHandsOutARedispatchedRequest(t *testing.T) {
 	})
 }
 
+func TestConsumerRetryBookkeepingKeepsTheAttemptPollHandedOut(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		a := newConsumer(s, "a")
+		rebalance(t, a, now)
+		require.NoError(t, s.Enqueue(ctx, req("raced", now.Unix()+3600)))
+		require.Equal(t, []string{"raced"}, poll(t, a, now))
+		stamp := a.stamps([]Key{{ID: "raced", Token: "t"}})[0]
+
+		ok, err := s.Retry(ctx, "a", stamp, now.Unix(), `{"id":"raced"}`)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, []string{"raced"}, poll(t, a, now))
+		a.doneStamps([]Stamp{stamp})
+		assert.Equal(t, 1, inflightOf(a), "the retry's bookkeeping must not forget the attempt Poll handed out")
+
+		a.Abandon(stamp)
+		var got []string
+		for range fullResetEvery {
+			rebalance(t, a, now)
+			got = append(got, poll(t, a, now)...)
+		}
+		assert.Equal(t, []string{"raced"}, got, "an attempt whose outcome could not be written is handed out again")
+	})
+}
+
 func TestConsumerRedeliversAfterReacquiringAPartition(t *testing.T) {
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
