@@ -685,6 +685,7 @@ The available gate types, at a glance:
   - `pods_url` (optional): URL to scrape for dynamic pod count (e.g., `http://epp-svc:9090/metrics`). When set with `pods_metric`, `max_count = ready_pods * max_count_per_pod`.
   - `pods_metric` (optional): Metric name for ready pods (e.g., `inference_pool_ready_pods`).
   - `pods_labels` (optional): JSON label filters for the pods metric (e.g., `{"name":"my-pool"}`).
+  - `admission` (optional): `budget` (default) admits every request while the latest reading's budget is above `baseline`. `counted` admits at most the reading's free slots (`max_count - value`, in the metric's units) until the next reading, one reading per `--prometheus-cache-ttl`; it needs `max_count_per_pod` with `value_type: saturation` and takes neither `baseline` nor `fallback` (a failed scrape admits nothing). Use `counted` to bound how much a fast dispatcher can send into a queue between readings.
 
   **No Prometheus server required.** This gate scrapes endpoints directly, making it suitable for
   deployments without a dedicated Prometheus instance. Use `max_count_per_pod` with `pods_url`/`pods_metric`

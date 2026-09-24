@@ -451,6 +451,20 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			AbsentValue:    absentValue,
 		}
 
+		switch admission := paramString(params, "admission", "budget"); admission {
+		case "budget":
+		case "counted":
+			if maxCountPerPod <= 0 || valueType != "saturation" {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' needs a count metric: max_count_per_pod > 0 and value_type saturation")
+			}
+			if baseline != 0 || fallback != 0 {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' takes neither baseline nor fallback: size the headroom with max_count_per_pod; a failed scrape admits nothing")
+			}
+			return NewHeadroomGate(NewScrapeMetricSource(scrapeCfg), f.cacheTTL).WithOwner(cfg.Owner), nil
+		default:
+			return nil, fmt.Errorf("endpoint-scrape admission must be either 'budget' or 'counted', got %q", admission)
+		}
+
 		var ms MetricSource = NewScrapeMetricSource(scrapeCfg)
 		ms = cachedSource(ms, f.cacheTTL)
 		return NewMetricDispatchGate(ms, baseline, fallback), nil
