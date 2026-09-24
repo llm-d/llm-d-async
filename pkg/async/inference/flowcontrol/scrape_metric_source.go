@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 
@@ -88,30 +89,10 @@ func NewScrapeMetricSource(cfg ScrapeConfig) *ScrapeMetricSource {
 }
 
 func (s *ScrapeMetricSource) Query(ctx context.Context) ([]Sample, error) {
-	samples, err := scrapeMetric(ctx, s.client, s.url, s.metricName, s.labels)
+	samples, maxCount, err := s.read(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(samples) == 0 && s.absentValue != nil {
-		samples = []Sample{{Value: *s.absentValue}}
-	}
-
-	maxCount := s.maxCountPerPod
-	if s.podsURL != "" && s.podsMetric != "" {
-		podsSamples, err := scrapeMetric(ctx, s.client, s.podsURL, s.podsMetric, s.podsLabels)
-		if err != nil {
-			return nil, fmt.Errorf("scrape pods metric: %w", err)
-		}
-		if len(podsSamples) == 0 {
-			return nil, fmt.Errorf("scrape: pods metric %s not found at %s", s.podsMetric, s.podsURL)
-		}
-		pods := podsSamples[0].Value
-		if pods <= 0 {
-			return nil, fmt.Errorf("scrape: ready pods is %g, cannot compute capacity", pods)
-		}
-		maxCount = pods * s.maxCountPerPod
-	}
-
 	result := make([]Sample, len(samples))
 	for i, sample := range samples {
 		var normalized float64
@@ -127,8 +108,52 @@ func (s *ScrapeMetricSource) Query(ctx context.Context) ([]Sample, error) {
 		}
 		result[i] = Sample{Labels: sample.Labels, Value: budget}
 	}
-
 	return result, nil
+}
+
+// Headroom returns the metric's free capacity in its own units, maxCount minus the first
+// matching value, floored at 0. It needs a count metric: max_count_per_pod set, saturation
+// value type.
+func (s *ScrapeMetricSource) Headroom(ctx context.Context) (float64, error) {
+	if s.maxCountPerPod <= 0 || s.directBudget {
+		return 0, fmt.Errorf("scrape: headroom needs max_count_per_pod and value_type saturation")
+	}
+	samples, maxCount, err := s.read(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(samples) == 0 {
+		return 0, fmt.Errorf("scrape: metric %s not found at %s", s.metricName, s.url)
+	}
+	return math.Max(0, maxCount-samples[0].Value), nil
+}
+
+// read scrapes the metric and the capacity it is measured against.
+func (s *ScrapeMetricSource) read(ctx context.Context) ([]Sample, float64, error) {
+	samples, err := scrapeMetric(ctx, s.client, s.url, s.metricName, s.labels)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(samples) == 0 && s.absentValue != nil {
+		samples = []Sample{{Value: *s.absentValue}}
+	}
+
+	maxCount := s.maxCountPerPod
+	if s.podsURL != "" && s.podsMetric != "" {
+		podsSamples, err := scrapeMetric(ctx, s.client, s.podsURL, s.podsMetric, s.podsLabels)
+		if err != nil {
+			return nil, 0, fmt.Errorf("scrape pods metric: %w", err)
+		}
+		if len(podsSamples) == 0 {
+			return nil, 0, fmt.Errorf("scrape: pods metric %s not found at %s", s.podsMetric, s.podsURL)
+		}
+		pods := podsSamples[0].Value
+		if pods <= 0 {
+			return nil, 0, fmt.Errorf("scrape: ready pods is %g, cannot compute capacity", pods)
+		}
+		maxCount = pods * s.maxCountPerPod
+	}
+	return samples, maxCount, nil
 }
 
 func scrapeMetric(ctx context.Context, client *http.Client, url, metricName string, labelFilters map[string]string) ([]Sample, error) {
