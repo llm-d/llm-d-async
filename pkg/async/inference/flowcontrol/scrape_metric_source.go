@@ -51,6 +51,7 @@ type ScrapeMetricSource struct {
 	podsURL        string
 	podsMetric     string
 	podsLabels     map[string]string
+	absentValue    *float64
 }
 
 // ScrapeConfig holds configuration for NewScrapeMetricSource.
@@ -63,6 +64,10 @@ type ScrapeConfig struct {
 	PodsURL        string
 	PodsMetric     string
 	PodsLabels     map[string]string
+	// AbsentValue, when set, is the raw metric value assumed when a scrape succeeds but no
+	// series matches, for gauges that exist only while there is something to count. Nil
+	// leaves the source with no samples, which the gate treats as an error.
+	AbsentValue *float64
 }
 
 // NewScrapeMetricSource creates a MetricSource that scrapes Prometheus
@@ -78,6 +83,7 @@ func NewScrapeMetricSource(cfg ScrapeConfig) *ScrapeMetricSource {
 		podsURL:        cfg.PodsURL,
 		podsMetric:     cfg.PodsMetric,
 		podsLabels:     cfg.PodsLabels,
+		absentValue:    cfg.AbsentValue,
 	}
 }
 
@@ -85,6 +91,9 @@ func (s *ScrapeMetricSource) Query(ctx context.Context) ([]Sample, error) {
 	samples, err := scrapeMetric(ctx, s.client, s.url, s.metricName, s.labels)
 	if err != nil {
 		return nil, err
+	}
+	if len(samples) == 0 && s.absentValue != nil {
+		samples = []Sample{{Value: *s.absentValue}}
 	}
 
 	maxCount := s.maxCountPerPod

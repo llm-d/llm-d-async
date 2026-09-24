@@ -681,6 +681,7 @@ The available gate types, at a glance:
   - `max_count_per_pod` (optional): Per-pod capacity. When > 0, the normalized value is `value / max_count`. When 0, the metric value is assumed to already be in [0, 1]. Default is `0`.
   - `baseline` (optional): Reserved headroom subtracted from budget. Default is `0.0`.
   - `fallback` (optional): Budget returned when scrape fails or metric is missing. Default is `0.0` (fail closed).
+  - `absent_value` (optional): Raw metric value assumed when the scrape succeeds but no series matches, for gauges that exist only while there is something to count. EPP drops an idle priority band's `llm_d_epp_flow_control_queue_size` series, so a gate on that series needs `absent_value: 0`, or it falls back closed and never sends the traffic that would bring the series back. A failed scrape still uses `fallback`. Unset by default.
   - `pods_url` (optional): URL to scrape for dynamic pod count (e.g., `http://epp-svc:9090/metrics`). When set with `pods_metric`, `max_count = ready_pods * max_count_per_pod`.
   - `pods_metric` (optional): Metric name for ready pods (e.g., `inference_pool_ready_pods`).
   - `pods_labels` (optional): JSON label filters for the pods metric (e.g., `{"name":"my-pool"}`).

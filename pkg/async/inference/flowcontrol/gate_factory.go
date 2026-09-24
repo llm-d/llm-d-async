@@ -430,6 +430,15 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("endpoint-scrape gate failed to parse 'pods_labels': %w", err)
 		}
 
+		var absentValue *float64
+		if _, ok := params["absent_value"]; ok {
+			v, err := paramFloat(params, "absent_value", 0)
+			if err != nil {
+				return nil, err
+			}
+			absentValue = &v
+		}
+
 		scrapeCfg := ScrapeConfig{
 			URL:            url,
 			MetricName:     metric,
@@ -439,6 +448,7 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			PodsURL:        paramString(params, "pods_url", ""),
 			PodsMetric:     paramString(params, "pods_metric", ""),
 			PodsLabels:     podsLabels,
+			AbsentValue:    absentValue,
 		}
 
 		var ms MetricSource = NewScrapeMetricSource(scrapeCfg)
