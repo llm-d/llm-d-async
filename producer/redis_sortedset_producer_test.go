@@ -165,6 +165,39 @@ func TestSubmitRequest_NilRequest(t *testing.T) {
 	})
 }
 
+func TestSubmitRequestRejectsAPayloadThatIsNotJSON(t *testing.T) {
+	for name, payload := range map[string]json.RawMessage{
+		"not json":  json.RawMessage("not json"),
+		"truncated": json.RawMessage(`{"model":"m"`),
+		"empty":     json.RawMessage{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t)
+			err := producer.SubmitRequest(context.Background(), &api.RequestMessage{
+				ID:       "bad-payload",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(time.Hour).Unix(),
+				Payload:  payload,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "payload is not valid JSON")
+			assert.Empty(t, mr.Keys(), "a rejected request must not be queued")
+		})
+	}
+}
+
+func TestSubmitRequestAcceptsANilPayload(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	require.NoError(t, producer.SubmitRequest(context.Background(), &api.RequestMessage{
+		ID:       "no-payload",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(time.Hour).Unix(),
+	}))
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	assert.Len(t, members, 1)
+}
+
 func TestSubmitRequest_Validation(t *testing.T) {
 	producer, _ := setupTestProducer(t)
 

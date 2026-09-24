@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -236,6 +237,9 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	envelope, payload, err := api.SplitPayload(ir)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	if payload != nil && !json.Valid(payload) {
+		return errors.New("failed to marshal request: payload is not valid JSON")
 	}
 
 	// Clear any stale cancellation marker for this request ID before enqueue.
