@@ -387,7 +387,7 @@ func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int) (*asyncworker.H
 	}
 
 	inferenceTransport := &http.Transport{
-		MaxIdleConns:        100,
+		MaxIdleConns:        totalConcurrency,
 		MaxIdleConnsPerHost: totalConcurrency,
 		IdleConnTimeout:     90 * time.Second,
 		TLSClientConfig:     tlsConfig,
