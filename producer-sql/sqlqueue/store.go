@@ -201,23 +201,9 @@ func (s *Store) Dispatch(ctx context.Context, queue, owner string, now time.Time
 	ctx, span := s.span(ctx, "Dispatch")
 	defer span.End()
 	rows, err := s.db.QueryContext(ctx, `
-		WITH picked AS MATERIALIZED (
-			SELECT r.id, r.request_token
-			FROM async_requests r
-			JOIN async_partitions q ON q.queue = r.queue AND q.partition_id = r.partition_id
-			WHERE r.queue = $2 AND r.dispatch_epoch = 0 AND r.not_before <= $3
-				AND q.owner = $1 AND q.draining = 0
-			ORDER BY r.deadline, r.created_at
-			LIMIT $4
-		)
-		UPDATE async_requests SET dispatch_epoch = p.epoch, dispatch_attempt = nextval('async_dispatch_attempts')
-		FROM async_partitions p
-		WHERE p.queue = async_requests.queue AND p.partition_id = async_requests.partition_id
-			AND p.owner = $1 AND p.draining = 0 AND async_requests.dispatch_epoch = 0
-			AND (async_requests.id, async_requests.request_token) IN (SELECT id, request_token FROM picked)
-		RETURNING async_requests.id, async_requests.request_token, async_requests.queue,
-			async_requests.partition_id, async_requests.dispatch_epoch, async_requests.dispatch_attempt, async_requests.deadline,
-			async_requests.envelope, async_requests.payload, async_requests.cancelled, async_requests.created_at`,
+		SELECT id, request_token, queue, partition_id, dispatch_epoch, dispatch_attempt, deadline,
+			envelope, payload, cancelled, created_at
+		FROM async_dispatch($1, $2, $3, $4)`,
 		owner, queue, now.Unix(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlqueue: dispatch %q: %w", queue, err)
@@ -290,14 +276,14 @@ func (s *Store) ResetStale(ctx context.Context, queue, owner string, partitions 
 	// #nosec G202 -- only generated placeholders are concatenated, partition ids bind as parameters
 	if _, err := s.db.ExecContext(ctx, `
 		WITH stale AS MATERIALIZED (
-			SELECT r.id, r.request_token
+			SELECT r.ctid
 			FROM async_requests r
 			JOIN async_partitions p ON p.queue = r.queue AND p.partition_id = r.partition_id
 			WHERE r.queue = $1 AND r.dispatch_epoch > 0 AND p.owner = $2 AND r.dispatch_epoch < p.epoch`+only+`
 			FOR UPDATE OF r SKIP LOCKED
 		)
 		UPDATE async_requests SET dispatch_epoch = 0
-		WHERE dispatch_epoch > 0 AND (id, request_token) IN (SELECT id, request_token FROM stale)`, args...); err != nil {
+		WHERE ctid = ANY(ARRAY(SELECT ctid FROM stale))`, args...); err != nil {
 		return fmt.Errorf("sqlqueue: reset stale %q: %w", queue, err)
 	}
 	return nil
@@ -319,7 +305,8 @@ func (s *Store) Undispatch(ctx context.Context, owner string, stamps []Stamp) er
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE async_requests SET dispatch_epoch = 0
 			FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt), async_partitions p
-			WHERE async_requests.id = k.id AND async_requests.request_token = k.request_token
+			WHERE async_requests.id = ANY($2::text[])
+				AND async_requests.id = k.id AND async_requests.request_token = k.request_token
 				AND async_requests.dispatch_epoch > 0 AND async_requests.dispatch_attempt = k.attempt
 				AND p.queue = async_requests.queue AND p.partition_id = async_requests.partition_id
 				AND p.owner = $1`, owner, ids, tokens, attempts); err != nil {
@@ -384,7 +371,7 @@ func (s *Store) CancelledKeys(ctx context.Context, keys []Key) (map[Key]bool, er
 		SELECT r.id, r.request_token FROM async_requests r
 		JOIN unnest($1::text[], $2::text[]) AS k(id, request_token)
 			ON r.id = k.id AND r.request_token = k.request_token
-		WHERE r.cancelled = 1`, ids, tokens)
+		WHERE r.id = ANY($1::text[]) AND r.cancelled = 1`, ids, tokens)
 	if err != nil {
 		return nil, fmt.Errorf("sqlqueue: cancelled keys for %d requests: %w", len(keys), err)
 	}
@@ -449,7 +436,7 @@ func (s *Store) Ack(ctx context.Context, owner string, completions []Completion)
 					AS t(id, request_token, attempt, route, payload, expires_at)
 			), done AS (
 				DELETE FROM async_requests r USING input i, async_partitions p
-				WHERE r.id = i.id AND r.request_token = i.request_token
+				WHERE r.id = ANY($2::text[]) AND r.id = i.id AND r.request_token = i.request_token
 					AND r.dispatch_epoch > 0 AND r.dispatch_attempt = i.attempt
 					AND p.queue = r.queue AND p.partition_id = r.partition_id
 					AND p.owner = $1 AND p.epoch = r.dispatch_epoch
@@ -499,11 +486,7 @@ func (s *Store) PopResults(ctx context.Context, route string, now int64, limit i
 		return nil, fmt.Errorf("sqlqueue: expire results on %q: %w", route, err)
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		WITH picked AS MATERIALIZED (
-			SELECT seq FROM async_results WHERE route = $1 ORDER BY seq LIMIT $2 FOR UPDATE SKIP LOCKED
-		)
-		DELETE FROM async_results WHERE seq IN (SELECT seq FROM picked)
-		RETURNING seq, route, id, request_token, payload`, route, limit)
+		SELECT seq, route, id, request_token, payload FROM async_pop_results($1, $2)`, route, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlqueue: pop results %q: %w", route, err)
 	}

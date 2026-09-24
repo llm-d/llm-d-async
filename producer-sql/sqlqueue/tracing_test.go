@@ -39,7 +39,7 @@ func TestTracingRecordsPostgresStatements(t *testing.T) {
 	var dispatchSQL bool
 	for _, span := range recorder.Ended() {
 		for _, attr := range span.Attributes() {
-			if !strings.Contains(attr.Value.AsString(), "UPDATE async_requests SET dispatch_epoch = p.epoch") {
+			if !strings.Contains(attr.Value.AsString(), "FROM async_dispatch(") {
 				continue
 			}
 			var ancestors []string

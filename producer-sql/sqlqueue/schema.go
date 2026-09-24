@@ -124,7 +124,35 @@ CREATE TABLE IF NOT EXISTS async_quota_admits (
 CREATE INDEX IF NOT EXISTS async_quota_admits_key ON async_quota_admits (key, window_ms, at_ms);
 `
 
+// The dispatch and result picks walk an index in order and stop at the limit. Queue
+// statistics swing between empty and full within seconds, and a planner that believes the
+// table is empty prefers a seq or bitmap scan that sorts every row, so these run with both off.
 var postgresFunctions = []string{`
+CREATE OR REPLACE FUNCTION async_dispatch(p_owner TEXT, p_queue TEXT, p_now BIGINT, p_limit INTEGER)
+RETURNS SETOF async_requests LANGUAGE sql SET enable_seqscan = off SET enable_bitmapscan = off AS $$
+	WITH picked AS MATERIALIZED (
+		SELECT ctid
+		FROM async_requests
+		WHERE queue = p_queue AND dispatch_epoch = 0 AND not_before <= p_now
+			AND partition_id = ANY(ARRAY(
+				SELECT partition_id FROM async_partitions WHERE queue = p_queue AND owner = p_owner AND draining = 0))
+		ORDER BY deadline, created_at
+		LIMIT p_limit
+		FOR UPDATE SKIP LOCKED
+	)
+	UPDATE async_requests AS r SET dispatch_epoch = p.epoch, dispatch_attempt = nextval('async_dispatch_attempts')
+	FROM async_partitions p
+	WHERE r.ctid = ANY(ARRAY(SELECT ctid FROM picked))
+		AND p.queue = r.queue AND p.partition_id = r.partition_id AND p.owner = p_owner AND p.draining = 0
+	RETURNING r.*
+$$`, `
+CREATE OR REPLACE FUNCTION async_pop_results(p_route TEXT, p_limit INTEGER)
+RETURNS SETOF async_results LANGUAGE sql SET enable_seqscan = off SET enable_bitmapscan = off AS $$
+	DELETE FROM async_results
+	WHERE route = p_route AND seq = ANY(ARRAY(
+		SELECT seq FROM async_results WHERE route = p_route ORDER BY seq LIMIT p_limit FOR UPDATE SKIP LOCKED))
+	RETURNING *
+$$`, `
 CREATE OR REPLACE FUNCTION async_quota_acquire(p_key TEXT, p_holder TEXT, p_n INTEGER, p_limit INTEGER)
 RETURNS INTEGER LANGUAGE plpgsql AS $$
 DECLARE
@@ -182,7 +210,7 @@ const migrateLockID = 0x6173796e6371 // "asyncq"
 // Migrate is safe to run concurrently; an existing schema takes no DDL locks.
 func (s *Store) Migrate(ctx context.Context) error {
 	var present bool
-	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('async_quota_windows') IS NOT NULL AND to_regproc('async_quota_admit') IS NOT NULL`).Scan(&present); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('async_quota_windows') IS NOT NULL AND to_regproc('async_quota_admit') IS NOT NULL AND to_regproc('async_pop_results') IS NOT NULL`).Scan(&present); err != nil {
 		return fmt.Errorf("sqlqueue: migrate: check schema: %w", err)
 	}
 	if present {
