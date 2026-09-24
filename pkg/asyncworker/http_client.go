@@ -41,8 +41,12 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 
 	result, err := h.client.Do(request)
 	if err != nil {
+		category := asyncapi.ErrCategoryServer
+		if ctx.Err() != nil {
+			category = asyncapi.ErrCategoryUnknown
+		}
 		return nil, &asyncapi.ClientError{
-			ErrorCategory: asyncapi.ErrCategoryUnknown,
+			ErrorCategory: category,
 			Message:       "failed to send request",
 			RawError:      err,
 		}
