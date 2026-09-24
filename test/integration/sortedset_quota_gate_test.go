@@ -39,7 +39,7 @@ func TestSortedSetQuotaGate_AcquireDequeueRelease(t *testing.T) {
 				ID:       id,
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(time.Minute).Unix(),
-				Payload:  map[string]any{"model": "test"},
+				Payload:  testPayload(map[string]any{"model": "test"}),
 				Metadata: map[string]string{"userid": "user-a"},
 			},
 		)
@@ -125,7 +125,7 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 		&api.RequestMessage{
 			ID: "rl-msg-1", Created: time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 			Metadata: map[string]string{"userid": "user-b"},
 		},
 	)
@@ -142,7 +142,7 @@ func TestSortedSetQuotaGate_RateLimitRequeue(t *testing.T) {
 		&api.RequestMessage{
 			ID: "rl-msg-2", Created: time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 			Metadata: map[string]string{"userid": "user-b"},
 		},
 	)

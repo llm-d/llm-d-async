@@ -54,7 +54,7 @@ func TestRedisImpl(t *testing.T) {
 					ID:       "test-id",
 					Created:  time.Now().Unix(),
 					Deadline: time.Now().Add(time.Minute).Unix(),
-					Payload:  map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0},
+					Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
 				},
 			),
 			RequestURL: "http://localhost:30800/v1/completions",
@@ -151,7 +151,7 @@ func TestRedisImplWithAuth(t *testing.T) {
 			ID:       "test-auth-id",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	member, err := ir.MarshalJSON()

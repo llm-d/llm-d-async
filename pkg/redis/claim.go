@@ -83,7 +83,7 @@ return 1
 // Only the current owner may publish; stale owners are fenced. Missing
 // owners or token mismatches return 0, preventing duplicate pushes.
 //
-// KEYS: claimed, owners, idx, resultList
+// KEYS: claimed, owners, idx, resultList, [payload]
 // ARGV: id, resultJSON, token, listTTLSeconds
 // Returns 1 when the result was recorded, 0 when fenced as stale.
 var ackResultScript = redis.NewScript(`
@@ -99,6 +99,9 @@ end
 redis.call('HDEL', KEYS[1], ARGV[1])
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[3], ARGV[1])
+if KEYS[5] then
+  redis.call('DEL', KEYS[5])
+end
 return 1
 `)
 
@@ -232,7 +235,7 @@ func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string,
 // ackResult records a terminal result (idempotently) and drops this flow's
 // claim. claimQueueName hosts the claim bookkeeping; resultList is the
 // resolved destination. pushed=false means a stale owner was fenced.
-func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName string, resultList string, requestID string, requestToken string, resultJSON string, listTTL time.Duration) (pushed bool, err error) {
+func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName string, resultList string, requestID string, requestToken string, payloadRef string, resultJSON string, listTTL time.Duration) (pushed bool, err error) {
 	// Peek the token rather than consuming it: if the script errors the
 	// caller may retry this ack, and the ownership proof must survive.
 	claimID := claimKey(requestID, requestToken)
@@ -247,9 +250,11 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 	if listTTL > 0 {
 		listTTLSec = int64(listTTL.Seconds())
 	}
-	res, err := ackResultScript.Run(ctx, r.rdb, []string{
-		keys.claimed, keys.owners, keys.idx, resultList,
-	}, claimID, resultJSON, token, listTTLSec).Int()
+	scriptKeys := []string{keys.claimed, keys.owners, keys.idx, resultList}
+	if payloadRef != "" {
+		scriptKeys = append(scriptKeys, payloadRef)
+	}
+	res, err := ackResultScript.Run(ctx, r.rdb, scriptKeys, claimID, resultJSON, token, listTTLSec).Int()
 	if err != nil {
 		return false, fmt.Errorf("ack result for %q: %w", requestID, err)
 	}

@@ -29,7 +29,10 @@ type RedisSortedSetProducer struct {
 	resultClaimReclaimInterval time.Duration
 }
 
-const cancellationMarkerTTL = 7 * 24 * time.Hour
+const (
+	cancellationMarkerTTL = 7 * 24 * time.Hour
+	payloadTTLGrace       = 10 * time.Minute
+)
 
 var markRequestCancelledScript = redis.NewScript(`
 local active = redis.call("GET", KEYS[1])
@@ -189,6 +192,7 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 			Metadata: req.ReqMetadata(),
 			Headers:  req.ReqHeaders(),
 			Endpoint: req.ReqEndpoint(),
+			Model:    req.ReqModel(),
 		}
 		return ir
 	}
@@ -228,10 +232,14 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 		return fmt.Errorf("failed to create request token: %w", err)
 	}
 	ir.RequestToken = token
+	ir.PayloadRef = api.RequestPayloadKey(r.ReqID(), token)
 
-	msgBytes, err := json.Marshal(ir)
+	envelope, payload, err := api.SplitPayload(ir)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	if payload != nil && !json.Valid(payload) {
+		return errors.New("failed to marshal request: payload is not valid JSON")
 	}
 
 	// Clear any stale cancellation marker for this request ID before enqueue.
@@ -246,9 +254,10 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	pipe := p.client.TxPipeline()
 	pipe.Del(ctx, api.RequestCancellationKey(r.ReqID()))
 	pipe.Set(ctx, api.RequestActiveTokenKey(r.ReqID()), ir.RequestToken, activeTTL)
+	pipe.Set(ctx, ir.PayloadRef, []byte(payload), activeTTL+payloadTTLGrace)
 	pipe.ZAdd(ctx, targetQueue, redis.Z{
 		Score:  score,
-		Member: string(msgBytes),
+		Member: string(envelope),
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("failed to add request to queue: %w", err)
