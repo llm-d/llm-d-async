@@ -345,6 +345,7 @@ func TestQueueScore(t *testing.T) {
 	}{
 		{name: "unstamped ties the start of the window", lower: at{d, 0}, high: at{d, start}, tie: true},
 		{name: "before the window clamps to its start", lower: at{d, start - 1}, high: at{d, start}, tie: true},
+		{name: "days apart before the window tie", lower: at{d, d*1000 - 7*24*3_600_000}, high: at{d, d*1000 - 3*24*3_600_000}, tie: true},
 		{name: "one 62.5ms step ties", lower: at{d, start}, high: at{d, start + 62}, tie: true},
 		{name: "63ms apart orders by enqueue time", lower: at{d, start}, high: at{d, start + 63}},
 		{name: "after the deadline stays below the next deadline", lower: at{d, d*1000 + 3_600_000}, high: at{d + 1, 0}},

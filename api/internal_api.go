@@ -111,7 +111,11 @@ func queueScore(deadline, enqueuedAtMs int64) float64 {
 	return float64(deadline) + float64(step)/(1<<queueScoreFractionBits)
 }
 
-// QueueScore orders by deadline, then by EnqueuedAtMs in 62.5ms steps.
+// QueueScore orders by deadline, then by EnqueuedAtMs within the 36h24m32s (2^17 s) before the
+// deadline, in 62.5ms steps. Requests sharing a deadline tie when they are enqueued in the same
+// step, or when both are enqueued more than 36h24m32s before it (or are unstamped): those clamp
+// to the start of the window, ahead of anything enqueued inside it, and dispatch in Redis member
+// order among themselves.
 func (ir *InternalRequest) QueueScore() float64 {
 	if ir.PublicRequest == nil {
 		return 0
