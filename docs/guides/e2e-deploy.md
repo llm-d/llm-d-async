@@ -154,6 +154,41 @@ helm repo add bitnami https://charts.bitnami.com/bitnami
 helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled=false
 ```
 
+### Deployment requirements
+
+The processor has two hard requirements on its Redis (or Valkey) that the commands above do
+not configure. Both come from how the processor talks to and relies on this store, not from
+this guide's dev setup, so they apply to any deployment.
+
+**Standalone server only.** `pkg/redis/redis_conn.go` parses `REDIS_URL` into `*redis.Options`
+and every call site builds a standalone `redis.NewClient` from it: there is no
+`NewClusterClient` or `NewFailoverClient` path anywhere in the codebase. Point the processor at
+a standalone Redis or Valkey instance, not a Redis Cluster and not a Sentinel-fronted deployment;
+it will not follow a Sentinel failover or route Cluster slots.
+
+**Keys must never be evicted.** The processor infers correctness from whether a key still
+exists: cancellation markers, active-token markers, quota counters, and result mailboxes are
+all read this way. If Redis evicts one of these keys under memory pressure, the processor reads
+that as "never existed" or "already consumed" instead of an explicit error, silently producing a
+wrong result rather than a visible failure. Preventing eviction takes two settings together:
+
+- `maxmemory` set to a real value (not `0`/unlimited)
+- `maxmemory-policy noeviction`
+
+Set the `maxmemory` limit comfortably below the container's memory limit: Redis forks to
+write an RDB snapshot (`BGSAVE`), and that fork can be OOM-killed if `maxmemory` leaves no
+headroom for it. The reference install commands above set neither, so the queue grows without
+bound and nothing gets evicted only because nothing is enforcing a memory ceiling in the first
+place; on a memory-constrained deployment set both explicitly, for example:
+
+```bash
+helm install redis bitnami/redis -n redis --create-namespace --set auth.enabled=false \
+    --set commonConfiguration="maxmemory 512mb\nmaxmemory-policy noeviction"
+```
+
+Size `maxmemory` and persistence (AOF/RDB) for your expected queue depth and result retention;
+this guide's dev install is not a sizing reference.
+
 ## Step 9: Deploy Async Processor with dispatch budget gate
 
 ```bash
