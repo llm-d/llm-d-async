@@ -22,7 +22,7 @@ accepted a request.
 
 - Exactly-once inference execution.
 - Batch Gateway manifests, checkpoints, output construction, or finalization.
-- Changing existing `Submit` callers that do not opt in.
+- Changing existing `SubmitRequest` callers that do not opt in.
 - Cross-route result consumption; result-route opening remains a separate
   producer configuration concern.
 
@@ -32,34 +32,59 @@ Add an additive producer capability, tentatively named
 `IdempotentSubmitProducer`, with two operations:
 
 ```go
-SubmitIdempotent(ctx context.Context, request *RequestMessage, key string) (*Submission, error)
+SubmitIdempotent(ctx context.Context, request api.Request, key string) (*Submission, error)
 LookupSubmission(ctx context.Context, key string) (*Submission, error)
 ```
 
-`Submission` contains the accepted request token and the immutable request
-identity needed by a caller to reconcile the submission. `SubmitIdempotent`
-returns the existing submission when `key` identifies an equivalent request.
-It returns a conflict when the key identifies a different payload, request
-route, result route, or deadline. `LookupSubmission` returns `ErrNotFound` when
-no accepted submission exists for the key.
+`Submission` is the durable lookup record returned by both operations:
 
-The exact exported names, error types, and request identity fields are subject
-to producer-maintainer review. The required behavior is stable-key submission,
-equivalence validation, and lookup of the accepted request token.
+```go
+type Submission struct {
+  RequestToken  string
+  IdentitySHA256 string
+  RequestRoute  string
+  ResultRoute   string
+}
+```
+
+The producer scopes `key` by its configured producer namespace. A key is
+therefore stable across producer restarts and replacement consumers for that
+namespace, but is not shared across independently configured producers.
+`SubmitIdempotent` returns the existing `Submission` when the scoped key
+identifies an equivalent request. It returns
+`ErrIdempotencyConflict` when the scoped key exists with a different canonical
+identity. `LookupSubmission` returns `ErrSubmissionNotFound` when no retained
+submission exists. Both errors must support `errors.Is`.
 
 ## Design Details
 
 The selected producer transport persists an idempotency record atomically with
-accepting the request. The record maps the caller key to the accepted request
-token and an immutable canonical identity of the submitted request. A retry:
+accepting the request. The record maps the scoped caller key to the accepted
+request token, resolved routes, and immutable canonical identity. The canonical
+identity is the SHA-256 of deterministic JSON containing:
+
+- the concrete `api.Request` type;
+- `ID`, `Created`, `Deadline`, `Payload`, `Metadata`, `Headers`, and `Endpoint`;
+- resolved request and result routes after producer defaults are applied; and
+- concrete transport fields: `RedisRequest.RequestQueueName`,
+  `RedisRequest.ResultQueueName`, or `PubSubRequest.PubSubID`.
+
+Maps must be encoded with sorted keys. The generated request token, lease data,
+and producer timestamps are excluded. This lets a caller persist the identity
+hash before submit and reject a lookup result that does not match its manifest.
+A retry:
 
 1. Creates the record and enqueues the request when the key is new.
 2. Returns the recorded submission when the key and canonical identity match.
 3. Returns a conflict when the key matches but the identity differs.
 
-The record must survive producer restart for at least as long as the request can
-be recovered or its terminal result can be redelivered. Its retention and
-cleanup policy are transport-owned and must be documented with the API.
+The record must survive producer restart through request expiry or terminal
+result acknowledgement, and through the durable-result tombstone retention
+period after acknowledgement. Cleanup is transport-owned but must be bounded:
+the transport records an expiry when the acknowledgement tombstone becomes
+eligible for deletion and deletes both records together. A transport may retain
+them longer, but never shorter. Lookup after expiry returns
+`ErrSubmissionNotFound`; callers must not resubmit that key as recovery.
 
 This proposal does not alter `DurableResultProducer`. A caller uses its accepted
 request token with the existing route-local result claim, renew, and ACK flow.
