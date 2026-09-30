@@ -544,11 +544,10 @@ func TestSortedSetFlow_RetryBackoff(t *testing.T) {
 	go flow.retryWorker(ctx)
 
 	deadline := time.Now().Add(24 * time.Hour).Unix()
-	enqueuedAtMs := time.Now().UnixMilli()
 	retryMsg := pipeline.RetryMessage{
 		EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
 			InternalRequest: api.NewInternalRequest(
-				api.InternalRouting{RetryCount: 1, RequestQueueName: queue, EnqueuedAtMs: enqueuedAtMs},
+				api.InternalRouting{RetryCount: 1, RequestQueueName: queue, EnqueueSeq: 5},
 				&api.RequestMessage{
 					ID:       "retry-1",
 					Created:  time.Now().Unix(),
@@ -1672,8 +1671,7 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	}
 
 	reqDeadline := time.Now().Add(24 * time.Hour).Unix()
-	enqueuedAtMs := time.Now().UnixMilli()
-	ir := api.NewInternalRequest(api.InternalRouting{EnqueuedAtMs: enqueuedAtMs}, &api.RequestMessage{
+	ir := api.NewInternalRequest(api.InternalRouting{EnqueueSeq: 5}, &api.RequestMessage{
 		ID:       "requeue-1",
 		Created:  time.Now().Unix(),
 		Deadline: reqDeadline,
@@ -2153,7 +2151,7 @@ func TestQueueBacklogDeadlineViews(t *testing.T) {
 	// which may be up to a second ahead of the test's.
 	offsets := []int64{-10, 0, 10, 40, 100, 400, 1000, 4000}
 	for i, off := range offsets {
-		ir := api.NewInternalRequest(api.InternalRouting{EnqueuedAtMs: now * 1000}, &api.RequestMessage{Deadline: now + off})
+		ir := api.NewInternalRequest(api.InternalRouting{EnqueueSeq: 1<<21 - 1}, &api.RequestMessage{Deadline: now + off})
 		rdb.ZAdd(ctx, "queue-a", redis.Z{Score: ir.QueueScore(), Member: fmt.Sprintf("m%d", i)})
 	}
 

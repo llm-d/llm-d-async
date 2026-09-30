@@ -40,8 +40,9 @@ type InternalRouting struct {
 	ResultTTLSeconds       int64  `json:"result_ttl_seconds,omitempty"`
 	ResultRoutingResolved  bool   `json:"result_routing_resolved,omitempty"`
 	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
-	// EnqueuedAtMs is the producer's submit time in Unix milliseconds.
-	EnqueuedAtMs int64 `json:"enqueued_at_ms,omitempty"`
+	// EnqueueSeq is the producer's 1-based submission order among requests
+	// sharing this queue and deadline.
+	EnqueueSeq int64 `json:"enqueue_seq,omitempty"`
 	// Labels is the framework's per-message label set. Seeded by the
 	// Flow at pull time from the originating channel's effective
 	// policy read and mutate this map in place. Producer-controlled
@@ -97,30 +98,26 @@ func NewInternalRequest(routing InternalRouting, typedReq Request) *InternalRequ
 }
 
 const (
-	queueScoreHorizonMs    = (1 << 17) * 1000
 	queueScoreFractionBits = 21
+	maxQueueScoreSeq       = 1<<queueScoreFractionBits - 1
 )
 
-func queueScore(deadline, enqueuedAtMs int64) float64 {
-	if enqueuedAtMs <= 0 {
-		return float64(deadline)
-	}
-	offset := enqueuedAtMs - (deadline*1000 - queueScoreHorizonMs)
-	offset = min(max(offset, 0), queueScoreHorizonMs-1)
-	step := offset * (1 << queueScoreFractionBits) / queueScoreHorizonMs
-	return float64(deadline) + float64(step)/(1<<queueScoreFractionBits)
+// queueScore packs seq into the fraction below deadline, exact in float64 for
+// deadlines below 2^32:
+//
+//	score = deadline + min(seq, 2^21-1) / 2^21
+func queueScore(deadline, seq int64) float64 {
+	seq = min(max(seq, 0), maxQueueScoreSeq)
+	return float64(deadline) + float64(seq)/(1<<queueScoreFractionBits)
 }
 
-// QueueScore orders by deadline, then by EnqueuedAtMs within the 36h24m32s (2^17 s) before the
-// deadline, in 62.5ms steps. Requests sharing a deadline tie when they are enqueued in the same
-// step, or when both are enqueued more than 36h24m32s before it (or are unstamped): those clamp
-// to the start of the window, ahead of anything enqueued inside it, and dispatch in Redis member
-// order among themselves.
+// QueueScore orders by deadline, then by EnqueueSeq. Unstamped requests sort
+// ahead of stamped ones sharing their deadline, and sequences past 2^21-1 tie.
 func (ir *InternalRequest) QueueScore() float64 {
 	if ir.PublicRequest == nil {
 		return 0
 	}
-	return queueScore(ir.PublicRequest.ReqDeadline(), ir.EnqueuedAtMs)
+	return queueScore(ir.PublicRequest.ReqDeadline(), ir.EnqueueSeq)
 }
 
 // --- JSON wire format (Redis, etc.) ---

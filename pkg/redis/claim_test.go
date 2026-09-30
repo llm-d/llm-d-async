@@ -37,7 +37,7 @@ func newClaimTestFlow(t *testing.T) (*miniredis.Miniredis, *redis.Client, contex
 
 func claimEnvelope(t *testing.T, id string, deadline int64) (*api.InternalRequest, string) {
 	t.Helper()
-	ir := api.NewInternalRequest(api.InternalRouting{RequestQueueName: "q", EnqueuedAtMs: time.Now().UnixMilli()}, &api.RequestMessage{
+	ir := api.NewInternalRequest(api.InternalRouting{RequestQueueName: "q", EnqueueSeq: 3}, &api.RequestMessage{
 		ID:       id,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,

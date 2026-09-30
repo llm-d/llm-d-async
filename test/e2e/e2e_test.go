@@ -466,7 +466,6 @@ var _ = ginkgo.Describe("Redis Dispatch Gate E2E", func() {
 				Payload:  map[string]any{"model": "test-model", "prompt": id},
 			})).To(gomega.Succeed())
 			submitted = append(submitted, id)
-			time.Sleep(80 * time.Millisecond)
 		}
 		gomega.Expect(rdb.ZCard(ctx, redisGateRequestQueue).Val()).To(gomega.Equal(int64(len(submitted))))
 
