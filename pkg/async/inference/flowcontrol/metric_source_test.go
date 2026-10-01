@@ -131,13 +131,13 @@ func TestPromQLMetricSource_QueryPassthrough(t *testing.T) {
 	}))
 	defer server.Close()
 
-	expr := buildPromQL("inference_pool_average_queue_size", map[string]string{"name": "my-model"})
+	expr := buildPromQL("llm_d_epp_average_queue_size", map[string]string{"name": "my-model"})
 	source, err := NewPromQLMetricSource(api.Config{Address: server.URL}, expr)
 	require.NoError(t, err)
 
 	_, err = source.Query(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, `inference_pool_average_queue_size{name="my-model"}`, receivedQuery)
+	require.Equal(t, `llm_d_epp_average_queue_size{name="my-model"}`, receivedQuery)
 }
 
 func TestPromQLMetricSource_CustomExprPassthrough(t *testing.T) {
@@ -171,8 +171,8 @@ func TestFlowControlQueueSizePromQL(t *testing.T) {
 	t.Run("ContainsExpectedMetrics", func(t *testing.T) {
 		source, err := NewFlowControlQueueSizePromQL(promConfig, "my-pool", 100, "")
 		require.NoError(t, err)
-		require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool"}`)
-		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
+		require.Contains(t, source.expr, `llm_d_epp_flow_control_queue_size{inference_pool="my-pool"}`)
+		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool"}`)
 		require.Contains(t, source.expr, "* 100")
 		require.NotContains(t, source.expr, "namespace")
 	})
@@ -186,8 +186,8 @@ func TestFlowControlQueueSizePromQL(t *testing.T) {
 	t.Run("WithNamespace", func(t *testing.T) {
 		source, err := NewFlowControlQueueSizePromQL(promConfig, "my-pool", 100, "prod")
 		require.NoError(t, err)
-		require.Contains(t, source.expr, `inference_extension_flow_control_queue_size{inference_pool="my-pool",namespace="prod"}`)
-		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `llm_d_epp_flow_control_queue_size{inference_pool="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool",namespace="prod"}`)
 	})
 }
 
@@ -197,18 +197,18 @@ func TestPoolQueueSizePromQL(t *testing.T) {
 	t.Run("ContainsExpectedMetrics", func(t *testing.T) {
 		source, err := NewPoolQueueSizePromQL(promConfig, "my-pool", 100, "")
 		require.NoError(t, err)
-		require.Equal(t, `1 - (avg by(name)(inference_pool_per_pod_queue_size{name="my-pool"}) / 100)`, source.expr)
+		require.Equal(t, `1 - (avg by(name)(llm_d_epp_per_endpoint_queue_size{name="my-pool"}) / 100)`, source.expr)
 	})
 
 	t.Run("DoesNotDependOnFrozenPoolGauges", func(t *testing.T) {
 		// EPP's metrics refresh returns early at zero pods, so
-		// inference_pool_ready_pods and inference_pool_average_queue_size keep
+		// llm_d_epp_ready_endpoints and llm_d_epp_average_queue_size keep
 		// their last values and a drained pool reads as idle capacity. Averaging
 		// the scrape-time per-pod collector avoids both.
 		source, err := NewPoolQueueSizePromQL(promConfig, "my-pool", 100, "")
 		require.NoError(t, err)
-		require.NotContains(t, source.expr, "inference_pool_ready_pods")
-		require.NotContains(t, source.expr, "inference_pool_average_queue_size")
+		require.NotContains(t, source.expr, "llm_d_epp_ready_endpoints")
+		require.NotContains(t, source.expr, "llm_d_epp_average_queue_size")
 	})
 
 	t.Run("RequiresPool", func(t *testing.T) {
@@ -226,7 +226,7 @@ func TestPoolQueueSizePromQL(t *testing.T) {
 	t.Run("WithNamespace", func(t *testing.T) {
 		source, err := NewPoolQueueSizePromQL(promConfig, "my-pool", 100, "prod")
 		require.NoError(t, err)
-		require.Contains(t, source.expr, `inference_pool_per_pod_queue_size{name="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `llm_d_epp_per_endpoint_queue_size{name="my-pool",namespace="prod"}`)
 	})
 }
 
@@ -237,7 +237,7 @@ func TestVLLMSaturationPromQL(t *testing.T) {
 		source, err := NewVLLMSaturationPromQL(promConfig, "my-pool", 100, "")
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool"}`)
-		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool"}`)
+		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool"}`)
 		require.Contains(t, source.expr, "* 100")
 		require.NotContains(t, source.expr, "namespace")
 	})
@@ -252,7 +252,7 @@ func TestVLLMSaturationPromQL(t *testing.T) {
 		source, err := NewVLLMSaturationPromQL(promConfig, "my-pool", 100, "prod")
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool",namespace="prod"}`)
-		require.Contains(t, source.expr, `inference_pool_ready_pods{name="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool",namespace="prod"}`)
 	})
 }
 

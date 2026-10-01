@@ -93,9 +93,9 @@ func (f *GateFactory) Close() error {
 //   - "composite": Combines multiple gates. Params: gates (JSON array of gate configurations)
 //   - "prometheus-budget": Cascades three Prometheus metric sources to compute dispatch budget D,
 //     using the first that returns a sample.
-//     [0] D = 1 − (queue_size / max_SYS) via inference_extension_flow_control_queue_size.
+//     [0] D = 1 − (queue_size / max_SYS) via llm_d_epp_flow_control_queue_size.
 //     Requires llm-d's flow control plugin, which the llm-d router does not enable.
-//     [1] D = 1 − (mean per-pod queue depth / max_concurrency) via inference_pool_per_pod_queue_size.
+//     [1] D = 1 − (mean per-pod queue depth / max_concurrency) via llm_d_epp_per_endpoint_queue_size.
 //     Part of EPP's base metric set, so this is the source a stock install lands on.
 //     [2] D = 1 − (vllm_running / max_SYS). Filters vLLM metrics by inference_pool label,
 //     which vLLM does not emit natively — model server pods must carry this label and

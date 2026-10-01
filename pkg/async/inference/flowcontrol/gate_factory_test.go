@@ -329,8 +329,8 @@ func TestGateFactory_BudgetGateCascadeSources(t *testing.T) {
 	// Flow control stays first for installs that enable the plugin; the metric a
 	// stock EPP always exports is next, so the cascade resolves without it; vLLM
 	// last because it needs scrape-time relabeling to carry inference_pool.
-	assert.Contains(t, exprs[0], "inference_extension_flow_control_queue_size")
-	assert.Contains(t, exprs[1], "inference_pool_per_pod_queue_size")
+	assert.Contains(t, exprs[0], "llm_d_epp_flow_control_queue_size")
+	assert.Contains(t, exprs[1], "llm_d_epp_per_endpoint_queue_size")
 	assert.Contains(t, exprs[2], "vllm:num_requests_running")
 }
 
@@ -345,8 +345,8 @@ func TestGateFactory_BudgetGateLogsResolvedQueries(t *testing.T) {
 	require.NoError(t, err)
 
 	joined := strings.Join(logged, "\n")
-	assert.Contains(t, joined, "inference_extension_flow_control_queue_size")
-	assert.Contains(t, joined, "inference_pool_per_pod_queue_size")
+	assert.Contains(t, joined, "llm_d_epp_flow_control_queue_size")
+	assert.Contains(t, joined, "llm_d_epp_per_endpoint_queue_size")
 	assert.Contains(t, joined, "vllm:num_requests_running")
 
 	// The resolved closing point goes to the same logger as the source queries.

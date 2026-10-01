@@ -79,7 +79,7 @@ func (g *BinaryMetricDispatchGate) Apply(ctx context.Context, msg *api.InternalR
 
 // AverageQueueSizeGate creates a BinaryMetricDispatchGate from command-line flags.
 func AverageQueueSizeGate() *BinaryMetricDispatchGate {
-	expr := buildPromQL("inference_pool_average_queue_size",
+	expr := buildPromQL("llm_d_epp_average_queue_size",
 		map[string]string{"name": *prometheusQueryModelName})
 
 	var source MetricSource

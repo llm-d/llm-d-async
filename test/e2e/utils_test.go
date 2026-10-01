@@ -300,7 +300,7 @@ func queryProm(promURL, query string) float64 {
 // must match the budget processor's gate-params in llm-d-async.yaml.
 // We use max_concurrency=1 so a single queued request in EPP's admission
 // layer is enough to drive the budget to zero.
-const budgetPromQL = `1 - (sum by(inference_pool)(inference_extension_flow_control_queue_size{inference_pool="e2e-pool"}) / on() (inference_pool_ready_pods{name="e2e-pool"} * 1))`
+const budgetPromQL = `1 - (sum by(inference_pool)(llm_d_epp_flow_control_queue_size{inference_pool="e2e-pool"}) / on() (llm_d_epp_ready_endpoints{name="e2e-pool"} * 1))`
 
 // waitForBudget polls Prometheus using the same PromQL the budget gate uses.
 // It sends probe requests through Envoy to trigger EPP metric recording, then
@@ -327,7 +327,7 @@ func waitForSaturation(promURL, envoyURL string, pred func(float64) bool) {
 
 // floodProbes continuously sends concurrent inference requests through Envoy
 // to fill EPP's flow control admission queue. When EPP is saturated, these
-// requests queue up, driving inference_extension_flow_control_queue_size > 0.
+// requests queue up, driving llm_d_epp_flow_control_queue_size > 0.
 // Uses a long HTTP timeout so throttled requests stay in EPP's queue long
 // enough for Prometheus to scrape the non-zero queue_size.
 // Call the returned cancel function to stop the flood.

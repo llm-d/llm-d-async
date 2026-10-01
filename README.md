@@ -559,16 +559,16 @@ The available gate types, at a glance:
 
   | # | Metric | Budget | Available when |
   |---|--------|--------|----------------|
-  | 0 | `inference_extension_flow_control_queue_size` | `D = 1 − (queue_size / max_SYS)` | EPP runs the flow control plugin |
-  | 1 | `inference_pool_per_pod_queue_size` | `D = 1 − (mean per-pod queue depth / max_concurrency)` | Always — part of EPP's base metric set |
+  | 0 | `llm_d_epp_flow_control_queue_size` | `D = 1 − (queue_size / max_SYS)` | EPP runs the flow control plugin |
+  | 1 | `llm_d_epp_per_endpoint_queue_size` | `D = 1 − (mean per-pod queue depth / max_concurrency)` | Always — part of EPP's base metric set |
   | 2 | `vllm:num_requests_running` | `D = 1 − (running_requests / max_SYS)` | vLLM metrics carry an `inference_pool` label |
 
   Sources 0 and 2 compute `max_SYS = ready_pods × max_concurrency` dynamically from the
-  `inference_pool_ready_pods` metric. Source 1 averages over pods, so the `ready_pods` factor
+  `llm_d_epp_ready_endpoints` metric. Source 1 averages over pods, so the `ready_pods` factor
   cancels and no join is needed. That also keeps it honest when the pool drains: EPP's metrics
   refresh [returns early when the pool has no pods](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/v1.2.1/pkg/epp/backend/metrics/logger.go#L89-L91),
-  so `inference_pool_ready_pods` and `inference_pool_average_queue_size` freeze at their last
-  values and a scaled-to-zero pool would read as idle capacity. `inference_pool_per_pod_queue_size`
+  so `llm_d_epp_ready_endpoints` and `llm_d_epp_average_queue_size` freeze at their last
+  values and a scaled-to-zero pool would read as idle capacity. `llm_d_epp_per_endpoint_queue_size`
   comes from a scrape-time collector that simply stops reporting, so the source yields no sample
   and the cascade moves on instead.
   The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
@@ -579,7 +579,7 @@ The available gate types, at a glance:
   of them or fell back to `fallback`.
 
   - `pool` (**required**): The InferencePool name. This must match the `name` field in
-    `inference_pool_ready_pods{name="<pool>"}` and `inference_pool_per_pod_queue_size{name="<pool>"}`
+    `llm_d_epp_ready_endpoints{name="<pool>"}` and `llm_d_epp_per_endpoint_queue_size{name="<pool>"}`
     (EPP metrics) and, for the vLLM source, the `inference_pool` label on scraped vLLM metrics
     (added via relabeling from pod labels).
   - `namespace` (optional): Kubernetes namespace to scope metric queries. Required when multiple namespaces share the same pool name with a shared Prometheus instance.
@@ -615,7 +615,7 @@ The available gate types, at a glance:
 
     ```promql
     max_over_time(
-      (sum(vllm:num_requests_running{inference_pool="<pool>"}) / on() inference_pool_ready_pods{name="<pool>"})[1h:]
+      (sum(vllm:num_requests_running{inference_pool="<pool>"}) / on() llm_d_epp_ready_endpoints{name="<pool>"})[1h:]
     )
     ```
 
@@ -656,7 +656,7 @@ The available gate types, at a glance:
   - `baseline` (optional): Reserved headroom subtracted from budget. Default is `0.0`.
   - `fallback` (optional): Budget returned when scrape fails or metric is missing. Default is `0.0` (fail closed).
   - `pods_url` (optional): URL to scrape for dynamic pod count (e.g., `http://epp-svc:9090/metrics`). When set with `pods_metric`, `max_count = ready_pods * max_count_per_pod`.
-  - `pods_metric` (optional): Metric name for ready pods (e.g., `inference_pool_ready_pods`).
+  - `pods_metric` (optional): Metric name for ready pods (e.g., `llm_d_epp_ready_endpoints`).
   - `pods_labels` (optional): JSON label filters for the pods metric (e.g., `{"name":"my-pool"}`).
 
   **No Prometheus server required.** This gate scrapes endpoints directly, making it suitable for

@@ -131,10 +131,10 @@ Verify EPP metrics are flowing into Prometheus:
 
 ```bash
 kubectl run --rm -i prom-check --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
-    curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=inference_pool_ready_pods"
+    curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=llm_d_epp_ready_endpoints"
 ```
 
-Expected: `inference_pool_ready_pods{name="optimized-baseline"} = 1`
+Expected: `llm_d_epp_ready_endpoints{name="optimized-baseline"} = 1`
 
 ## Step 8: Install Redis (or Valkey)
 
@@ -232,7 +232,7 @@ saturated and read the per-pod peak:
 ```bash
 kubectl run --rm -i prom-peak --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=max_over_time((sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() inference_pool_ready_pods{name="optimized-baseline"})[1h:])' \
+    'query=max_over_time((sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() llm_d_epp_ready_endpoints{name="optimized-baseline"})[1h:])' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 ```
 
@@ -262,8 +262,8 @@ kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=llm-d-async --tail=20
 ```bash
 # EPP metrics in Prometheus
 kubectl run --rm -i prom-check --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
-    curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=inference_pool_ready_pods"
-# Expected: inference_pool_ready_pods{name="optimized-baseline"} = 1
+    curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=llm_d_epp_ready_endpoints"
+# Expected: llm_d_epp_ready_endpoints{name="optimized-baseline"} = 1
 
 # Wait for vLLM metrics with inference_pool label to appear (via PodMonitor relabeling).
 # The entire process might take a couple of minutes.
@@ -282,14 +282,14 @@ echo "vLLM metrics available."
 # nothing, and source 0 needs EPP's flow control plugin.
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (avg by(name)(inference_pool_per_pod_queue_size{name="optimized-baseline"}) / 100)' \
+    'query=1 - (avg by(name)(llm_d_epp_per_endpoint_queue_size{name="optimized-baseline"}) / 100)' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = 1
 
 # The vLLM fallback (source 2), which needs the relabeled inference_pool label
 kubectl run --rm -i prom-budget-vllm --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (inference_pool_ready_pods{name="optimized-baseline"} * 100))' \
+    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = 1
 ```
@@ -409,7 +409,7 @@ kubectl run --rm -i prom-running --image=curlimages/curl --restart=Never -n ${NA
 # Verify budget is negative (gate closed)
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (inference_pool_ready_pods{name="optimized-baseline"} * 100))' \
+    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = -1 (200 running / 100 max = 200% utilization)
 
@@ -454,7 +454,7 @@ kubectl run --rm -i prom-running --image=curlimages/curl --restart=Never -n ${NA
 # Verify budget is negative (gate closed)
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (inference_pool_ready_pods{name="optimized-baseline"} * 100))' \
+    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value ~= -0.1 (gate closed)
 

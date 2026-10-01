@@ -52,8 +52,8 @@ func NewPromQLMetricSourceFromLabels(promConfig promapi.Config, metricName strin
 
 // NewFlowControlQueueSizePromQL builds a PromQLMetricSource that returns the EPP queue depth
 // as a dispatch budget D = 1 − (queue_size / (ready_pods × maxConcurrency)), where queue_size is
-// inference_extension_flow_control_queue_size and max_SYS = ready_pods × maxConcurrency is
-// computed dynamically from the inference_pool_ready_pods metric.
+// llm_d_epp_flow_control_queue_size and max_SYS = ready_pods × maxConcurrency is
+// computed dynamically from the llm_d_epp_ready_endpoints metric.
 // inferencePool and maxConcurrency are required.
 func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64, namespace string) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
@@ -70,8 +70,8 @@ func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool stri
 	}
 	query := fmt.Sprintf(
 		`1 - (sum by(inference_pool)(%s) / on() (%s * %g))`,
-		buildPromQL("inference_extension_flow_control_queue_size", queueLabels),
-		buildPromQL("inference_pool_ready_pods", podsLabels),
+		buildPromQL("llm_d_epp_flow_control_queue_size", queueLabels),
+		buildPromQL("llm_d_epp_ready_endpoints", podsLabels),
 		maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
@@ -84,22 +84,22 @@ func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool stri
 // NewPoolQueueSizePromQL builds a PromQLMetricSource that returns the model server queue depth
 // EPP reports per pod as a dispatch budget D = 1 − (mean per-pod queue depth / maxConcurrency).
 //
-// inference_extension_flow_control_queue_size is only recorded when EPP runs the flow control
-// plugin, which the llm-d router does not enable. inference_pool_per_pod_queue_size is part of
+// llm_d_epp_flow_control_queue_size is only recorded when EPP runs the flow control
+// plugin, which the llm-d router does not enable. llm_d_epp_per_endpoint_queue_size is part of
 // EPP's base metric set, so this source resolves on a stock install.
 //
 // Averaging over pods is what makes max_SYS = ready_pods × maxConcurrency reduce to
-// maxConcurrency, so this needs no inference_pool_ready_pods join. That matters for more than
+// maxConcurrency, so this needs no llm_d_epp_ready_endpoints join. That matters for more than
 // brevity: EPP's metrics refresh returns early when the pool has no pods, freezing
-// inference_pool_ready_pods (and inference_pool_average_queue_size, which is why that metric is
+// llm_d_epp_ready_endpoints (and llm_d_epp_average_queue_size, which is why that metric is
 // not used here) at their last values. A drained pool would then read as idle capacity.
-// inference_pool_per_pod_queue_size is emitted by a scrape-time collector instead, so it simply
+// llm_d_epp_per_endpoint_queue_size is emitted by a scrape-time collector instead, so it simply
 // stops reporting — the query yields no samples and the cascade moves on rather than opening
 // the gate onto a pool with nothing behind it.
 //
 // avg is sum/count over the per-pod series, so the result does not change when several EPP
-// replicas each report the same pods. EPP labels its inference_pool_* series with "name", not
-// "inference_pool" (the same label inference_pool_ready_pods uses above).
+// replicas each report the same pods. EPP labels its llm_d_epp_* pool series with "name", not
+// "inference_pool" (the same label llm_d_epp_ready_endpoints uses above).
 // inferencePool and maxConcurrency are required.
 func NewPoolQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64, namespace string) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
@@ -114,7 +114,7 @@ func NewPoolQueueSizePromQL(promConfig promapi.Config, inferencePool string, max
 	}
 	query := fmt.Sprintf(
 		`1 - (avg by(name)(%s) / %g)`,
-		buildPromQL("inference_pool_per_pod_queue_size", queueLabels),
+		buildPromQL("llm_d_epp_per_endpoint_queue_size", queueLabels),
 		maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
@@ -144,7 +144,7 @@ func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, ma
 	query := fmt.Sprintf(
 		`1 - (sum(%s) / on() (%s * %g))`,
 		buildPromQL("vllm:num_requests_running", vllmLabels),
-		buildPromQL("inference_pool_ready_pods", podsLabels),
+		buildPromQL("llm_d_epp_ready_endpoints", podsLabels),
 		maxConcurrency,
 	)
 	source, err := NewPromQLMetricSource(promConfig, query)
