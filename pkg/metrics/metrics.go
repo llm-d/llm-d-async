@@ -111,7 +111,7 @@ var (
 	}, queueLabels)
 	GateWaitingRequests = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_gate_waiting_requests",
-		Help: "Number of requests currently held by workers waiting for the pool dispatch gate to admit them (blocked in gate-wait). Visible while queue_depth and inflight_requests are zero in scale-from-zero.",
+		Help: "Number of requests currently held by workers waiting for the pool dispatch gate to admit them (blocked in gate-wait).",
 	}, queueLabels)
 	InflightRequests = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_inflight_requests",
