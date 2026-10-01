@@ -138,6 +138,14 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 					}
 					defer cancelGate()
 
+					// Track gate-wait occupancy for autoscaler visibility.
+					gateWaiting := false
+					defer func() {
+						if gateWaiting {
+							metrics.DecGateWaiting(queueID, queueName, msg.WorkerPoolID)
+						}
+					}()
+
 					finishGateContext := func() {
 						// Shutdown/drain cancellation and the operational gate-wait
 						// timeout are recoverable. Only the request's public deadline
@@ -192,6 +200,10 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						}
 
 						if verdict.Action == pipeline.ActionContinue {
+							if gateWaiting {
+								metrics.DecGateWaiting(queueID, queueName, msg.WorkerPoolID)
+								gateWaiting = false
+							}
 							break
 						}
 
@@ -235,6 +247,10 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 								}
 								metrics.RecordGateDecision(reason, "", "", msg.WorkerPoolID)
 								waitRecorded = true
+							}
+							if !gateWaiting {
+								metrics.IncGateWaiting(queueID, queueName, msg.WorkerPoolID)
+								gateWaiting = true
 							}
 							waitTimer := time.NewTimer(jitteredGateWait(gateWaitBackoff))
 							select {

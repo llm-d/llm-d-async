@@ -109,6 +109,10 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_queue_depth",
 		Help: "Number of requests received from the broker and buffered in-process awaiting an available worker.",
 	}, queueLabels)
+	GateWaitingRequests = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_gate_waiting_requests",
+		Help: "Number of requests currently held by workers waiting for the pool dispatch gate to admit them (blocked in gate-wait). Visible while queue_depth and inflight_requests are zero in scale-from-zero.",
+	}, queueLabels)
 	InflightRequests = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_inflight_requests",
 		Help: "Number of requests currently being processed by workers (dispatched to inference, awaiting a response).",
@@ -416,6 +420,16 @@ func DecQueueDepth(queueID, queueName, poolName string) {
 	QueueDepth.WithLabelValues(queueID, queueName, poolName).Dec()
 }
 
+// IncGateWaiting increments the count of requests blocked in gate-wait.
+func IncGateWaiting(queueID, queueName, poolName string) {
+	GateWaitingRequests.WithLabelValues(queueID, queueName, poolName).Inc()
+}
+
+// DecGateWaiting decrements the count of requests blocked in gate-wait.
+func DecGateWaiting(queueID, queueName, poolName string) {
+	GateWaitingRequests.WithLabelValues(queueID, queueName, poolName).Dec()
+}
+
 // IncInflight increments the count of requests actively processed by workers.
 func IncInflight(queueID, queueName, poolName string) {
 	InflightRequests.WithLabelValues(queueID, queueName, poolName).Inc()
@@ -533,7 +547,7 @@ func SetGateMetricSourceAvailable(available bool, queueID, queueName, poolName, 
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
 		Retries, AsyncReqs, DispatchedReqs, GateWaitRequeues, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests, Tokens,
-		QueueDepth, InflightRequests, BrokerBacklog, BrokerBacklogSourceAvailable, InferenceLatencyTime, QueueResidenceTime,
+		QueueDepth, GateWaitingRequests, InflightRequests, BrokerBacklog, BrokerBacklogSourceAvailable, InferenceLatencyTime, QueueResidenceTime,
 		DeadlineProximity,
 		DispatchBudget, PoolWorkerLimit, QueueConfigReloads, QueueConfigLastSuccess,
 		DrainLimitRPS, DrainLimitLeaseValid, DrainLimitValidUntil, GateDecisions,
