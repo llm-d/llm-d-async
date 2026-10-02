@@ -96,7 +96,7 @@ func TestRoundTrip_PlainRequestMessage(t *testing.T) {
 
 func TestRoundTrip_RedisRequest(t *testing.T) {
 	ir := NewInternalRequest(
-		InternalRouting{RetryCount: 1, RequestQueueName: "rq", ResultQueueName: "resq", TransportCorrelationID: "tc"},
+		InternalRouting{RetryCount: 1, RequestQueueName: "rq", ResultQueueName: "resq", TransportCorrelationID: "tc", EnqueueSeq: 42},
 		&RedisRequest{
 			RequestMessage:   RequestMessage{ID: "redis-1", Created: 100, Deadline: 200, Payload: map[string]any{"p": 1}},
 			RequestQueueName: "per-msg-rq",
@@ -332,4 +332,63 @@ func assertRouting(t *testing.T, got, want InternalRouting) {
 	if got.TransportCorrelationID != want.TransportCorrelationID {
 		t.Errorf("TransportCorrelationID = %q, want %q", got.TransportCorrelationID, want.TransportCorrelationID)
 	}
+	if got.EnqueueSeq != want.EnqueueSeq {
+		t.Errorf("EnqueueSeq = %d, want %d", got.EnqueueSeq, want.EnqueueSeq)
+	}
+}
+
+func TestQueueScore(t *testing.T) {
+	const d = int64(1_790_000_000)
+	const maxDeadline = int64(1<<32 - 1)
+	type at struct{ deadline, seq int64 }
+
+	tests := []struct {
+		name        string
+		lower, high at
+		tie         bool
+	}{
+		{name: "unstamped sorts ahead of the first sequence", lower: at{d, 0}, high: at{d, 1}},
+		{name: "negative sequence scores as unstamped", lower: at{d, -1}, high: at{d, 0}, tie: true},
+		{name: "adjacent sequences order", lower: at{d, 1}, high: at{d, 2}},
+		{name: "last distinct sequence stays below the cap", lower: at{d, maxQueueScoreSeq - 1}, high: at{d, maxQueueScoreSeq}},
+		{name: "sequences past the cap tie", lower: at{d, maxQueueScoreSeq}, high: at{d, maxQueueScoreSeq + 1000}, tie: true},
+		{name: "capped sequence stays below the next deadline", lower: at{d, 1 << 40}, high: at{d + 1, 0}},
+		{name: "adjacent sequences stay distinct at the largest 32-bit deadline", lower: at{maxDeadline, maxQueueScoreSeq - 1}, high: at{maxDeadline, maxQueueScoreSeq}},
+		{name: "capped sequence stays below the next deadline at the largest 32-bit deadline", lower: at{maxDeadline - 1, maxQueueScoreSeq}, high: at{maxDeadline, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lo := queueScore(tt.lower.deadline, tt.lower.seq)
+			hi := queueScore(tt.high.deadline, tt.high.seq)
+			if tt.tie && lo != hi {
+				t.Errorf("scores %v and %v, want equal", lo, hi)
+			}
+			if !tt.tie && lo >= hi {
+				t.Errorf("scores %v and %v, want strictly increasing", lo, hi)
+			}
+		})
+	}
+
+	t.Run("method scores the envelope's deadline and sequence", func(t *testing.T) {
+		ir := NewInternalRequest(InternalRouting{EnqueueSeq: 7}, &RequestMessage{Deadline: d})
+		if got, want := ir.QueueScore(), queueScore(d, 7); got != want {
+			t.Errorf("QueueScore() = %v, want %v", got, want)
+		}
+		if got := (&InternalRequest{}).QueueScore(); got != 0 {
+			t.Errorf("QueueScore() without a PublicRequest = %v, want 0", got)
+		}
+	})
+
+	t.Run("every sequence is distinct and below the next deadline", func(t *testing.T) {
+		for _, deadline := range []int64{d, maxDeadline} {
+			prev := queueScore(deadline, 0)
+			for seq := int64(1); seq <= maxQueueScoreSeq; seq++ {
+				got := queueScore(deadline, seq)
+				if got <= prev || got >= float64(deadline+1) {
+					t.Fatalf("queueScore(%d, %d) = %v after %v, want increasing and below %d", deadline, seq, got, prev, deadline+1)
+				}
+				prev = got
+			}
+		}
+	})
 }

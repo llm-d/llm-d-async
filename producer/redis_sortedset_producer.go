@@ -1,6 +1,7 @@
 package producer
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -39,6 +40,30 @@ end
 redis.call("SET", KEYS[2], active, "EX", ARGV[1])
 return 1
 `)
+
+// submitRequestScript assigns the enqueue sequence and enqueues the request
+// as ARGV[4] .. seq .. ARGV[5], scored as api.InternalRequest.QueueScore.
+var submitRequestScript = redis.NewScript(`
+local seq = redis.call("INCR", KEYS[1])
+redis.call("EXPIREAT", KEYS[1], ARGV[3])
+redis.call("DEL", KEYS[2])
+redis.call("SET", KEYS[3], ARGV[1], "PX", ARGV[2])
+local score = tonumber(ARGV[6]) + math.min(seq, 2097151) / 2097152
+redis.call("ZADD", KEYS[4], string.format("%.17g", score), ARGV[4] .. seq .. ARGV[5])
+return seq
+`)
+
+const (
+	enqueueSeqPlaceholder     = -1
+	enqueueSeqFieldJSON       = `"enqueue_seq":`
+	enqueueSeqPlaceholderJSON = enqueueSeqFieldJSON + "-1"
+)
+
+const enqueueSeqGrace = time.Hour
+
+func enqueueSeqKey(queueName string, deadline int64) string {
+	return fmt.Sprintf("request-seq:%s:%d", queueName, deadline)
+}
 
 // ProducerOption is a functional option for NewRedisSortedSetProducer.
 type ProducerOption func(*RedisSortedSetProducer) error
@@ -194,8 +219,7 @@ func toInternalRequest(req api.Request) *api.InternalRequest {
 	}
 }
 
-// SubmitRequest adds a request to the Redis sorted set.
-// The score is the deadline, ensuring earlier deadlines are processed first.
+// SubmitRequest adds a request to the Redis sorted set, scored by QueueScore.
 func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Request) error {
 	if req == nil {
 		return errors.New("request is required")
@@ -223,34 +247,46 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	if ir.RequestQueueName == "" {
 		ir.RequestQueueName = p.requestQueueName
 	}
+	activeTTL := time.Until(time.Unix(deadline, 0))
+	if activeTTL <= 0 {
+		return errors.New("deadline has already expired")
+	}
 	token, err := newRequestToken()
 	if err != nil {
 		return fmt.Errorf("failed to create request token: %w", err)
 	}
 	ir.RequestToken = token
 
+	ir.EnqueueSeq = enqueueSeqPlaceholder
+
 	msgBytes, err := json.Marshal(ir)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	at := bytes.Index(msgBytes, []byte(enqueueSeqPlaceholderJSON))
+	if at < 0 {
+		return errors.New("marshaled request is missing the enqueue_seq placeholder")
 	}
 
 	// Clear any stale cancellation marker for this request ID before enqueue.
 	// This prevents a previously cancelled/completed request ID from poisoning
 	// a later submission that legitimately reuses the same ID.
 	targetQueue := ir.RequestQueueName
-	score := float64(deadline)
-	activeTTL := time.Until(time.Unix(deadline, 0))
-	if activeTTL <= 0 {
-		return errors.New("deadline has already expired")
-	}
-	pipe := p.client.TxPipeline()
-	pipe.Del(ctx, api.RequestCancellationKey(r.ReqID()))
-	pipe.Set(ctx, api.RequestActiveTokenKey(r.ReqID()), ir.RequestToken, activeTTL)
-	pipe.ZAdd(ctx, targetQueue, redis.Z{
-		Score:  score,
-		Member: string(msgBytes),
-	})
-	if _, err := pipe.Exec(ctx); err != nil {
+	err = submitRequestScript.Run(ctx, p.client,
+		[]string{
+			enqueueSeqKey(targetQueue, deadline),
+			api.RequestCancellationKey(r.ReqID()),
+			api.RequestActiveTokenKey(r.ReqID()),
+			targetQueue,
+		},
+		ir.RequestToken,
+		max(activeTTL.Milliseconds(), 1),
+		time.Unix(deadline, 0).Add(enqueueSeqGrace).Unix(),
+		msgBytes[:at+len(enqueueSeqFieldJSON)],
+		msgBytes[at+len(enqueueSeqPlaceholderJSON):],
+		deadline,
+	).Err()
+	if err != nil {
 		return fmt.Errorf("failed to add request to queue: %w", err)
 	}
 

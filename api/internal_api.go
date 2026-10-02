@@ -40,6 +40,9 @@ type InternalRouting struct {
 	ResultTTLSeconds       int64  `json:"result_ttl_seconds,omitempty"`
 	ResultRoutingResolved  bool   `json:"result_routing_resolved,omitempty"`
 	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
+	// EnqueueSeq is the producer's 1-based submission order among requests
+	// sharing this queue and deadline.
+	EnqueueSeq int64 `json:"enqueue_seq,omitempty"`
 	// Labels is the framework's per-message label set. Seeded by the
 	// Flow at pull time from the originating channel's effective
 	// policy read and mutate this map in place. Producer-controlled
@@ -92,6 +95,29 @@ type InternalResult struct {
 // routing fields may be zero; PublicRequest must be non-nil.
 func NewInternalRequest(routing InternalRouting, typedReq Request) *InternalRequest {
 	return &InternalRequest{InternalRouting: routing, PublicRequest: typedReq}
+}
+
+const (
+	queueScoreFractionBits = 21
+	maxQueueScoreSeq       = 1<<queueScoreFractionBits - 1
+)
+
+// queueScore packs seq into the fraction below deadline, exact in float64 for
+// deadlines below 2^32:
+//
+//	score = deadline + min(seq, 2^21-1) / 2^21
+func queueScore(deadline, seq int64) float64 {
+	seq = min(max(seq, 0), maxQueueScoreSeq)
+	return float64(deadline) + float64(seq)/(1<<queueScoreFractionBits)
+}
+
+// QueueScore orders by deadline, then by EnqueueSeq. Unstamped requests sort
+// ahead of stamped ones sharing their deadline, and sequences past 2^21-1 tie.
+func (ir *InternalRequest) QueueScore() float64 {
+	if ir.PublicRequest == nil {
+		return 0
+	}
+	return queueScore(ir.PublicRequest.ReqDeadline(), ir.EnqueueSeq)
 }
 
 // --- JSON wire format (Redis, etc.) ---

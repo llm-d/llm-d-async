@@ -3,6 +3,7 @@ package producer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -86,6 +87,170 @@ func TestSubmitRequest(t *testing.T) {
 	assert.Equal(t, "test-123", ir.PublicRequest.ReqID())
 	assert.Equal(t, "test-user", ir.PublicRequest.ReqMetadata()["user"])
 	assert.Equal(t, "test-result-queue", ir.ResultQueueName)
+}
+
+func TestSubmitRequest_ScoresByDeadlineThenSubmissionOrder(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	shared := time.Now().Add(24 * time.Hour).Unix()
+
+	const n = 1000
+	submitted := make([]string, 0, n)
+	for i := range n {
+		id := fmt.Sprintf("line-%04d", i)
+		require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+			ID: id, Created: time.Now().Unix(), Deadline: shared, Payload: map[string]any{"prompt": id},
+		}))
+		submitted = append(submitted, id)
+	}
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "earlier-deadline", Created: time.Now().Unix(), Deadline: shared - 1, Payload: map[string]any{},
+	}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	var order []string
+	seqs := map[string]int64{}
+	for _, member := range members {
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		id := ir.PublicRequest.ReqID()
+		order = append(order, id)
+		seqs[id] = ir.EnqueueSeq
+
+		score, err := mr.ZScore("test-request-queue", member)
+		require.NoError(t, err)
+		assert.Equal(t, ir.QueueScore(), score, "score for %s", id)
+	}
+	assert.Equal(t, append([]string{"earlier-deadline"}, submitted...), order)
+	assert.Equal(t, int64(1), seqs["earlier-deadline"], "each deadline counts from 1")
+	for i, id := range submitted {
+		assert.Equal(t, int64(i+1), seqs[id], "EnqueueSeq for %s", id)
+	}
+}
+
+func TestSubmitRequest_ScoreMatchesQueueScoreAtTheSeqCap(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+	const maxSeq = 1<<21 - 1
+	require.NoError(t, mr.Set(enqueueSeqKey("test-request-queue", deadline), fmt.Sprint(maxSeq-2)))
+
+	scores := map[int64]float64{}
+	for _, id := range []string{"a", "b", "c"} {
+		require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+			ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+		}))
+	}
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	for _, member := range members {
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		score, err := mr.ZScore("test-request-queue", member)
+		require.NoError(t, err)
+		assert.Equal(t, ir.QueueScore(), score, "score for seq %d", ir.EnqueueSeq)
+		scores[ir.EnqueueSeq] = score
+	}
+	assert.Less(t, scores[maxSeq-1], scores[maxSeq])
+	assert.Equal(t, scores[maxSeq], scores[maxSeq+1], "sequences past the cap tie")
+	assert.Less(t, scores[maxSeq+1], float64(deadline+1))
+}
+
+func TestSubmitRequest_PayloadContainingThePlaceholder(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	payload := map[string]any{"enqueue_seq": -1, "prompt": `"enqueue_seq":-1`}
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "tricky", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: payload,
+	}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	assert.Equal(t, int64(1), ir.EnqueueSeq)
+	assert.Equal(t, map[string]any{"enqueue_seq": float64(-1), "prompt": `"enqueue_seq":-1`}, ir.PublicRequest.ReqPayload())
+}
+
+func TestSubmitRequest_SetsActiveTokenUntilDeadline(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+	}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	token, err := mr.Get(api.RequestActiveTokenKey("r"))
+	require.NoError(t, err)
+	assert.Equal(t, ir.RequestToken, token)
+	assert.InDelta(t, time.Until(time.Unix(deadline, 0)).Seconds(), mr.TTL(api.RequestActiveTokenKey("r")).Seconds(), 2)
+}
+
+func TestSubmitRequest_EnqueueSeqIsPerQueue(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+
+	submit := func(id, queue string) {
+		t.Helper()
+		require.NoError(t, producer.SubmitRequest(ctx, &api.RedisRequest{
+			RequestMessage:   api.RequestMessage{ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{}},
+			RequestQueueName: queue,
+		}))
+	}
+	submit("a1", "queue-a")
+	submit("b1", "queue-b")
+	submit("a2", "queue-a")
+
+	seqOf := func(queue string) []int64 {
+		t.Helper()
+		members, err := mr.ZMembers(queue)
+		require.NoError(t, err)
+		var seqs []int64
+		for _, member := range members {
+			var ir api.InternalRequest
+			require.NoError(t, json.Unmarshal([]byte(member), &ir))
+			seqs = append(seqs, ir.EnqueueSeq)
+		}
+		return seqs
+	}
+	assert.Equal(t, []int64{1, 2}, seqOf("queue-a"))
+	assert.Equal(t, []int64{1}, seqOf("queue-b"))
+}
+
+func TestSubmitRequest_EnqueueSeqExpiresAfterDeadline(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+	}))
+
+	key := enqueueSeqKey("test-request-queue", deadline)
+	ttl := mr.TTL(key)
+	want := time.Until(time.Unix(deadline, 0).Add(enqueueSeqGrace))
+	assert.InDelta(t, want.Seconds(), ttl.Seconds(), 2, "counter TTL")
+}
+
+func TestSubmitRequest_ExpiredDeadlineLeavesSeqUntouched(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(-time.Minute).Unix()
+
+	err := producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "late", Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+	})
+	require.ErrorContains(t, err, "deadline has already expired")
+	assert.False(t, mr.Exists(enqueueSeqKey("test-request-queue", deadline)))
 }
 
 func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
