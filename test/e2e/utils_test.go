@@ -188,6 +188,14 @@ func popPubSubResult(ctx context.Context, client *pubsub.Client, subName string)
 	return result
 }
 
+func deletePubSubSubscription(ctx context.Context, client *pubsub.Client, projectID, subID string) {
+	subName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	err := client.SubscriptionAdminClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subName})
+	if err != nil && status.Code(err) != codes.NotFound {
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	}
+}
+
 func recreatePubSubSubscription(ctx context.Context, client *pubsub.Client, projectID, subID, topicID string) {
 	subName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
 	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)
