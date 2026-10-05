@@ -63,16 +63,20 @@ var (
 
 	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/llm-d-async:e2e-test", ginkgo.GinkgoLogr)
-	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0", ginkgo.GinkgoLogr)
+	// TODO: switch EPP_IMAGE and ROUTER_VERSION to a release tag than "main"
+	eppImage = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:main", ginkgo.GinkgoLogr)
 	// gaieVersion selects the gateway-api-inference-extension release whose
 	// CRDs are fetched; decoupled from the EPP image tag because the image now
 	// comes from llm-d-router, which pins its own gaie version in go.mod.
-	gaieVersion = env.GetEnvString("GAIE_VERSION", "v1.5.0", ginkgo.GinkgoLogr)
+	gaieVersion = env.GetEnvString("GAIE_VERSION", "v1.6.2", ginkgo.GinkgoLogr)
 	simImage    = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0", ginkgo.GinkgoLogr)
 	redisImage  = env.GetEnvString("REDIS_IMAGE", "valkey/valkey:8-alpine", ginkgo.GinkgoLogr)
 	pubsubImage = env.GetEnvString("PUBSUB_IMAGE", "gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators", ginkgo.GinkgoLogr)
 	gaieRoot    = os.Getenv("GAIE_ROOT")
-	simRoot     = os.Getenv("SIM_ROOT")
+	routerRoot  = os.Getenv("ROUTER_ROOT")
+	// Router main is required for EndpointPickerConfig at llm-d.ai/v1.
+	routerVersion = env.GetEnvString("ROUTER_VERSION", "main", ginkgo.GinkgoLogr)
+	simRoot       = os.Getenv("SIM_ROOT")
 
 	testConfig *testutils.TestConfig
 
@@ -154,7 +158,8 @@ func detectContainerRuntime() string {
 
 func pullIfMissing(image string) {
 	inspectCmd := exec.Command(containerRuntime, "image", "inspect", image)
-	if err := inspectCmd.Run(); err == nil {
+	// always pull "main" image instead of using a stale local copy.
+	if err := inspectCmd.Run(); err == nil && !strings.HasSuffix(image, ":main") {
 		ginkgo.By("Image " + image + " already exists locally, skipping pull")
 		return
 	}
@@ -164,6 +169,20 @@ func pullIfMissing(image string) {
 	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+}
+
+func loadEPPImage() {
+	if routerRoot != "" {
+		ginkgo.By("Building EPP image from " + routerRoot)
+		command := exec.Command(containerRuntime, "build", "-f", filepath.Join(routerRoot, "Dockerfile.epp"), "-t", eppImage, routerRoot)
+		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+	} else {
+		pullIfMissing(eppImage)
+	}
+
+	kindLoadImage(eppImage)
 }
 
 func setupK8sCluster() {
@@ -179,6 +198,7 @@ func setupK8sCluster() {
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 		kindLoadImage(apImage)
+		loadEPPImage()
 		return
 	}
 
@@ -216,15 +236,7 @@ func setupK8sCluster() {
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 
-	if gaieRoot != "" {
-		ginkgo.By("Building EPP image from " + gaieRoot)
-		command = exec.Command(containerRuntime, "build", "-t", eppImage, gaieRoot)
-		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
-		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
-	} else {
-		pullIfMissing(eppImage)
-	}
+	loadEPPImage()
 
 	if simRoot != "" {
 		ginkgo.By("Building sim image from " + simRoot)
@@ -237,7 +249,6 @@ func setupK8sCluster() {
 	}
 
 	kindLoadImage(apImage)
-	kindLoadImage(eppImage)
 	kindLoadImage(simImage)
 
 	pullIfMissing(redisImage)
@@ -334,8 +345,8 @@ func setupNameSpace() {
 func applyManifests() {
 	// All manifests are applied via kubectl to avoid scheme registration issues
 	// with GAIE custom resources (InferencePool, CRDs).
-	ginkgo.By("Applying InferencePool CRDs")
-	for _, crd := range inferencePoolCRDs() {
+	ginkgo.By("Applying InferencePool and router CRDs")
+	for _, crd := range inferenceCRDs() {
 		kubectlApplyFile(crd, nil)
 	}
 
@@ -519,55 +530,37 @@ func setupClients() {
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }
 
-var gaieInferencePoolCRDs = []string{
-	"inference.networking.k8s.io_inferencepools.yaml",
-	"inference.networking.x-k8s.io_inferenceobjectives.yaml",
-	"inference.networking.x-k8s.io_inferencemodelrewrites.yaml",
-	"inference.networking.x-k8s.io_inferencepoolimports.yaml",
+// inferenceCRDs loads InferencePool from GAIE and the objective/model-rewrite
+// CRDs from llm-d-router. Local checkouts override the corresponding downloads.
+func inferenceCRDs() []string {
+	paths := crdPaths("kubernetes-sigs/gateway-api-inference-extension", gaieVersion, gaieRoot,
+		[]string{"inference.networking.k8s.io_inferencepools.yaml"})
+	return append(paths, crdPaths("llm-d/llm-d-router", routerVersion, routerRoot,
+		[]string{"llm-d.ai_inferenceobjectives.yaml", "llm-d.ai_inferencemodelrewrites.yaml"})...)
 }
 
-// inferencePoolCRDs returns paths to the CRD files.
-// When GAIE_ROOT is set, CRDs are read from the local checkout;
-// otherwise they are fetched from the GAIE GitHub release at GAIE_VERSION.
-func inferencePoolCRDs() []string {
-	if gaieRoot != "" {
-		base := filepath.Join(gaieRoot, "config", "crd", "bases")
-		paths := make([]string, len(gaieInferencePoolCRDs))
-		for i, name := range gaieInferencePoolCRDs {
-			paths[i] = filepath.Join(base, name)
+func crdPaths(repository, version, localRoot string, names []string) []string {
+	base := filepath.Join(localRoot, "config", "crd", "bases")
+	if localRoot == "" {
+		base = filepath.Join(projectRoot(), ".cache", "crds", repository, version)
+		gomega.Expect(os.MkdirAll(base, 0755)).To(gomega.Succeed())
+	}
+	paths := make([]string, len(names))
+	for i, name := range names {
+		paths[i] = filepath.Join(base, name)
+		if localRoot != "" {
+			continue
 		}
-		return paths
-	}
-	return fetchGAIECRDs()
-}
+		if _, err := os.Stat(paths[i]); err == nil && version != "main" {
+			continue
+		}
 
-func fetchGAIECRDs() []string {
-	version := gaieVersion
-
-	cacheDir := filepath.Join(projectRoot(), ".cache", "gaie-crds", version)
-	paths := make([]string, len(gaieInferencePoolCRDs))
-	for i, name := range gaieInferencePoolCRDs {
-		paths[i] = filepath.Join(cacheDir, name)
-	}
-
-	if _, err := os.Stat(paths[0]); err == nil {
-		ginkgo.By("Using cached GAIE CRDs for version " + version)
-		return paths
-	}
-
-	ginkgo.By("Fetching GAIE CRDs for version " + version)
-	gomega.Expect(os.MkdirAll(cacheDir, 0755)).To(gomega.Succeed())
-
-	baseURL := fmt.Sprintf(
-		"https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/%s/config/crd/bases",
-		version,
-	)
-
-	for i, name := range gaieInferencePoolCRDs {
-		resp, err := http.Get(baseURL + "/" + name) //nolint:gosec
+		ginkgo.By("Fetching CRD " + name + " from " + repository + " at " + version)
+		url := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/config/crd/bases/%s", repository, version, name)
+		resp, err := http.Get(url) //nolint:gosec
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
-			"failed to fetch CRD %s at version %s", name, version)
+			"failed to fetch CRD %s from %s at %s", name, repository, version)
 		data, err := io.ReadAll(resp.Body)
 		resp.Body.Close() //nolint:errcheck
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())

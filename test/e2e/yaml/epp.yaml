@@ -27,7 +27,7 @@ metadata:
   name: epp-pod-read
   namespace: ${NAMESPACE}
 rules:
-  - apiGroups: ["inference.networking.x-k8s.io"]
+  - apiGroups: ["llm-d.ai"]
     resources: ["inferenceobjectives", "inferencemodelrewrites"]
     verbs: ["get", "watch", "list"]
   - apiGroups: ["inference.networking.k8s.io"]
