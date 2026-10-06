@@ -316,7 +316,7 @@ The `sql` transport stores requests, results, and partition leases in tables it 
 | `result_queue_name` | redis-sortedset | `result-list` | List for results. |
 | `result_queue_name` | sql | `result-sql` | Default result route. |
 | `result_batch_size` | sql | `32` | Most results written per transaction. If a write fails after retries, up to this many requests are redelivered and run inference again; lower values bound that cost at some throughput. |
-| `cancel_check_batch_size` | sql | `256` | Most cancellation checks coalesced into one query. Workers check before dispatching each request; batching them keeps that check off the per-request round-trip path. |
+| `cancel_check_batch_size` | sql | `256` | Most cancellation checks coalesced into one query. Workers check before sending each request and about once a second while it executes; batching keeps these checks off the per-request round-trip path. Size it near the worker count. |
 | `cancel_check_linger_ms` | sql | `5` | How long a partial batch of cancellation checks waits for more before querying. |
 | `max_connections` | sql | `32` | Most Postgres connections the processor opens; it keeps that many idle so bursts reuse them instead of starting a new backend per statement. Budget this times the processor count against the server's `max_connections`. |
 | `lease_ttl_seconds` | sql | `30` | How long a processor that stopped heartbeating keeps its partitions before peers take them over and redeliver its in-flight requests. |

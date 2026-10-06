@@ -19,11 +19,11 @@ type cancelReply struct {
 	err       error
 }
 
-// cancelBatcher coalesces the per-request cancellation checks every worker runs
-// before dispatch. Dispatch already reports requests cancelled before they were
-// claimed, so these checks only catch a cancellation racing an in-flight
-// request; one query per batch keeps that guarantee without one round trip per
-// request.
+// cancelBatcher coalesces the cancellation checks workers run before sending a
+// request and about once a second while it executes. Dispatch already reports
+// requests cancelled before they were claimed, so these checks only catch a
+// cancellation that lands after the claim; one query per batch keeps that
+// guarantee without one round trip per request.
 type cancelBatcher struct {
 	store   *sqlqueue.Store
 	queries chan cancelQuery
