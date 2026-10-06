@@ -127,7 +127,8 @@ CREATE INDEX IF NOT EXISTS async_quota_admits_key ON async_quota_admits (key, wi
 // The dispatch and result picks walk an index in order and stop at the limit. Queue
 // statistics swing between empty and full within seconds, and a planner that believes the
 // table is empty prefers a seq or bitmap scan that sorts every row, so these run with both off.
-var postgresFunctions = []string{`
+func postgresFunctions() []string {
+	return []string{`
 CREATE OR REPLACE FUNCTION async_dispatch(p_owner TEXT, p_queue TEXT, p_now BIGINT, p_limit INTEGER)
 RETURNS SETOF async_requests LANGUAGE sql SET enable_seqscan = off SET enable_bitmapscan = off AS $$
 	WITH picked AS MATERIALIZED (
@@ -204,6 +205,7 @@ BEGIN
 	END IF;
 	RETURN v_grant;
 END $$`}
+}
 
 const migrateLockID = 0x6173796e6371 // "asyncq"
 
@@ -227,7 +229,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := execDDL(ctx, tx, postgresDDL); err != nil {
 		return err
 	}
-	for _, fn := range postgresFunctions {
+	for _, fn := range postgresFunctions() {
 		if _, err := tx.ExecContext(ctx, fn); err != nil {
 			return fmt.Errorf("sqlqueue: migrate: %w", err)
 		}
