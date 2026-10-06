@@ -2,7 +2,9 @@
 FROM quay.io/projectquay/golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
-ARG LDFLAGS
+# Linker flags. The Makefile and the release workflow pass the pkg/version
+# -X symbols; a bare build still gets a stripped binary.
+ARG LDFLAGS="-s -w"
 
 WORKDIR /workspace
 # Copy the Go Modules manifests

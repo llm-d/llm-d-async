@@ -65,9 +65,18 @@ jobs:
           IMAGE=ghcr.io/llm-d/${{ steps.version.outputs.project_name }}
           VERSION_TAG=${{ steps.tag.outputs.tag }}
           COMMIT_SHA=${{ steps.tag.outputs.commit_sha }}
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          # Same -X symbols as the Makefile's LDFLAGS, so the image reports its
+          # release instead of the pkg/version defaults ("dev" / "unknown").
+          # The Dockerfile's ARG LDFLAGS is empty unless passed in.
+          LDFLAGS="-s -w \
+            -X github.com/llm-d/llm-d-async/pkg/version.Version=${VERSION_TAG} \
+            -X github.com/llm-d/llm-d-async/pkg/version.Commit=${COMMIT_SHA} \
+            -X github.com/llm-d/llm-d-async/pkg/version.BuildDate=${BUILD_DATE}"
           echo "Building $IMAGE with tags $VERSION_TAG and $COMMIT_SHA for linux/amd64,linux/arm64"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
+            --build-arg LDFLAGS="${LDFLAGS}" \
             --push \
             -t $IMAGE:$VERSION_TAG \
             -t $IMAGE:$COMMIT_SHA .
