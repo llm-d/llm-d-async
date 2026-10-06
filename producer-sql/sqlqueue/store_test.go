@@ -679,22 +679,22 @@ func TestExpiredResultsAreDropped(t *testing.T) {
 	})
 }
 
-func TestBacklogCountsPendingAndInFlight(t *testing.T) {
+func TestBacklogCountsOnlyPending(t *testing.T) {
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		now := time.Now()
 		ownAll(t, s, "a", now)
 		dl := now.Unix()
 		require.NoError(t, s.Enqueue(ctx, req("expired", dl-5), req("soon", dl+30), req("later", dl+3000)))
-		require.Len(t, dispatchIDs(t, s, "a", now, 1), 1)
+		require.Equal(t, []string{"expired"}, dispatchIDs(t, s, "a", now, 1))
 		depth, expiring, err := s.Backlog(ctx, "q", dl, []int64{0, 60, 3600})
 		require.NoError(t, err)
-		assert.EqualValues(t, 3, depth)
-		assert.Equal(t, []int64{1, 2, 3}, expiring)
+		assert.EqualValues(t, 2, depth, "a dispatched request is in flight, not backlog")
+		assert.Equal(t, []int64{0, 1, 2}, expiring)
 		require.NoError(t, s.Enqueue(ctx, Request{ID: "elsewhere", Token: "t", Queue: "other", Deadline: dl - 5, Envelope: "{}", Payload: []byte("{}")}))
 		depth, expiring, err = s.Backlog(ctx, "q", dl, nil)
 		require.NoError(t, err)
-		assert.EqualValues(t, 3, depth, "other queues are not counted")
+		assert.EqualValues(t, 2, depth, "other queues are not counted")
 		assert.Empty(t, expiring)
 		has, err := s.HasRequests(ctx, "q")
 		require.NoError(t, err)
@@ -702,6 +702,14 @@ func TestBacklogCountsPendingAndInFlight(t *testing.T) {
 		has, err = s.HasRequests(ctx, "empty")
 		require.NoError(t, err)
 		assert.False(t, has)
+
+		require.Len(t, dispatchIDs(t, s, "a", now, 10), 2)
+		depth, _, err = s.Backlog(ctx, "q", dl, nil)
+		require.NoError(t, err)
+		assert.Zero(t, depth, "a queue with only in-flight requests has no backlog")
+		has, err = s.HasRequests(ctx, "q")
+		require.NoError(t, err)
+		assert.False(t, has, "in-flight requests are not waiting on the gate")
 	})
 }
 

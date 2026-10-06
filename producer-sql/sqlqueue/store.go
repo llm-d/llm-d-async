@@ -511,7 +511,6 @@ func (s *Store) HasRequests(ctx context.Context, queue string) (bool, error) {
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT CASE WHEN
 			EXISTS (SELECT 1 FROM async_requests WHERE queue = $1 AND dispatch_epoch = 0)
-			OR EXISTS (SELECT 1 FROM async_requests WHERE queue = $1 AND dispatch_epoch > 0)
 		THEN 1 ELSE 0 END`, queue).Scan(&found); err != nil {
 		return false, fmt.Errorf("sqlqueue: has requests %q: %w", queue, err)
 	}
@@ -535,11 +534,7 @@ func (s *Store) Backlog(ctx context.Context, queue string, now int64, windows []
 	// #nosec G202 -- only generated placeholders are concatenated, the windows bind as parameters
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)`+strings.Join(counts, "")+`
-		FROM (
-			SELECT deadline FROM async_requests WHERE queue = $1 AND dispatch_epoch = 0
-			UNION ALL
-			SELECT deadline FROM async_requests WHERE queue = $1 AND dispatch_epoch > 0
-		) r`, args...).Scan(dest...); err != nil {
+		FROM async_requests WHERE queue = $1 AND dispatch_epoch = 0`, args...).Scan(dest...); err != nil {
 		return 0, nil, fmt.Errorf("sqlqueue: backlog %q: %w", queue, err)
 	}
 	return depth, expiring, nil
