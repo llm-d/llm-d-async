@@ -216,3 +216,41 @@ func TestRedisQuotaGate_MissingAttribute(t *testing.T) {
 		t.Fatalf("Expected continue none for missing attribute, got %v classification %v, err: %v", verdict, msg.GetClassification(), err)
 	}
 }
+
+// Releasing a reservation must not report an error: the release script has to
+// return a value (a script that falls off its end replies Null Bulk, which
+// go-redis turns into redis.Nil) and the remaining count must be accurate.
+func TestRedisQuotaGate_ReleaseConcurrencyReturnsRemaining(t *testing.T) {
+	s := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	ctx := context.Background()
+	gate := NewRedisQuotaGate(rdb, "userid", QuotaModeConcurrency, 5, time.Minute, "quota:")
+	key := "quota:user:alice"
+
+	for i := 0; i < 2; i++ {
+		cls, release, err := gate.acquireConcurrency(ctx, key)
+		if err != nil || cls != api.ClassificationReserved || release == nil {
+			t.Fatalf("acquire %d: cls=%v release=%v err=%v", i, cls, release != nil, err)
+		}
+	}
+
+	remaining, err := gate.releaseConcurrency(ctx, key, 60)
+	if err != nil || remaining != 1 {
+		t.Fatalf("first release: remaining=%d err=%v, want 1 and nil", remaining, err)
+	}
+	if ttl := s.TTL(key); ttl <= 0 {
+		t.Fatalf("key TTL not kept alive while a reservation remains: %v", ttl)
+	}
+
+	remaining, err = gate.releaseConcurrency(ctx, key, 60)
+	if err != nil || remaining != 0 {
+		t.Fatalf("second release: remaining=%d err=%v, want 0 and nil", remaining, err)
+	}
+
+	// Counter expired or never existed: not an error, reported as -1.
+	s.Del(key)
+	remaining, err = gate.releaseConcurrency(ctx, key, 60)
+	if err != nil || remaining != -1 {
+		t.Fatalf("release on missing key: remaining=%d err=%v, want -1 and nil", remaining, err)
+	}
+}

@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -133,23 +134,46 @@ func (g *RedisQuotaGate) acquireConcurrency(ctx context.Context, key string) (ap
 
 	release := func() {
 		// Use a background context for release to ensure it runs even if the request context is canceled
-		releaseScript := `
-			local current = redis.call("GET", KEYS[1])
-			if current and tonumber(current) > 0 then
-				local remaining = redis.call("DECR", KEYS[1])
-				if remaining > 0 then
-					-- Keep the key alive while reservations remain in flight.
-					redis.call("EXPIRE", KEYS[1], ARGV[1])
-				end
-			end
-		`
-		err := g.rdb.Eval(context.Background(), releaseScript, []string{key}, ttl).Err()
-		if err != nil {
+		remaining, err := g.releaseConcurrency(context.Background(), key, ttl)
+		switch {
+		case err != nil:
 			log.Log.Error(err, "Failed to release concurrency quota", "key", key)
+		case remaining < 0:
+			// The counter was gone before this reservation was returned: it
+			// expired (window of total inactivity) or was reset externally.
+			// Nothing to decrement, so the gate under-counts for a moment at
+			// worst; informational, not an error.
+			log.Log.V(1).Info("Concurrency quota counter missing on release", "key", key)
 		}
 	}
 
 	return api.ClassificationReserved, release, nil
+}
+
+// releaseConcurrency returns one reservation on key and reports the count
+// that remains, or -1 when the counter did not exist (or was already zero).
+//
+// The script always returns a value. A Lua script that falls off its end
+// replies with a Null Bulk, which go-redis surfaces as redis.Nil, so a
+// release that completed successfully would otherwise look like an error.
+func (g *RedisQuotaGate) releaseConcurrency(ctx context.Context, key string, ttl int) (int64, error) {
+	releaseScript := `
+		local current = redis.call("GET", KEYS[1])
+		if not current or tonumber(current) <= 0 then
+			return -1
+		end
+		local remaining = redis.call("DECR", KEYS[1])
+		if remaining > 0 then
+			-- Keep the key alive while reservations remain in flight.
+			redis.call("EXPIRE", KEYS[1], ARGV[1])
+		end
+		return remaining
+	`
+	res, err := g.rdb.Eval(ctx, releaseScript, []string{key}, ttl).Int64()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, err
+	}
+	return res, nil
 }
 
 func (g *RedisQuotaGate) acquireRateLimit(ctx context.Context, key string) (api.QuotaClassification, func(), error) {
