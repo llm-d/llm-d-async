@@ -18,6 +18,7 @@ package flowcontrol
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -42,8 +43,7 @@ type HeadroomGate struct {
 	interval time.Duration
 	now      func() time.Time
 
-	owner         pipeline.GateOwner
-	inferencePool string
+	owner pipeline.GateOwner
 
 	mu        sync.Mutex
 	readAt    time.Time
@@ -63,21 +63,16 @@ func (g *HeadroomGate) WithOwner(owner pipeline.GateOwner) *HeadroomGate {
 	return g
 }
 
-// WithInferencePool records the InferencePool the metric describes.
-func (g *HeadroomGate) WithInferencePool(pool string) *HeadroomGate {
-	g.inferencePool = pool
-	return g
-}
-
-// Budget returns the unused fraction of the current reading's allowance.
+// Budget is 1 while the current reading has an unclaimed slot and 0 otherwise. Apply enforces
+// the count, so a whole batch may be polled for the last slot.
 func (g *HeadroomGate) Budget(ctx context.Context) float64 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.refreshLocked(ctx)
-	if g.allowance <= 0 {
-		return 0
+	if g.admitted < g.allowance {
+		return 1
 	}
-	return math.Max(0, g.allowance-g.admitted) / g.allowance
+	return 0
 }
 
 // Apply admits the request while the current reading still has unclaimed slots.
@@ -99,13 +94,16 @@ func (g *HeadroomGate) refreshLocked(ctx context.Context) {
 	}
 	g.readAt, g.haveRead, g.admitted = now, true, 0
 	headroom, err := g.source.Headroom(ctx)
+	if err == nil && (math.IsNaN(headroom) || math.IsInf(headroom, 0) || headroom < 0) {
+		err = fmt.Errorf("headroom reading %g is not a finite count", headroom)
+	}
 	if err != nil {
 		log.FromContext(ctx).Error(err, "headroom gate closed until the next reading")
-		metrics.SetGateMetricSourceAvailable(false, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, g.inferencePool)
+		metrics.SetGateMetricSourceAvailable(false, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, "")
 		g.allowance = 0
 		return
 	}
-	metrics.SetGateMetricValue(headroom, 0, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, g.inferencePool)
-	metrics.SetGateMetricSourceAvailable(true, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, g.inferencePool)
+	metrics.SetGateMetricValue(headroom, 0, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, "")
+	metrics.SetGateMetricSourceAvailable(true, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, "")
 	g.allowance = math.Floor(headroom)
 }

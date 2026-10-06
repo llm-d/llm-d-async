@@ -125,7 +125,14 @@ func (s *ScrapeMetricSource) Headroom(ctx context.Context) (float64, error) {
 	if len(samples) == 0 {
 		return 0, fmt.Errorf("scrape: metric %s not found at %s", s.metricName, s.url)
 	}
-	return math.Max(0, maxCount-samples[0].Value), nil
+	used := samples[0].Value
+	if math.IsNaN(used) || math.IsInf(used, 0) || used < 0 {
+		return 0, fmt.Errorf("scrape: metric %s at %s is %g, not a count", s.metricName, s.url, used)
+	}
+	if math.IsInf(maxCount, 0) {
+		return 0, fmt.Errorf("scrape: capacity %g is not finite", maxCount)
+	}
+	return math.Max(0, maxCount-used), nil
 }
 
 // read scrapes the metric and the capacity it is measured against.
@@ -148,7 +155,7 @@ func (s *ScrapeMetricSource) read(ctx context.Context) ([]Sample, float64, error
 			return nil, 0, fmt.Errorf("scrape: pods metric %s not found at %s", s.podsMetric, s.podsURL)
 		}
 		pods := podsSamples[0].Value
-		if pods <= 0 {
+		if !(pods > 0) {
 			return nil, 0, fmt.Errorf("scrape: ready pods is %g, cannot compute capacity", pods)
 		}
 		maxCount = pods * s.maxCountPerPod

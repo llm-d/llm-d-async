@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -37,6 +38,16 @@ type eppMetrics struct {
 	queue, ready, status atomic.Int64
 	scrapes              atomic.Int64
 	absent               atomic.Bool
+	// queueText and readyText, when set, replace the values as written, for samples that are
+	// not integers.
+	queueText, readyText atomic.Pointer[string]
+}
+
+func (m *eppMetrics) text(override *atomic.Pointer[string], v *atomic.Int64) string {
+	if t := override.Load(); t != nil {
+		return *t
+	}
+	return fmt.Sprint(v.Load())
 }
 
 func newEPPMetrics(t *testing.T, queue, ready int64) (*eppMetrics, string) {
@@ -48,9 +59,9 @@ func newEPPMetrics(t *testing.T, queue, ready int64) (*eppMetrics, string) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		m.scrapes.Add(1)
 		w.WriteHeader(int(m.status.Load()))
-		_, _ = fmt.Fprintf(w, "llm_d_epp_ready_endpoints{name=\"pool\"} %d\n", m.ready.Load())
+		_, _ = fmt.Fprintf(w, "llm_d_epp_ready_endpoints{name=\"pool\"} %s\n", m.text(&m.readyText, &m.ready))
 		if !m.absent.Load() {
-			_, _ = fmt.Fprintf(w, "llm_d_epp_flow_control_queue_size{priority=\"-10\"} %d\n", m.queue.Load())
+			_, _ = fmt.Fprintf(w, "llm_d_epp_flow_control_queue_size{priority=\"-10\"} %s\n", m.text(&m.queueText, &m.queue))
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -130,15 +141,46 @@ func TestHeadroomGateReadsAnAbsentSeriesAsEmpty(t *testing.T) {
 	assert.Equal(t, 16, admitCount(t, g, 100))
 }
 
-func TestHeadroomGateBudgetTracksClaimedSlots(t *testing.T) {
+func TestHeadroomGateBudgetStaysOpenUntilTheLastSlot(t *testing.T) {
 	_, url := newEPPMetrics(t, 0, 1)
 	g := NewHeadroomGate(headroomSourceFor(url, 4), time.Minute)
-	assert.InDelta(t, 1.0, g.Budget(context.Background()), 1e-9)
-	admitCount(t, g, 1)
-	assert.InDelta(t, 0.75, g.Budget(context.Background()), 1e-9)
+	assert.Equal(t, 1.0, g.Budget(context.Background()))
 	admitCount(t, g, 3)
+	assert.Equal(t, 1.0, g.Budget(context.Background()),
+		"the dispatcher scales its batch by the budget, so a fraction would strand the last slot")
+	admitCount(t, g, 1)
 	assert.Zero(t, g.Budget(context.Background()))
 }
+
+func TestHeadroomGateInvalidReadingAdmitsNothing(t *testing.T) {
+	text := func(s string) *string { return &s }
+	for name, set := range map[string]func(m *eppMetrics){
+		"NaN queue":      func(m *eppMetrics) { m.queueText.Store(text("NaN")) },
+		"negative queue": func(m *eppMetrics) { m.queueText.Store(text("-5")) },
+		"+Inf queue":     func(m *eppMetrics) { m.queueText.Store(text("+Inf")) },
+		"NaN pods":       func(m *eppMetrics) { m.readyText.Store(text("NaN")) },
+		"+Inf pods":      func(m *eppMetrics) { m.readyText.Store(text("+Inf")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, url := newEPPMetrics(t, 0, 8)
+			set(m)
+			g := NewHeadroomGate(headroomSourceFor(url, 8), time.Minute)
+			assert.Zero(t, g.Budget(context.Background()))
+			assert.Zero(t, admitCount(t, g, 100))
+		})
+	}
+}
+
+func TestHeadroomGateRejectsANonFiniteHeadroom(t *testing.T) {
+	for _, h := range []float64{math.NaN(), math.Inf(1), -1} {
+		g := NewHeadroomGate(fixedHeadroom(h), time.Minute)
+		assert.Zero(t, admitCount(t, g, 10), "headroom %g", h)
+	}
+}
+
+type fixedHeadroom float64
+
+func (f fixedHeadroom) Headroom(context.Context) (float64, error) { return float64(f), nil }
 
 func TestHeadroomGateNeverOverAdmitsUnderConcurrency(t *testing.T) {
 	_, url := newEPPMetrics(t, 54, 8)
