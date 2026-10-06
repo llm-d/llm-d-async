@@ -43,7 +43,7 @@ func TestRedisPubSub_PublishSubscribeResultDelivery(t *testing.T) {
 			ID:       "pubsub-test-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test-model", "prompt": "hello"},
+			Payload:  testPayload(map[string]any{"model": "test-model", "prompt": "hello"}),
 		},
 	)
 	irBytes, err := json.Marshal(ir)
@@ -99,7 +99,7 @@ func TestRedisSortedSet_EnqueueDequeueRetryRoundTrip(t *testing.T) {
 			ID:       "retry-roundtrip-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 	irBytes, err := json.Marshal(ir)

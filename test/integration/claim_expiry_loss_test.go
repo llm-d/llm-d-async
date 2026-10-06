@@ -86,7 +86,7 @@ func enqueueShutdownLossRequests(t *testing.T, rdb *goredis.Client, queue string
 				ID:       id,
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(5 * time.Minute).Unix(),
-				Payload:  map[string]any{"model": "test", "prompt": "hello"},
+				Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 			},
 		)
 		member, err := ir.MarshalJSON()

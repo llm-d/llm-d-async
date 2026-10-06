@@ -63,7 +63,7 @@ func TestWorkerDispatch_DrainsBufferedOnShutdown(t *testing.T) {
 				ID:       id,
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(5 * time.Minute).Unix(),
-				Payload:  map[string]any{"model": "test", "prompt": "hello"},
+				Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 			},
 		)
 		requestChannel <- pipeline.EmbelishedRequestMessage{
@@ -132,7 +132,7 @@ func TestWorkerDispatch_MockIGW(t *testing.T) {
 			ID:       "dispatch-test-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test-model", "prompt": "hello world"},
+			Payload:  testPayload(map[string]any{"model": "test-model", "prompt": "hello world"}),
 		},
 	)
 
@@ -201,7 +201,7 @@ func TestWorkerDispatch_EndpointOverride(t *testing.T) {
 			ID:       "endpoint-override-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 
@@ -248,7 +248,7 @@ func TestWorkerDispatch_ServerErrorTriggersRetry(t *testing.T) {
 			ID:       "retry-test-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test"},
+			Payload:  testPayload(map[string]any{"model": "test"}),
 		},
 	)
 
@@ -299,7 +299,7 @@ func TestWorkerDispatch_ResultCallback(t *testing.T) {
 		ID:       "callback-test-1",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(time.Minute).Unix(),
-		Payload:  map[string]any{"model": "test"},
+		Payload:  testPayload(map[string]any{"model": "test"}),
 		Metadata: map[string]string{"trace_id": "abc-123"},
 	})
 
@@ -358,7 +358,7 @@ func TestWorkerDispatch_RequeuesOnShutdown(t *testing.T) {
 			ID:       "shutdown-requeue-1",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{"model": "test", "prompt": "hello"},
+			Payload:  testPayload(map[string]any{"model": "test", "prompt": "hello"}),
 		},
 	)
 
@@ -442,7 +442,7 @@ func TestWorkerDispatch_PoolIsolation(t *testing.T) {
 			ID:       "msg-blocked",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{},
+			Payload:  testPayload(map[string]any{}),
 		},
 	)
 	reqChanBlocked <- pipeline.EmbelishedRequestMessage{
@@ -465,7 +465,7 @@ func TestWorkerDispatch_PoolIsolation(t *testing.T) {
 			ID:       "msg-active",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(5 * time.Minute).Unix(),
-			Payload:  map[string]any{},
+			Payload:  testPayload(map[string]any{}),
 		},
 	)
 	reqChanActive <- pipeline.EmbelishedRequestMessage{
@@ -499,4 +499,12 @@ func TestWorkerDispatch_PoolIsolation(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("Blocked request did not complete after release")
 	}
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

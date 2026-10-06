@@ -18,8 +18,9 @@ import (
 // default branch of toInternalRequest.
 type customRequest struct {
 	id, endpoint      string
+	model             string
 	created, deadline int64
-	payload           map[string]any
+	payload           json.RawMessage
 	metadata          map[string]string
 	headers           map[string]string
 }
@@ -27,10 +28,11 @@ type customRequest struct {
 func (r *customRequest) ReqID() string                  { return r.id }
 func (r *customRequest) ReqCreated() int64              { return r.created }
 func (r *customRequest) ReqDeadline() int64             { return r.deadline }
-func (r *customRequest) ReqPayload() map[string]any     { return r.payload }
+func (r *customRequest) ReqPayload() json.RawMessage    { return r.payload }
 func (r *customRequest) ReqMetadata() map[string]string { return r.metadata }
 func (r *customRequest) ReqHeaders() map[string]string  { return r.headers }
 func (r *customRequest) ReqEndpoint() string            { return r.endpoint }
+func (r *customRequest) ReqModel() string               { return r.model }
 
 func setupTestProducer(t *testing.T) (*RedisSortedSetProducer, *miniredis.Miniredis) {
 	t.Helper()
@@ -63,10 +65,10 @@ func TestSubmitRequest(t *testing.T) {
 		ID:       "test-123",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload: map[string]interface{}{
+		Payload: testPayload(map[string]interface{}{
 			"model":  "gpt-3.5-turbo",
 			"prompt": "Hello, world!",
-		},
+		}),
 		Metadata: map[string]string{
 			"user": "test-user",
 		},
@@ -99,12 +101,12 @@ func TestSubmitRequest_ScoresByDeadlineThenSubmissionOrder(t *testing.T) {
 	for i := range n {
 		id := fmt.Sprintf("line-%04d", i)
 		require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
-			ID: id, Created: time.Now().Unix(), Deadline: shared, Payload: map[string]any{"prompt": id},
+			ID: id, Created: time.Now().Unix(), Deadline: shared, Payload: testPayload(map[string]any{"prompt": id}),
 		}))
 		submitted = append(submitted, id)
 	}
 	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
-		ID: "earlier-deadline", Created: time.Now().Unix(), Deadline: shared - 1, Payload: map[string]any{},
+		ID: "earlier-deadline", Created: time.Now().Unix(), Deadline: shared - 1, Payload: testPayload(map[string]any{}),
 	}))
 
 	members, err := mr.ZMembers("test-request-queue")
@@ -139,7 +141,7 @@ func TestSubmitRequest_ScoreMatchesQueueScoreAtTheSeqCap(t *testing.T) {
 	scores := map[int64]float64{}
 	for _, id := range []string{"a", "b", "c"} {
 		require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
-			ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+			ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
 		}))
 	}
 	members, err := mr.ZMembers("test-request-queue")
@@ -160,7 +162,7 @@ func TestSubmitRequest_ScoreMatchesQueueScoreAtTheSeqCap(t *testing.T) {
 func TestSubmitRequest_PayloadContainingThePlaceholder(t *testing.T) {
 	producer, mr := setupTestProducer(t)
 	ctx := context.Background()
-	payload := map[string]any{"enqueue_seq": -1, "prompt": `"enqueue_seq":-1`}
+	payload := testPayload(map[string]any{"enqueue_seq": -1, "prompt": `"enqueue_seq":-1`})
 
 	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
 		ID: "tricky", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: payload,
@@ -172,7 +174,9 @@ func TestSubmitRequest_PayloadContainingThePlaceholder(t *testing.T) {
 	var ir api.InternalRequest
 	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
 	assert.Equal(t, int64(1), ir.EnqueueSeq)
-	assert.Equal(t, map[string]any{"enqueue_seq": float64(-1), "prompt": `"enqueue_seq":-1`}, ir.PublicRequest.ReqPayload())
+	stored, err := mr.Get(ir.PayloadRef)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(payload), stored)
 }
 
 func TestSubmitRequest_SetsActiveTokenUntilDeadline(t *testing.T) {
@@ -181,7 +185,7 @@ func TestSubmitRequest_SetsActiveTokenUntilDeadline(t *testing.T) {
 	deadline := time.Now().Add(time.Hour).Unix()
 
 	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
-		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
 	}))
 
 	members, err := mr.ZMembers("test-request-queue")
@@ -202,7 +206,7 @@ func TestSubmitRequest_EnqueueSeqIsPerQueue(t *testing.T) {
 	submit := func(id, queue string) {
 		t.Helper()
 		require.NoError(t, producer.SubmitRequest(ctx, &api.RedisRequest{
-			RequestMessage:   api.RequestMessage{ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{}},
+			RequestMessage:   api.RequestMessage{ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{})},
 			RequestQueueName: queue,
 		}))
 	}
@@ -232,7 +236,7 @@ func TestSubmitRequest_EnqueueSeqExpiresAfterDeadline(t *testing.T) {
 	deadline := time.Now().Add(time.Hour).Unix()
 
 	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
-		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
 	}))
 
 	key := enqueueSeqKey("test-request-queue", deadline)
@@ -247,7 +251,7 @@ func TestSubmitRequest_ExpiredDeadlineLeavesSeqUntouched(t *testing.T) {
 	deadline := time.Now().Add(-time.Minute).Unix()
 
 	err := producer.SubmitRequest(ctx, &api.RequestMessage{
-		ID: "late", Created: time.Now().Unix(), Deadline: deadline, Payload: map[string]any{},
+		ID: "late", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
 	})
 	require.ErrorContains(t, err, "deadline has already expired")
 	assert.False(t, mr.Exists(enqueueSeqKey("test-request-queue", deadline)))
@@ -267,10 +271,11 @@ func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
 func TestToInternalRequest_CustomRequestPreservesHeadersAndEndpoint(t *testing.T) {
 	req := &customRequest{
 		id: "custom-1", created: 1, deadline: 2,
-		payload:  map[string]any{"k": "v"},
+		payload:  testPayload(map[string]any{"k": "v"}),
 		metadata: map[string]string{"m": "d"},
 		headers:  map[string]string{"Authorization": "Bearer tok"},
 		endpoint: "/v1/chat/completions",
+		model:    "m1",
 	}
 	ir := toInternalRequest(req)
 	rm, ok := ir.PublicRequest.(*api.RequestMessage)
@@ -279,6 +284,7 @@ func TestToInternalRequest_CustomRequestPreservesHeadersAndEndpoint(t *testing.T
 	assert.Equal(t, map[string]string{"Authorization": "Bearer tok"}, rm.Headers)
 	assert.Equal(t, "/v1/chat/completions", rm.Endpoint)
 	assert.Equal(t, map[string]string{"m": "d"}, rm.Metadata)
+	assert.Equal(t, "m1", rm.Model)
 }
 
 func TestToInternalRequest_RedisQueueFieldsCopyToInternalRouting(t *testing.T) {
@@ -326,6 +332,39 @@ func TestSubmitRequest_NilRequest(t *testing.T) {
 	})
 }
 
+func TestSubmitRequestRejectsAPayloadThatIsNotJSON(t *testing.T) {
+	for name, payload := range map[string]json.RawMessage{
+		"not json":  json.RawMessage("not json"),
+		"truncated": json.RawMessage(`{"model":"m"`),
+		"empty":     json.RawMessage{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t)
+			err := producer.SubmitRequest(context.Background(), &api.RequestMessage{
+				ID:       "bad-payload",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(time.Hour).Unix(),
+				Payload:  payload,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "payload is not valid JSON")
+			assert.Empty(t, mr.Keys(), "a rejected request must not be queued")
+		})
+	}
+}
+
+func TestSubmitRequestAcceptsANilPayload(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	require.NoError(t, producer.SubmitRequest(context.Background(), &api.RequestMessage{
+		ID:       "no-payload",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(time.Hour).Unix(),
+	}))
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	assert.Len(t, members, 1)
+}
+
 func TestSubmitRequest_Validation(t *testing.T) {
 	producer, _ := setupTestProducer(t)
 
@@ -341,7 +380,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 			req: &api.RequestMessage{
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Unix(),
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "request ID is required",
 		},
@@ -351,7 +390,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: 0,
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "deadline is required",
 		},
@@ -361,7 +400,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: 0,
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "deadline is required",
 		},
@@ -371,7 +410,7 @@ func TestSubmitRequest_Validation(t *testing.T) {
 				ID:       "test",
 				Created:  time.Now().Unix(),
 				Deadline: time.Now().Add(-1 * time.Minute).Unix(),
-				Payload:  map[string]interface{}{},
+				Payload:  testPayload(map[string]interface{}{}),
 			},
 			wantErr: "deadline has already expired",
 		},
@@ -426,7 +465,7 @@ func TestSubmitRequest_ClearsStaleCancellationMarker(t *testing.T) {
 		ID:       requestID,
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]any{"model": "test"},
+		Payload:  testPayload(map[string]any{"model": "test"}),
 	})
 	require.NoError(t, err)
 	assert.False(t, mr.Exists(api.RequestCancellationKey(requestID)))
@@ -590,7 +629,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 		ID:       "alpha-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"tenant": "alpha"},
+		Payload:  testPayload(map[string]interface{}{"tenant": "alpha"}),
 	}
 	err = tenant1Producer.SubmitRequest(ctx, req1)
 	require.NoError(t, err)
@@ -599,7 +638,7 @@ func TestMultipleTenantsIsolation(t *testing.T) {
 		ID:       "beta-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"tenant": "beta"},
+		Payload:  testPayload(map[string]interface{}{"tenant": "beta"}),
 	}
 	err = tenant2Producer.SubmitRequest(ctx, req2)
 	require.NoError(t, err)
@@ -686,7 +725,7 @@ func TestProducerAuth(t *testing.T) {
 			ID:       "auth-test",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(1 * time.Hour).Unix(),
-			Payload:  map[string]interface{}{"test": true},
+			Payload:  testPayload(map[string]interface{}{"test": true}),
 		}
 		err = producer.SubmitRequest(ctx, req)
 		assert.NoError(t, err)
@@ -774,7 +813,7 @@ func TestWithRedisClient(t *testing.T) {
 			ID:       "inject-test",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(1 * time.Hour).Unix(),
-			Payload:  map[string]interface{}{"test": true},
+			Payload:  testPayload(map[string]interface{}{"test": true}),
 		}
 		err = p.SubmitRequest(ctx, req)
 		assert.NoError(t, err)
@@ -816,7 +855,7 @@ func TestCloseOwnership(t *testing.T) {
 			ID:       "post-close",
 			Created:  time.Now().Unix(),
 			Deadline: time.Now().Add(1 * time.Hour).Unix(),
-			Payload:  map[string]interface{}{},
+			Payload:  testPayload(map[string]interface{}{}),
 		})
 		assert.Error(t, err)
 	})
@@ -907,7 +946,7 @@ func TestResultQueueNameNoNamespacing(t *testing.T) {
 		ID:       "short-name-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"job": "batch"},
+		Payload:  testPayload(map[string]interface{}{"job": "batch"}),
 	}
 	require.NoError(t, producer.SubmitRequest(ctx, req))
 
@@ -960,7 +999,7 @@ func TestComplexResultQueueKeyShape(t *testing.T) {
 		ID:       "complex-key-request",
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(1 * time.Hour).Unix(),
-		Payload:  map[string]interface{}{"pool": "a"},
+		Payload:  testPayload(map[string]interface{}{"pool": "a"}),
 	}
 	require.NoError(t, producer.SubmitRequest(ctx, req))
 
@@ -984,4 +1023,64 @@ func TestComplexResultQueueKeyShape(t *testing.T) {
 	result, err := producer.GetResult(ctxT)
 	require.NoError(t, err)
 	assert.Equal(t, "complex-key-request", result.ID)
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func TestRedisSortedSetProducer_StoresPayloadApartFromTheQueuedEnvelope(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour)
+	payload := `{"model":"m","prompt":"a long prompt"}`
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: deadline.Unix(), Payload: json.RawMessage(payload)}))
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: deadline.Unix(), Payload: json.RawMessage(`{"prompt":"second"}`)}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 2)
+	refs := map[string]bool{}
+	for _, member := range members {
+		assert.NotContains(t, member, "prompt", "the queued member does not carry the payload")
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		require.NotEmpty(t, ir.RequestToken)
+		assert.Equal(t, api.RequestPayloadKey("r1", ir.RequestToken), ir.PayloadRef)
+
+		stored, err := mr.Get(ir.PayloadRef)
+		require.NoError(t, err, "payload key %q", ir.PayloadRef)
+		ttl := mr.TTL(ir.PayloadRef)
+		assert.Greater(t, ttl, time.Until(deadline), "the payload outlives the deadline")
+		assert.LessOrEqual(t, ttl, time.Until(deadline)+payloadTTLGrace+time.Second)
+
+		var joined api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &joined))
+		require.NoError(t, api.AttachPayload(&joined, json.RawMessage(stored)))
+		refs[ir.PayloadRef] = true
+		if string(joined.PublicRequest.ReqPayload()) != payload {
+			assert.JSONEq(t, `{"prompt":"second"}`, string(joined.PublicRequest.ReqPayload()))
+		}
+	}
+	assert.Len(t, refs, 2, "each generation of a reused ID gets its own payload key")
+}
+
+func TestRedisSortedSetProducer_StoresAnEmptyPayload(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "empty", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix()}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	stored, err := mr.Get(ir.PayloadRef)
+	require.NoError(t, err)
+	assert.Empty(t, stored)
 }

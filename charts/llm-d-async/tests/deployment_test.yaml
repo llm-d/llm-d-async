@@ -500,3 +500,47 @@ tests:
           content:
             name: PUBSUB_EMULATOR_HOST
             value: "pubsub-emulator:8085"
+
+  - it: should inject SQL_URL from transportConfig.urlSecret for the sql transport
+    set:
+      ap.redis.secretName: ""
+      ap.transport: sql
+      ap.transportConfig.urlSecret.name: batch-gateway-secrets
+      ap.transportConfig.urlSecret.key: postgresql-url
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=sql
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SQL_URL
+            valueFrom:
+              secretKeyRef:
+                name: batch-gateway-secrets
+                key: postgresql-url
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+          any: true
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: urlSecret
+
+  - it: should create the URL Secret and inject SQL_URL from it for the sql transport
+    set:
+      ap.redis.secretName: ""
+      ap.transport: sql
+      ap.transportConfig.urlSecret.url: postgres://u:p@db:5432/async
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SQL_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-llm-d-async-redis
+                key: url
+          any: true
