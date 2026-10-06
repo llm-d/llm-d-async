@@ -110,6 +110,19 @@ func TestSplitPayload_Errors(t *testing.T) {
 	if _, _, err := SplitPayload(NewInternalRequest(InternalRouting{}, &unsupportedRequest{})); err == nil {
 		t.Fatal("unsupported request type: want error")
 	}
+	for name, r := range typedNilRequests() {
+		if _, _, err := SplitPayload(NewInternalRequest(InternalRouting{}, r)); err == nil {
+			t.Fatalf("typed nil %s: want error", name)
+		}
+	}
+}
+
+func typedNilRequests() map[string]Request {
+	return map[string]Request{
+		"RequestMessage": (*RequestMessage)(nil),
+		"RedisRequest":   (*RedisRequest)(nil),
+		"PubSubRequest":  (*PubSubRequest)(nil),
+	}
 }
 
 func TestAttachPayload(t *testing.T) {
@@ -132,5 +145,10 @@ func TestAttachPayload(t *testing.T) {
 	}
 	if err := AttachPayload(NewInternalRequest(InternalRouting{}, &unsupportedRequest{}), nil); err == nil {
 		t.Fatal("unsupported request type: want error")
+	}
+	for name, r := range typedNilRequests() {
+		if err := AttachPayload(NewInternalRequest(InternalRouting{}, r), nil); err == nil {
+			t.Fatalf("typed nil %s: want error", name)
+		}
 	}
 }
