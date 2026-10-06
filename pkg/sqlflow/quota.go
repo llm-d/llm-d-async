@@ -89,9 +89,22 @@ func NewQuotaStore(store *sqlqueue.Store, ttl, timeout time.Duration, logger log
 	return s
 }
 
+// Close waits for queued releases, then deletes the holders nothing names so
+// their rows do not wait out the lease.
 func (s *QuotaStore) Close() {
 	s.cancel()
 	s.wg.Wait()
+	s.mu.Lock()
+	var idle []*quotaHolder
+	for h := range s.holders {
+		if h.known == 0 && !h.gone {
+			idle = append(idle, h)
+		}
+	}
+	s.mu.Unlock()
+	for _, h := range idle {
+		s.delete(h)
+	}
 }
 
 func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (func(), bool, error) {
@@ -284,7 +297,11 @@ func (s *QuotaStore) release(h *quotaHolder, key string) {
 	s.releasing = true
 	s.releaseMu.Unlock()
 	if start {
-		go s.flushReleases()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.flushReleases()
+		}()
 	}
 }
 
