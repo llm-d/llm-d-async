@@ -82,12 +82,13 @@ func startSQLFlowWorkers(t *testing.T, dsn, igwURL string, leaseTTLSeconds int64
 	dispatch := randomrobin.NewRandomRobinPolicy("test", randomrobin.Config{}).
 		MergeRequestChannels(flow.RequestChannels(), poolMap)
 	workerCtx, workerCancel := context.WithCancel(context.Background())
+	drainCtx := asyncworker.WithCancellationChecker(workerCtx, flow.CancellationChecker())
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			asyncworker.WorkerWithGate(workerCtx, workerCtx, flow.Characteristics(),
+			asyncworker.WorkerWithGate(workerCtx, drainCtx, flow.Characteristics(),
 				asyncworker.NewHTTPInferenceClient(http.DefaultClient), dispatch.Channels["default"],
 				flow.RetryChannel(), flow.ResultChannel(), 30*time.Second, nil, nil)
 		}()
@@ -206,6 +207,42 @@ func TestSQLFlow_CancelBeforeDispatch(t *testing.T) {
 		assert.Equal(t, api.ErrCodeCancelled, res.ErrorCode)
 		assert.Zero(t, res.StatusCode)
 		assert.Empty(t, seen(), "cancelled request never reached inference")
+	})
+}
+
+func TestSQLFlow_CancelInFlight(t *testing.T) {
+	withSQLDSN(t, func(t *testing.T, dsn string) {
+		started := make(chan struct{}, 1)
+		aborted := make(chan struct{}, 1)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			started <- struct{}{}
+			select {
+			case <-r.Context().Done():
+				aborted <- struct{}{}
+			case <-time.After(30 * time.Second):
+				w.WriteHeader(http.StatusOK)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		h := startSQLFlow(t, dsn, srv.URL, 60, 50*time.Millisecond)
+		require.NoError(t, h.producer.SubmitRequest(context.Background(), newRequest("running", time.Now().Add(time.Hour))))
+		select {
+		case <-started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("inference never started")
+		}
+		require.NoError(t, h.producer.CancelRequests(context.Background(), []string{"running"}))
+
+		res := getResult(t, h.producer, 10*time.Second)
+		assert.Equal(t, "running", res.ID)
+		assert.Equal(t, api.ErrCodeCancelled, res.ErrorCode)
+		select {
+		case <-aborted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the in-flight inference request was not aborted")
+		}
 	})
 }
 
