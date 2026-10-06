@@ -57,9 +57,8 @@ const (
 	enqueueSeqPlaceholder     = -1
 	enqueueSeqFieldJSON       = `"enqueue_seq":`
 	enqueueSeqPlaceholderJSON = enqueueSeqFieldJSON + "-1"
+	enqueueSeqGrace           = time.Hour
 )
-
-const enqueueSeqGrace = time.Hour
 
 func enqueueSeqKey(queueName string, deadline int64) string {
 	return fmt.Sprintf("request-seq:%s:%d", queueName, deadline)
