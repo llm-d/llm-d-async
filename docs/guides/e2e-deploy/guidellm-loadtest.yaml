@@ -9,33 +9,21 @@ spec:
       restartPolicy: Never
       containers:
         - name: guidellm
-          image: ghcr.io/vllm-project/guidellm:latest
+          image: ghcr.io/vllm-project/guidellm:v0.8.0
           env:
-            - name: USER
-              value: "guidellm"
             - name: HF_HUB_CACHE
-              value: "/tmp/hf_cache"
+              value: /tmp/hf_cache
           command:
             - guidellm
-            - benchmark
             - run
-            - --target
-            - "http://llm-d-inference-gateway-istio"
-            - --request-format
-            - text_completions
-            - --model
-            - "Qwen/Qwen3-0.6B"
+            - --backend
+            - kind=openai_http,target=http://llm-d-inference-gateway-istio,model=Qwen/Qwen3-0.6B,request_format=/v1/completions
             - --profile
-            - constant
-            - --rate
-            - "50"
-            - --max-seconds
-            - "3600"
+            - kind=constant,rate=50
+            - --constraint
+            - kind=max_duration,seconds=3600
             - --data
-            - "prompt_tokens=256,output_tokens=512"
-            - --output-dir
-            - /tmp
-            - --max-requests
-            - "100000"
-            - --processor
-            - "Qwen/Qwen3-0.6B"
+            - kind=synthetic_text,prompt_tokens=256,output_tokens=512
+            - --output
+            - kind=json,path=/tmp/results.json
+            - --disable-console-interactive

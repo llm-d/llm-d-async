@@ -393,7 +393,10 @@ so that shell can resolve the Redis service configured on the host.
 Two load generators are available:
 - **hey** (`docs/guides/e2e-deploy/hey-loadtest.yaml`) — simple HTTP load generator, 200 concurrent workers
 - **guidellm** (`docs/guides/e2e-deploy/guidellm-loadtest.yaml`) — LLM-specific load testing with synthetic
-  prompts (256 prompt tokens, 512 output tokens), constant 50 req/s
+  prompts (256 prompt tokens, 512 output tokens), constant 50 req/s. The manifest pins guidellm v0.8.0 and
+  uses the `guidellm run` syntax introduced in v0.7.0 (`--backend`, `--profile`, `--constraint`, `--data`
+  with `kind=...` values); the older `guidellm benchmark run` flags no longer exist in any current image, so
+  do not switch it back to the `latest` tag
 
 #### Option A: hey
 
@@ -449,8 +452,10 @@ kubectl run --rm -i check-drained --image=redis --restart=Never -n ${NAMESPACE} 
 # 1. Start the load test (constant 50 req/s, synthetic data, runs until killed)
 kubectl apply -n ${NAMESPACE} -f ${ASYNC_REPO}/docs/guides/e2e-deploy/guidellm-loadtest.yaml
 
-# 2. Wait ~40s for startup + Prometheus scrape, then verify saturation
-sleep 40
+# 2. Wait for the job to start generating load (the first run pulls the image and the
+#    tokenizer), then one Prometheus scrape, then verify saturation
+kubectl wait --for=condition=Ready pod -l job-name=guidellm-loadtest -n ${NAMESPACE} --timeout=300s
+sleep 30
 kubectl run --rm -i prom-running --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
     'query=vllm:num_requests_running{inference_pool="optimized-baseline"}' \
