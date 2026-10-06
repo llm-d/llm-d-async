@@ -406,6 +406,24 @@ func TestQuotaStoreSlotsOfAStoppedDispatcherFree(t *testing.T) {
 	}, 5*ttl, 50*time.Millisecond, "the stopped dispatcher's slot frees once its lease lapses")
 }
 
+func TestQuotaStoreCloseFlushesReleasesAndDeletesIdleHolders(t *testing.T) {
+	store := cancelTestStore(t)
+	db := quotaDB(t)
+	q := NewQuotaStore(store, time.Minute, time.Second, logr.Discard())
+	ctx := context.Background()
+
+	for range 20 {
+		release, ok, err := q.AcquireSlot(ctx, "k", 100)
+		require.NoError(t, err)
+		require.True(t, ok)
+		release()
+	}
+	q.Close()
+
+	assert.Zero(t, liveSlots(t, db, "k"), "releases queued before Close reach the database")
+	assert.Empty(t, holderNames(t, db), "an idle holder is deleted, not left to lapse")
+}
+
 func holderNames(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 	rows, err := db.Query(`SELECT holder FROM async_quota_holders ORDER BY holder`)
