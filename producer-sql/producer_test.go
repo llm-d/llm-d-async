@@ -57,10 +57,19 @@ func TestSubmitRequestsIsAllOrNothing(t *testing.T) {
 	ctx := context.Background()
 	expired := message("expired")
 	expired.Deadline = time.Now().Add(-time.Minute).Unix()
+	notJSON := message("not-json")
+	notJSON.Payload = json.RawMessage("not json")
+	truncated := message("truncated")
+	truncated.Payload = json.RawMessage(`{"model":"m"`)
+	emptyBytes := message("empty-bytes")
+	emptyBytes.Payload = json.RawMessage{}
 	for name, bad := range map[string]api.Request{
-		"nil":     nil,
-		"no id":   message(""),
-		"expired": expired,
+		"nil":                 nil,
+		"no id":               message(""),
+		"expired":             expired,
+		"payload not json":    notJSON,
+		"truncated payload":   truncated,
+		"empty payload bytes": emptyBytes,
 	} {
 		err := p.SubmitRequests(ctx, []api.Request{message("ok-1"), bad, message("ok-2")})
 		require.Error(t, err, name)

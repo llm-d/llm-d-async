@@ -130,6 +130,9 @@ func (p *Producer) toRow(req api.Request) (sqlqueue.Request, error) {
 	if err != nil {
 		return sqlqueue.Request{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
+	if payload != nil && !json.Valid(payload) {
+		return sqlqueue.Request{}, errors.New("failed to marshal request: payload is not valid JSON")
+	}
 	if payload == nil {
 		payload = json.RawMessage{}
 	}
