@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/exaring/otelpgx v0.12.0
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/llm-d/llm-d-async/api v0.9.1
+	github.com/llm-d/llm-d-async/api v0.10.0
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
