@@ -45,7 +45,7 @@ func TestPayloadRef_DispatchRetryAndCleanup(t *testing.T) {
 		RedisURL:         "redis://" + rdb.Options().Addr,
 		RequestQueueName: queue,
 		ResultQueueName:  "result-list",
-	})
+	}, producer.WithPayloadKeys())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = submitter.Close() })
 

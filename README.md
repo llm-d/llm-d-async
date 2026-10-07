@@ -1068,12 +1068,11 @@ A persisted implementation based on Redis SortedSets. Recommended for production
 
 #### Payload storage
 
-The producer stores each payload under its own key, `request-payload:<id>:<token>`, deleted when the result is recorded.
+The producer writes each payload inline in the queued request. With `producer.WithPayloadKeys()` it stores the payload under its own key, `request-payload:<id>:<token>`, deleted when the result is recorded.
 
-- Run this Redis with `maxmemory-policy noeviction`. A request whose payload was evicted ends with `PAYLOAD_UNAVAILABLE`.
-- Upgrade dispatchers before producers. A dispatcher that predates payload keys dispatches a `null` body.
-- Drain the retry queue before rolling dispatchers back to such a version: retries written by a newer dispatcher also carry only the reference.
-- Requests published with an inline `payload`, by older producers or directly with `ZADD`, still dispatch unchanged.
+- Enable `WithPayloadKeys` only once every dispatcher on the queue understands payload keys. An older dispatcher dispatches a `null` body.
+- Run this Redis with `maxmemory-policy noeviction`. A request whose payload key was evicted ends with `PAYLOAD_UNAVAILABLE`.
+- Before rolling dispatchers back to an older version, disable `WithPayloadKeys` and drain the request and retry queues: requests and retries written with it carry only the reference.
 
 #### Legacy Redis Sorted Set command line parameters
 

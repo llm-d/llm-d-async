@@ -34,7 +34,7 @@ func (r *customRequest) ReqHeaders() map[string]string  { return r.headers }
 func (r *customRequest) ReqEndpoint() string            { return r.endpoint }
 func (r *customRequest) ReqModel() string               { return r.model }
 
-func setupTestProducer(t *testing.T) (*RedisSortedSetProducer, *miniredis.Miniredis) {
+func setupTestProducer(t *testing.T, opts ...ProducerOption) (*RedisSortedSetProducer, *miniredis.Miniredis) {
 	t.Helper()
 
 	mr, err := miniredis.Run()
@@ -45,7 +45,7 @@ func setupTestProducer(t *testing.T) (*RedisSortedSetProducer, *miniredis.Minire
 		RedisURL:         "redis://" + mr.Addr(),
 		RequestQueueName: "test-request-queue",
 		ResultQueueName:  "test-result-queue",
-	})
+	}, opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if err := producer.Close(); err != nil {
@@ -160,23 +160,33 @@ func TestSubmitRequest_ScoreMatchesQueueScoreAtTheSeqCap(t *testing.T) {
 }
 
 func TestSubmitRequest_PayloadContainingThePlaceholder(t *testing.T) {
-	producer, mr := setupTestProducer(t)
-	ctx := context.Background()
-	payload := testPayload(map[string]any{"enqueue_seq": -1, "prompt": `"enqueue_seq":-1`})
+	for name, opts := range map[string][]ProducerOption{
+		"inline":       nil,
+		"payload keys": {WithPayloadKeys()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t, opts...)
+			ctx := context.Background()
+			payload := testPayload(map[string]any{"enqueue_seq": -1, "prompt": `"enqueue_seq":-1`})
 
-	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
-		ID: "tricky", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: payload,
-	}))
+			require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+				ID: "tricky", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: payload,
+			}))
 
-	members, err := mr.ZMembers("test-request-queue")
-	require.NoError(t, err)
-	require.Len(t, members, 1)
-	var ir api.InternalRequest
-	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
-	assert.Equal(t, int64(1), ir.EnqueueSeq)
-	stored, err := mr.Get(ir.PayloadRef)
-	require.NoError(t, err)
-	assert.JSONEq(t, string(payload), stored)
+			members, err := mr.ZMembers("test-request-queue")
+			require.NoError(t, err)
+			require.Len(t, members, 1)
+			var ir api.InternalRequest
+			require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+			assert.Equal(t, int64(1), ir.EnqueueSeq)
+			got := string(ir.PublicRequest.ReqPayload())
+			if ir.PayloadRef != "" {
+				got, err = mr.Get(ir.PayloadRef)
+				require.NoError(t, err)
+			}
+			assert.JSONEq(t, string(payload), got)
+		})
+	}
 }
 
 func TestSubmitRequest_SetsActiveTokenUntilDeadline(t *testing.T) {
@@ -1049,8 +1059,27 @@ func testPayload(m map[string]any) json.RawMessage {
 	return b
 }
 
-func TestRedisSortedSetProducer_StoresPayloadApartFromTheQueuedEnvelope(t *testing.T) {
+func TestRedisSortedSetProducer_StoresThePayloadInlineByDefault(t *testing.T) {
 	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	payload := `{"model":"m","prompt":"a long prompt"}`
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: json.RawMessage(payload)}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Contains(t, members[0], `"payload":`+payload)
+	assert.NotContains(t, members[0], "payload_ref")
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	assert.Empty(t, ir.PayloadRef)
+	for _, key := range mr.Keys() {
+		assert.NotContains(t, key, "request-payload:")
+	}
+}
+
+func TestRedisSortedSetProducer_StoresPayloadApartFromTheQueuedEnvelope(t *testing.T) {
+	producer, mr := setupTestProducer(t, WithPayloadKeys())
 	ctx := context.Background()
 	deadline := time.Now().Add(time.Hour)
 	payload := `{"model":"m","prompt":"a long prompt"}`
@@ -1087,7 +1116,7 @@ func TestRedisSortedSetProducer_StoresPayloadApartFromTheQueuedEnvelope(t *testi
 }
 
 func TestRedisSortedSetProducer_StoresAnEmptyPayload(t *testing.T) {
-	producer, mr := setupTestProducer(t)
+	producer, mr := setupTestProducer(t, WithPayloadKeys())
 	ctx := context.Background()
 	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "empty", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix()}))
 
