@@ -268,8 +268,11 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
-	if payload != nil && !json.Valid(payload) {
-		return errors.New("failed to marshal request: payload is not valid JSON")
+	if payload != nil {
+		trimmed := bytes.TrimLeft(payload, " \t\r\n")
+		if !json.Valid(trimmed) || (trimmed[0] != '{' && string(trimmed) != "null") {
+			return errors.New("failed to marshal request: payload must be a JSON object or null")
+		}
 	}
 	at := bytes.Index(envelope, []byte(enqueueSeqPlaceholderJSON))
 	if at < 0 {

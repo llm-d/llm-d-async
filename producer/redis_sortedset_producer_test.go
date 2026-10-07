@@ -332,11 +332,16 @@ func TestSubmitRequest_NilRequest(t *testing.T) {
 	})
 }
 
-func TestSubmitRequestRejectsAPayloadThatIsNotJSON(t *testing.T) {
+func TestSubmitRequestRejectsAPayloadThatIsNotAJSONObject(t *testing.T) {
 	for name, payload := range map[string]json.RawMessage{
-		"not json":  json.RawMessage("not json"),
-		"truncated": json.RawMessage(`{"model":"m"`),
-		"empty":     json.RawMessage{},
+		"not json":   json.RawMessage("not json"),
+		"truncated":  json.RawMessage(`{"model":"m"`),
+		"empty":      json.RawMessage{},
+		"whitespace": json.RawMessage(" \n"),
+		"string":     json.RawMessage(`"hi"`),
+		"number":     json.RawMessage(`42`),
+		"array":      json.RawMessage(`[{"model":"m"}]`),
+		"bool":       json.RawMessage(`true`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			producer, mr := setupTestProducer(t)
@@ -347,22 +352,33 @@ func TestSubmitRequestRejectsAPayloadThatIsNotJSON(t *testing.T) {
 				Payload:  payload,
 			})
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "payload is not valid JSON")
+			assert.Contains(t, err.Error(), "payload must be a JSON object or null")
 			assert.Empty(t, mr.Keys(), "a rejected request must not be queued")
 		})
 	}
 }
 
-func TestSubmitRequestAcceptsANilPayload(t *testing.T) {
-	producer, mr := setupTestProducer(t)
-	require.NoError(t, producer.SubmitRequest(context.Background(), &api.RequestMessage{
-		ID:       "no-payload",
-		Created:  time.Now().Unix(),
-		Deadline: time.Now().Add(time.Hour).Unix(),
-	}))
-	members, err := mr.ZMembers("test-request-queue")
-	require.NoError(t, err)
-	assert.Len(t, members, 1)
+func TestSubmitRequestAcceptsAnObjectOrNullPayload(t *testing.T) {
+	for name, payload := range map[string]json.RawMessage{
+		"nil":             nil,
+		"null":            json.RawMessage(`null`),
+		"object":          json.RawMessage(`{"model":"m"}`),
+		"indented object": json.RawMessage(" \n\t{\"model\":\"m\"}"),
+		"empty object":    json.RawMessage(`{}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t)
+			require.NoError(t, producer.SubmitRequest(context.Background(), &api.RequestMessage{
+				ID:       "ok-payload",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(time.Hour).Unix(),
+				Payload:  payload,
+			}))
+			members, err := mr.ZMembers("test-request-queue")
+			require.NoError(t, err)
+			assert.Len(t, members, 1)
+		})
+	}
 }
 
 func TestSubmitRequest_Validation(t *testing.T) {
