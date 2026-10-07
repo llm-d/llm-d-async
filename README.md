@@ -794,10 +794,11 @@ The async processor expects request messages to have the following format:
 | `id` | string | Unique identifier for result mapping (required) |
 | `created` | int64 | Created timestamp in Unix seconds |
 | `deadline` | int64 | Deadline in Unix seconds (required, must be positive) |
-| `payload` | object | Inference request payload |
+| `payload` | object | Inference request payload, forwarded to the inference gateway byte-for-byte |
 | `metadata` | map[string]string | Optional caller-supplied pass-through data (e.g. tracing IDs, user labels) |
 | `headers` | map[string]string | Optional HTTP headers forwarded on the outgoing dispatch request |
 | `endpoint` | string | Optional per-request dispatch path; overrides the queue-level default when set |
+| `model` | string | Optional model name, reported as `gen_ai.request.model` on traces. Does not change the dispatched body. |
 
 **Example:**
 
@@ -832,7 +833,7 @@ Results are written to the result queue/topic with the following structure:
 | `id` | string | The originating request's `id` |
 | `status_code` | int | HTTP status code of the inference response. Present (> 0) whenever an HTTP response was received — including error statuses. |
 | `payload` | string | The response body. On non-HTTP failures it carries a JSON `{"error": "<message>"}` object. |
-| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST` |
+| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE` |
 | `error_message` | string | Human-readable description accompanying `error_code` |
 
 ### Internal Wire Format
@@ -992,7 +993,7 @@ internal attributes use the `llm_d.async.*` namespace.
 | Attribute | Deprecated alias | Description |
 |-----------|------------------|-------------|
 | `gen_ai.request.id` | `request.id` | Request identifier on `process-request` and `re-enqueue` spans |
-| `gen_ai.request.model` | — | Non-empty string `model` from the request payload on `process-request` spans; omitted when missing, empty, or not a string |
+| `gen_ai.request.model` | — | The request's `model` field on `process-request` spans, or else a non-empty string `model` from the request payload; omitted when neither is set |
 | `llm_d.async.queue.id` | `queue.id` | Queue identifier (matches Prometheus `queue_id` label); omitted when empty |
 | `llm_d.async.queue.name` | `queue.name` | Queue name (matches Prometheus `queue_name` label); omitted when empty |
 | `llm_d.async.retry_count` | `retry.count` | Current retry attempt (0 for first attempt) |
@@ -1064,6 +1065,15 @@ The `url` field in the transport configuration (see [Transport Configuration](#t
 A persisted implementation based on Redis SortedSets. Recommended for production: it offers persistence, priority sorting, and per-queue dispatch gates.
 
 ![Async Processor - Redis Sorted Set architecture](/docs/images/redis_sortedset_architecture.png "AP - Redis SortedSet")
+
+#### Payload storage
+
+The producer stores each payload under its own key, `request-payload:<id>:<token>`, deleted when the result is recorded.
+
+- Run this Redis with `maxmemory-policy noeviction`. A request whose payload was evicted ends with `PAYLOAD_UNAVAILABLE`.
+- Upgrade dispatchers before producers. A dispatcher that predates payload keys dispatches a `null` body.
+- Drain the retry queue before rolling dispatchers back to such a version: retries written by a newer dispatcher also carry only the reference.
+- Requests published with an inline `payload`, by older producers or directly with `ZADD`, still dispatch unchanged.
 
 #### Legacy Redis Sorted Set command line parameters
 
