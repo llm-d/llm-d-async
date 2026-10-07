@@ -193,7 +193,7 @@ func setupK8sCluster() {
 	output, err := checkCmd.Output()
 	if err == nil && strings.Contains(string(output), kindClusterName) {
 		ginkgo.By("Kind cluster " + kindClusterName + " already exists, rebuilding and loading llm-d-async image")
-		command := exec.Command(containerRuntime, "build", "-t", apImage, projectRoot())
+		command := buildImageCommand(apImage, projectRoot())
 		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
@@ -231,7 +231,7 @@ func setupK8sCluster() {
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 
 	ginkgo.By("Building llm-d-async image")
-	command = exec.Command(containerRuntime, "build", "-t", apImage, projectRoot())
+	command = buildImageCommand(apImage, projectRoot())
 	session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
@@ -240,7 +240,7 @@ func setupK8sCluster() {
 
 	if simRoot != "" {
 		ginkgo.By("Building sim image from " + simRoot)
-		command = exec.Command(containerRuntime, "build", "-t", simImage, simRoot)
+		command = buildImageCommand(simImage, simRoot)
 		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
@@ -267,6 +267,15 @@ func setupK8sCluster() {
 	kindLoadImage("jaegertracing/all-in-one:1.76.0")
 
 	// The sim image is pulled with imagePullPolicy: Always directly by the cluster.
+}
+
+// buildImageCommand builds image into the local image store.
+func buildImageCommand(image, dir string) *exec.Cmd {
+	args := []string{"build", "-t", image}
+	if containerRuntime == "docker" {
+		args = append(args, "--load")
+	}
+	return exec.Command(containerRuntime, append(args, dir)...)
 }
 
 func kindLoadImage(image string) {
