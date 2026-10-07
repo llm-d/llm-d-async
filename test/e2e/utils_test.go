@@ -34,6 +34,9 @@ const (
 	redisGateResultQueue  = "redis-gate-result-list"
 	dispatchGateBudgetKey = "dispatch-gate-budget"
 
+	oldDispatcherRequestQueue = "old-dispatcher-request-sortedset"
+	oldDispatcherResultQueue  = "old-dispatcher-result-list"
+
 	endpointScrapeRequestQueue = "endpoint-scrape-request-sortedset"
 	endpointScrapeResultQueue  = "endpoint-scrape-result-list"
 

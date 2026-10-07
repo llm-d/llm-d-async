@@ -63,6 +63,7 @@ var (
 
 	containerRuntime = detectContainerRuntime()
 	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/llm-d-async:e2e-test", ginkgo.GinkgoLogr)
+	oldAPImage       = env.GetEnvString("OLD_AP_IMAGE", "ghcr.io/llm-d/llm-d-async:v0.10.0", ginkgo.GinkgoLogr)
 	// TODO: switch EPP_IMAGE and ROUTER_VERSION to a release tag than "main"
 	eppImage = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:main", ginkgo.GinkgoLogr)
 	// gaieVersion selects the gateway-api-inference-extension release whose
@@ -199,6 +200,8 @@ func setupK8sCluster() {
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 		kindLoadImage(apImage)
 		loadEPPImage()
+		pullIfMissing(oldAPImage)
+		kindLoadImage(oldAPImage)
 		return
 	}
 
@@ -250,6 +253,9 @@ func setupK8sCluster() {
 
 	kindLoadImage(apImage)
 	kindLoadImage(simImage)
+
+	pullIfMissing(oldAPImage)
+	kindLoadImage(oldAPImage)
 
 	pullIfMissing(redisImage)
 	kindLoadImage(redisImage)
@@ -423,6 +429,11 @@ func applyManifests() {
 			"ap.image.tag":        imageTag,
 		})
 	}
+	oldRepo, oldTag := splitImage(oldAPImage)
+	helmInstall("old-dispatcher", helmValuesDir+"/old-dispatcher.yaml", map[string]string{
+		"ap.image.repository": oldRepo,
+		"ap.image.tag":        oldTag,
+	})
 }
 
 // kubectlPatchEnvoyNodePort patches the Envoy service to NodePort so test code
