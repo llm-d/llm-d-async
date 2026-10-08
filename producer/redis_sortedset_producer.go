@@ -112,10 +112,7 @@ func WithResultClaimReclaimInterval(interval time.Duration) ProducerOption {
 	}
 }
 
-// WithPayloadKeys stores each request's payload under its own Redis key
-// instead of inline in the queued envelope. Enable it only once every
-// dispatcher reading the queue understands payload keys; an older dispatcher
-// dispatches a null body.
+// WithPayloadKeys stores each request's payload under its own Redis key.
 func WithPayloadKeys() ProducerOption {
 	return func(p *RedisSortedSetProducer) error {
 		p.payloadKeys = true
@@ -279,7 +276,7 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	if payload := r.ReqPayload(); payload != nil {
 		trimmed := bytes.TrimLeft(payload, " \t\r\n")
 		if !json.Valid(trimmed) || (trimmed[0] != '{' && string(trimmed) != "null") {
-			return errors.New("failed to marshal request: payload must be a JSON object or null")
+			return errors.New("invalid payload: must be a JSON object or null")
 		}
 	}
 

@@ -362,7 +362,7 @@ func TestSubmitRequestRejectsAPayloadThatIsNotAJSONObject(t *testing.T) {
 				Payload:  payload,
 			})
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "payload must be a JSON object or null")
+			assert.Contains(t, err.Error(), "invalid payload: must be a JSON object or null")
 			assert.Empty(t, mr.Keys(), "a rejected request must not be queued")
 		})
 	}
