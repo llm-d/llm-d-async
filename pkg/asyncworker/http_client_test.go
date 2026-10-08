@@ -196,8 +196,8 @@ func TestSendRequest_transportError(t *testing.T) {
 	if !errors.As(err, &ce) {
 		t.Fatalf("expected *ClientError, got %T", err)
 	}
-	if ce.ErrorCategory != asyncapi.ErrCategoryUnknown {
-		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryUnknown)
+	if ce.ErrorCategory != asyncapi.ErrCategoryServer {
+		t.Errorf("category = %s, want %s so the worker retries it", ce.ErrorCategory, asyncapi.ErrCategoryServer)
 	}
 	if ce.StatusCode != 0 {
 		t.Errorf("StatusCode = %d, want 0 for transport error", ce.StatusCode)
