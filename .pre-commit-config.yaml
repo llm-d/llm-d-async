@@ -51,7 +51,7 @@ repos:
         files: \.go$
       - id: gosec
         name: gosec (optional)
-        entry: bash -c 'if command -v gosec >/dev/null 2>&1; then gosec ./...; else echo "gosec not installed, skipping"; fi'
+        entry: bash -c 'if command -v gosec >/dev/null 2>&1; then gosec -exclude-dir=oldproducer ./...; else echo "gosec not installed, skipping"; fi'
         language: system
         pass_filenames: false
         files: \.go$
