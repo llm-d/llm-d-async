@@ -66,7 +66,8 @@ type Gate interface {
 	// A value of 1.0 indicates full capacity available (system is idle).
 	// The system always returns a valid value, even in case of internal error.
 	Budget(ctx context.Context) float64
-	// Apply applies the gating logic to a request.
+	// Apply applies the gating logic to a request. On queues that store payloads
+	// under their own keys, msg does not carry its payload yet.
 	Apply(ctx context.Context, msg *api.InternalRequest, releases *[]GateReleaseFunc) (Verdict, error)
 }
 

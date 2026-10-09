@@ -119,7 +119,6 @@ func BenchmarkPeekAndLoad(b *testing.B) {
 				payloadBytes := seedQueue(b, rdb, queue, tokens, byRef)
 				ctx := context.Background()
 				logger := logr.Discard()
-				now := float64(time.Now().Unix())
 
 				b.SetBytes(int64(payloadBytes * benchBatchSize))
 				b.ReportAllocs()
@@ -133,12 +132,21 @@ func BenchmarkPeekAndLoad(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					peeked, err := flow.loadRequests(ctx, zs, now, logger)
+					irs := make([]*api.InternalRequest, len(zs))
+					for i, z := range zs {
+						member, _ := z.Member.(string)
+						ir, _, ok := flow.parseMessage(member, logger)
+						if !ok {
+							b.Fatal("unparsable member")
+						}
+						irs[i] = ir
+					}
+					payloadErrs, err := flow.fetchPayloads(ctx, irs)
 					if err != nil {
 						b.Fatal(err)
 					}
-					for _, p := range peeked {
-						if !p.ok || p.payloadErr != "" || len(p.ir.PublicRequest.ReqPayload()) != payloadBytes {
+					for i, ir := range irs {
+						if payloadErrs[i] != "" || len(ir.PublicRequest.ReqPayload()) != payloadBytes {
 							b.Fatal("payload did not survive the load")
 						}
 					}

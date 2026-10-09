@@ -812,14 +812,13 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 		return
 	}
 
-	peeked, err := r.loadRequests(ctx, zs, currentTime, logger)
-	if err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "Failed to load request payloads", "queue", queueName)
-		return
-	}
+	var ready []claimedRequest
+	sent := 0
+	defer func() { r.releaseClaimed(queueName, ready[sent:], logger) }()
 
-	for _, p := range peeked {
-		member, ir, deadline, ok := p.member, p.ir, p.deadline, p.ok
+	for _, z := range zs {
+		member, _ := z.Member.(string)
+		ir, deadline, ok := r.parseMessage(member, logger)
 		if !ok || ir == nil || ir.PublicRequest == nil {
 			// Unparsable entry: no request identity survives to redeliver,
 			// so remove it rather than letting it wedge the peek window.
@@ -925,13 +924,6 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			continue
 		}
 
-		if p.payloadErr != "" {
-			if terminate(api.NewErrorResult(rview, ir.InternalRouting, api.ErrCodePayloadUnavailable, p.payloadErr)) {
-				return
-			}
-			continue
-		}
-
 		// Apply gate
 		var releases []pipeline.GateReleaseFunc
 		verdict, err := gate.Apply(ctx, ir, &releases)
@@ -994,11 +986,41 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			pipeline.ReleaseGateReleases(releases)
 			continue
 		}
+		ready = append(ready, claimedRequest{ir: ir, member: member, token: token, releases: releases})
+	}
 
-		if len(releases) > 0 {
+	if len(ready) == 0 {
+		return
+	}
+	irs := make([]*api.InternalRequest, len(ready))
+	for i, c := range ready {
+		irs[i] = c.ir
+	}
+	payloadErrs, err := r.fetchPayloads(ctx, irs)
+	if err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "Failed to load request payloads", "queue", queueName)
+		return
+	}
+
+	for i, c := range ready {
+		ir := c.ir
+		reqID := ir.PublicRequest.ReqID()
+
+		if payloadErrs[i] != "" {
+			select {
+			case r.resultChannel <- api.NewErrorResult(ir.PublicRequest, ir.InternalRouting, api.ErrCodePayloadUnavailable, payloadErrs[i]):
+			case <-ctx.Done():
+				return
+			}
+			pipeline.ReleaseGateReleases(c.releases)
+			sent++
+			continue
+		}
+
+		if len(c.releases) > 0 {
 			// Defensive: never orphan a lingering reservation for this id — release
 			// any prior closure instead of silently overwriting it (see #311).
-			if prev, loaded := r.activeReleases.Swap(reqID, releases); loaded {
+			if prev, loaded := r.activeReleases.Swap(reqID, c.releases); loaded {
 				if rels, ok := prev.([]pipeline.GateReleaseFunc); ok {
 					pipeline.ReleaseGateReleases(rels)
 				}
@@ -1011,56 +1033,66 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 
 		select {
 		case msgChannel <- ir:
+			sent++
 		case <-ctx.Done():
 			r.activeReleases.Delete(reqID)
-			releaseOnShutdown(token, ir.RequestToken)
-			pipeline.ReleaseGateReleases(releases)
 			return
 		}
 	}
 }
 
-type peekedRequest struct {
-	member   string
+type claimedRequest struct {
 	ir       *api.InternalRequest
-	deadline float64
-	ok       bool
-	// payloadErr is empty when the payload is ready to dispatch.
-	payloadErr string
+	member   string
+	token    string
+	releases []pipeline.GateReleaseFunc
 }
 
-func (r *RedisSortedSetFlow) loadRequests(ctx context.Context, zs []redis.Z, now float64, logger logr.Logger) ([]peekedRequest, error) {
-	out := make([]peekedRequest, len(zs))
+// releaseClaimed hands claimed requests that were never dispatched back to
+// the queue.
+func (r *RedisSortedSetFlow) releaseClaimed(queueName string, claimed []claimedRequest, logger logr.Logger) {
+	for _, c := range claimed {
+		reqID := c.ir.PublicRequest.ReqID()
+		if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
+			return r.releaseClaim(ctx, queueName, reqID, c.ir.RequestToken, c.member, c.ir.QueueScore(), c.token)
+		}); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to release claim", "id", reqID)
+		}
+		pipeline.ReleaseGateReleases(c.releases)
+	}
+}
+
+// fetchPayloads attaches each referenced payload to its request with one MGET
+// and returns, per request, why its payload is unavailable ("" when ready).
+func (r *RedisSortedSetFlow) fetchPayloads(ctx context.Context, irs []*api.InternalRequest) ([]string, error) {
+	errs := make([]string, len(irs))
 	var refs []string
 	var at []int
-	for i, z := range zs {
-		member, _ := z.Member.(string)
-		ir, deadline, ok := r.parseMessage(member, logger)
-		out[i] = peekedRequest{member: member, ir: ir, deadline: deadline, ok: ok}
-		if ok && ir != nil && ir.PayloadRef != "" && deadline >= now {
+	for i, ir := range irs {
+		if ir.PayloadRef != "" {
 			refs = append(refs, ir.PayloadRef)
 			at = append(at, i)
 		}
 	}
 	if len(refs) == 0 {
-		return out, nil
+		return errs, nil
 	}
 	values, err := r.rdb.MGet(ctx, refs...).Result()
 	if err != nil {
 		return nil, fmt.Errorf("fetch %d request payloads: %w", len(refs), err)
 	}
 	for j, v := range values {
-		p := &out[at[j]]
+		i := at[j]
 		payload, found := v.(string)
 		if !found {
-			p.payloadErr = "request payload is missing"
+			errs[i] = "request payload is missing"
 			continue
 		}
-		if err := api.AttachPayload(p.ir, json.RawMessage(payload)); err != nil {
-			p.payloadErr = "request payload could not be attached"
+		if err := api.AttachPayload(irs[i], json.RawMessage(payload)); err != nil {
+			errs[i] = "request payload could not be attached"
 		}
 	}
-	return out, nil
+	return errs, nil
 }
 
 func encodeRequest(ir *api.InternalRequest) ([]byte, error) {
