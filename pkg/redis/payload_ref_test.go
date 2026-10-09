@@ -225,6 +225,50 @@ func TestSortedSetFlow_FetchesAcceptedPayloadsInOneMGET(t *testing.T) {
 	}
 }
 
+type observeGate struct {
+	onApply func(id string)
+}
+
+func (observeGate) Budget(context.Context) float64 { return 1 }
+
+func (g observeGate) Apply(_ context.Context, msg *api.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	g.onApply(msg.PublicRequest.ReqID())
+	return pipeline.Continue(), nil
+}
+
+func TestSortedSetFlow_DispatchesAnInlineRequestBeforeGatingTheNext(t *testing.T) {
+	_, rdb, ctx, cancel := setupTest(t)
+	defer cancel()
+	defer rdb.Close() // nolint:errcheck
+	queue := "inline-queue"
+	flow := &RedisSortedSetFlow{rdb: rdb, batchSize: 10, claimLeaseTTL: time.Minute, resultChannel: make(chan api.ResultMessage, 2)}
+	now := time.Now()
+	for i, id := range []string{"first", "second"} {
+		member := envelopeJSON(api.RequestMessage{ID: id, Created: now.Unix(), Deadline: now.Add(time.Hour).Unix(), Payload: json.RawMessage(`{}`)})
+		if err := rdb.ZAdd(ctx, queue, redis.Z{Score: float64(now.Unix()) + float64(i), Member: member}).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msgs := make(chan *api.InternalRequest, 1)
+	queuedWhenSecondGated := -1
+	gate := observeGate{onApply: func(id string) {
+		if id == "second" {
+			queuedWhenSecondGated = len(msgs)
+		}
+	}}
+
+	pollCtx, stop := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer stop()
+	flow.processMessagesWithConfig(pollCtx, msgs, queue, "q", gate, logr.Discard(), SortedSetQueueConfig{})
+
+	if queuedWhenSecondGated != 1 {
+		t.Fatalf("%d requests were downstream when the second was gated, want the first already there", queuedWhenSecondGated)
+	}
+	if got := (<-msgs).PublicRequest.ReqID(); got != "first" {
+		t.Fatalf("dispatched %q first", got)
+	}
+}
+
 func TestSortedSetFlow_ShutdownReleasesClaimsItDidNotDispatch(t *testing.T) {
 	_, rdb, ctx, cancel := setupTest(t)
 	defer cancel()

@@ -986,7 +986,15 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			pipeline.ReleaseGateReleases(releases)
 			continue
 		}
-		ready = append(ready, claimedRequest{ir: ir, member: member, token: token, releases: releases})
+		if ir.PayloadRef != "" {
+			ready = append(ready, claimedRequest{ir: ir, member: member, token: token, releases: releases})
+			continue
+		}
+		if !r.dispatch(ctx, msgChannel, ir, releases) {
+			releaseOnShutdown(token, ir.RequestToken)
+			pipeline.ReleaseGateReleases(releases)
+			return
+		}
 	}
 
 	if len(ready) == 0 {
@@ -1004,8 +1012,6 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 
 	for i, c := range ready {
 		ir := c.ir
-		reqID := ir.PublicRequest.ReqID()
-
 		if payloadErrs[i] != "" {
 			select {
 			case r.resultChannel <- api.NewErrorResult(ir.PublicRequest, ir.InternalRouting, api.ErrCodePayloadUnavailable, payloadErrs[i]):
@@ -1016,28 +1022,37 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			sent++
 			continue
 		}
-
-		if len(c.releases) > 0 {
-			// Defensive: never orphan a lingering reservation for this id — release
-			// any prior closure instead of silently overwriting it (see #311).
-			if prev, loaded := r.activeReleases.Swap(reqID, c.releases); loaded {
-				if rels, ok := prev.([]pipeline.GateReleaseFunc); ok {
-					pipeline.ReleaseGateReleases(rels)
-				}
-			}
-		}
-
-		// Stamp ingestion time as the message enters the in-process buffer so the
-		// worker can record queue residence time when it pulls the message.
-		ir.IngestionTime = time.Now()
-
-		select {
-		case msgChannel <- ir:
-			sent++
-		case <-ctx.Done():
-			r.activeReleases.Delete(reqID)
+		if !r.dispatch(ctx, msgChannel, ir, c.releases) {
 			return
 		}
+		sent++
+	}
+}
+
+// dispatch hands a claimed request downstream, reporting false when ctx ends
+// first.
+func (r *RedisSortedSetFlow) dispatch(ctx context.Context, msgChannel chan *api.InternalRequest, ir *api.InternalRequest, releases []pipeline.GateReleaseFunc) bool {
+	reqID := ir.PublicRequest.ReqID()
+	if len(releases) > 0 {
+		// Defensive: never orphan a lingering reservation for this id — release
+		// any prior closure instead of silently overwriting it (see #311).
+		if prev, loaded := r.activeReleases.Swap(reqID, releases); loaded {
+			if rels, ok := prev.([]pipeline.GateReleaseFunc); ok {
+				pipeline.ReleaseGateReleases(rels)
+			}
+		}
+	}
+
+	// Stamp ingestion time as the message enters the in-process buffer so the
+	// worker can record queue residence time when it pulls the message.
+	ir.IngestionTime = time.Now()
+
+	select {
+	case msgChannel <- ir:
+		return true
+	case <-ctx.Done():
+		r.activeReleases.Delete(reqID)
+		return false
 	}
 }
 
