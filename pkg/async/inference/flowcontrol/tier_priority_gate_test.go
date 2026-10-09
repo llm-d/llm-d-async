@@ -51,11 +51,18 @@ func TestTierPriorityAdmissionGate_Apply(t *testing.T) {
 
 	t.Run("Saturated - Overflow Interactive - Drop 429", func(t *testing.T) {
 		gate := NewTierPriorityAdmissionGate(satGate, "tier")
+		req := &api.RequestMessage{
+			ID: "req",
+			Metadata: map[string]string{
+				"userid":                 "alice",
+				api.ResultRouteAttribute: "producer-a",
+			},
+		}
 		msg := api.NewInternalRequest(api.InternalRouting{
 			Labels: map[string]string{
 				"tier": "interactive",
 			},
-		}, &api.RequestMessage{ID: "req"})
+		}, req)
 		msg.SetClassification(api.ClassificationOverflow)
 
 		var releases []pipeline.GateReleaseFunc
@@ -64,6 +71,11 @@ func TestTierPriorityAdmissionGate_Apply(t *testing.T) {
 		assert.Equal(t, pipeline.ActionDrop, res.Action)
 		assert.NotNil(t, res.Result)
 		assert.Contains(t, res.Result.Payload, `"code": 429`)
+		assert.Equal(t, "producer-a", res.Result.Metadata[api.ResultRouteAttribute])
+		assert.Equal(t, "alice", res.Result.Metadata["userid"])
+
+		req.Metadata["userid"] = "bob"
+		assert.Equal(t, "alice", res.Result.Metadata["userid"])
 	})
 
 	t.Run("Saturated - Overflow Async - Refuse", func(t *testing.T) {

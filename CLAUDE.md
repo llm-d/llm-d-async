@@ -34,4 +34,4 @@ Asynchronous dispatch processor for llm-d. Pulls batch requests from a message q
 
 ## Multi-Module Repo
 
-This repo has four Go modules: root, `api/`, `pipeline/`, `producer/`. Run `make fmt` and `make vet` to cover all modules. See `CONTRIBUTING.md` for release tagging.
+This repo has five Go modules: root, `api/`, `pipeline/`, `producer/`, `producer-gcp/`. Run `make fmt` and `make vet` to cover all modules. See `CONTRIBUTING.md` for release tagging.

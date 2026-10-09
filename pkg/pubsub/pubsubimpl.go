@@ -483,7 +483,7 @@ func resultWorker(ctx context.Context, client *pubsub.Client, defaultTopicID str
 			} else {
 				msgBytes = bytes
 			}
-			res := publishPubSub(ctx, publisher, msgBytes, map[string]string{})
+			res := publishPubSub(ctx, publisher, msgBytes, resultPublishAttributes(msg))
 
 			// Wait for the server's answer off the loop so publishes keep
 			// batching. The wait is detached from ctx: on shutdown Stop flushes
@@ -500,6 +500,16 @@ func resultWorker(ctx context.Context, client *pubsub.Client, defaultTopicID str
 			}(msg.ID)
 		}
 	}
+}
+
+// resultPublishAttributes returns the Pub/Sub attributes stamped on a result
+// publication. Only result_route is copied; caller metadata is not echoed.
+func resultPublishAttributes(msg api.ResultMessage) map[string]string {
+	route := msg.Metadata[api.ResultRouteAttribute]
+	if route == "" {
+		return map[string]string{}
+	}
+	return map[string]string{api.ResultRouteAttribute: route}
 }
 
 // signalPublished tells the receive callback waiting on correlationID whether
