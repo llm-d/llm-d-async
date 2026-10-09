@@ -58,7 +58,7 @@ func TestReceiveResultIsNonDestructiveUntilAck(t *testing.T) {
 	assert.Equal(t, "result-1", delivery.Result.ID)
 	assert.Equal(t, "generation-1", delivery.Result.Routing.RequestToken)
 
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	assert.EqualValues(t, 0, p.client.LLen(context.Background(), keys.pending).Val())
 	assert.EqualValues(t, 1, p.client.HLen(context.Background(), keys.claimed).Val())
 	assert.EqualValues(t, 1, p.client.HLen(context.Background(), keys.owners).Val())
@@ -83,7 +83,7 @@ func TestReceiveResultExpiredLeaseRedeliversAndFencesStaleOwner(t *testing.T) {
 	pushDurableResult(t, mr, "results", "result-1", "generation-1")
 
 	stale := receiveWithTimeout(t, first)
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	mr.ZAdd(keys.idx, -1, stale.claimID)
 
 	err := first.RenewResult(context.Background(), stale)
@@ -131,7 +131,7 @@ func TestRenewResultExtendsLease(t *testing.T) {
 	pushDurableResult(t, mr, "results", "result-1", "generation-1")
 	delivery := receiveWithTimeout(t, p)
 
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	oldExpiry := float64(time.Now().Add(time.Second).UnixMilli())
 	mr.ZAdd(keys.idx, oldExpiry, delivery.claimID)
 	require.NoError(t, p.RenewResult(context.Background(), delivery))
@@ -168,7 +168,7 @@ func TestReceiveResultSameIDDifferentRequestTokensAreIsolated(t *testing.T) {
 	assert.NotEqual(t, first.claimID, second.claimID)
 
 	require.NoError(t, p.AckResult(context.Background(), first))
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	assert.EqualValues(t, 1, p.client.HLen(context.Background(), keys.claimed).Val())
 	require.NoError(t, p.AckResult(context.Background(), second))
 }
@@ -208,7 +208,7 @@ func TestAckResultTombstonesAreTimeBoundAndCleaned(t *testing.T) {
 	delivery := receiveWithTimeout(t, p)
 	require.NoError(t, p.AckResult(context.Background(), delivery))
 
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	assert.EqualValues(t, 1, p.client.ZCard(context.Background(), keys.tombstones).Val())
 	assert.Positive(t, mr.TTL(keys.tombstones))
 
@@ -224,7 +224,7 @@ func TestAckResultTombstonesAreTimeBoundAndCleaned(t *testing.T) {
 func TestReceiveResultBoundsTombstoneCleanup(t *testing.T) {
 	mr := miniredis.RunT(t)
 	p := setupDurableResultProducer(t, mr, "results")
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	for i := 0; i < resultTombstoneCleanupBatchSize+1; i++ {
 		err := p.client.ZAdd(context.Background(), keys.tombstones, redis.Z{
 			Score:  -1,
@@ -272,7 +272,7 @@ func TestReceiveResultUnparsableRecordsRemainDurableAndDoNotBlockRoute(t *testin
 		assert.Nil(t, delivery)
 	}
 
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	assert.EqualValues(t, 2, p.client.HLen(context.Background(), keys.claimed).Val())
 	claimedPayloads, err := p.client.HVals(context.Background(), keys.claimed).Result()
 	require.NoError(t, err)
@@ -307,7 +307,7 @@ func TestClearResultQueueClearsDurableState(t *testing.T) {
 	pushDurableResult(t, mr, "other", "other", "generation-3")
 	require.NoError(t, p.ClearResultQueue(context.Background()))
 
-	keys := newResultClaimKeys("results")
+	keys := newResultClaimKeys("results", false)
 	assert.False(t, mr.Exists(keys.pending))
 	assert.False(t, mr.Exists(keys.claimed))
 	assert.False(t, mr.Exists(keys.owners))

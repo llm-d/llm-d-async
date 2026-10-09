@@ -31,6 +31,9 @@ Dequeue is now **peek → claim → ack**:
    Because entries in Redis are keyed by `ID + RequestToken`, concurrent or
    repeated submissions using the same request ID never overwrite each other's
    durable claim payload, owner token, or expiry index.
+   With `mode: cluster` the three private keys are hash-tagged onto the
+   queue (`{<queue>}:claimed` and so on) so each script stays within the
+   queue's hash slot; the pending sorted set keeps its plain name.
 3. **Process as before** — claimed requests flow through the same channels,
    merge policy, and workers. No downstream change.
 4. **Ack** — when a terminal result is flushed, one Lua script checks
@@ -39,6 +42,14 @@ Dequeue is now **peek → claim → ack**:
    "inference done" and "result written" therefore redelivers the request
    instead of losing it. The request-generation identity is `RequestToken`
    (fresh per enqueue), so ID reuse with a new token is not suppressed.
+   In cluster mode, when the result list does not share the queue's hash
+   slot, the ack becomes three single-slot steps: renew the lease under the
+   owner fence (so the reclaimer cannot redeliver mid-ack), push the record,
+   drop the claim. A crash between push and drop lets the claim lapse and be
+   redelivered, which can publish the record twice; durable result delivery
+   de-duplicates by generation. A `request-payload` key is deleted with a
+   separate command after the ack in cluster mode, and expires on its own if
+   that command never runs.
 
 While a request is held, a background **heartbeater** renews its lease every
 `claim_lease_ttl / 3` (clamped to 1s–30s) with token fencing — stale owners

@@ -87,22 +87,23 @@ var (
 	_ SortedSetQueueReconfigurer           = (*RedisSortedSetFlow)(nil)
 )
 
-var cleanupRequestStateScript = redis.NewScript(`
-local token = ARGV[1]
-if token == "" then
-  return 0
-end
-if redis.call("GET", KEYS[1]) == token then
+// deleteIfTokenScript deletes one per-request marker only while it still
+// holds the given generation token. The active-token and cancellation
+// markers are cleared independently: they live in different cluster slots,
+// and neither check depends on the other.
+var deleteIfTokenScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
   redis.call("DEL", KEYS[1])
+  return 1
 end
-if redis.call("GET", KEYS[2]) == token then
-  redis.call("DEL", KEYS[2])
-end
-return 1
+return 0
 `)
 
 type RedisSortedSetFlow struct {
-	rdb                 *redis.Client
+	rdb redis.UniversalClient
+	// clusterKeys selects the hash-tagged layout for private claim keys so
+	// each per-queue script stays within one Redis Cluster slot.
+	clusterKeys         bool
 	cancellationChecker api.CancellationChecker
 	retryChannel        chan pipeline.RetryMessage
 	resultChannel       chan api.ResultMessage
@@ -143,7 +144,7 @@ type RedisSortedSetFlow struct {
 }
 
 type redisCancellationChecker struct {
-	rdb *redis.Client
+	rdb redis.UniversalClient
 }
 
 func (c *redisCancellationChecker) IsCancelled(ctx context.Context, requestID, requestToken string) (bool, error) {
@@ -262,12 +263,13 @@ func (r *RedisSortedSetFlow) newRequestChannel(cfg SortedSetQueueConfig) (reques
 }
 
 func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoolConfig, gateFactory pipeline.GateFactory) (*RedisSortedSetFlow, error) {
-	redisOpts, err := ParseRedisOptions(cfg.URL)
+	rdb, err := newUniversalClient(cfg.connection())
 	if err != nil {
 		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
 	}
 	r := &RedisSortedSetFlow{
-		rdb:                    redis.NewClient(redisOpts),
+		rdb:                    rdb,
+		clusterKeys:            cfg.Mode == ModeCluster,
 		queues:                 make(map[string]*queueRuntime, len(cfg.Queues)),
 		queueOrder:             make([]string, 0, len(cfg.Queues)),
 		retryChannel:           make(chan pipeline.RetryMessage),
@@ -1071,7 +1073,7 @@ func (r *RedisSortedSetFlow) fetchPayloads(ctx context.Context, claimed []claime
 	for i, c := range claimed {
 		refs[i] = c.ir.PayloadRef
 	}
-	values, err := r.rdb.MGet(ctx, refs...).Result()
+	values, err := r.readPayloads(ctx, refs)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %d request payloads: %w", len(refs), err)
 	}
@@ -1087,6 +1089,32 @@ func (r *RedisSortedSetFlow) fetchPayloads(ctx context.Context, claimed []claime
 		}
 	}
 	return errs, nil
+}
+
+// readPayloads returns one value per ref, nil where the key is missing. One
+// MGET in standalone mode; in cluster mode the per-request keys span slots,
+// so a pipeline of GETs reaches each owning node in one round trip instead.
+func (r *RedisSortedSetFlow) readPayloads(ctx context.Context, refs []string) ([]any, error) {
+	if !r.clusterKeys {
+		return r.rdb.MGet(ctx, refs...).Result()
+	}
+	pipe := r.rdb.Pipeline()
+	cmds := make([]*redis.StringCmd, len(refs))
+	for i, ref := range refs {
+		cmds[i] = pipe.Get(ctx, ref)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	values := make([]any, len(refs))
+	for i, cmd := range cmds {
+		if v, err := cmd.Result(); err == nil {
+			values[i] = v
+		} else if !errors.Is(err, redis.Nil) {
+			return nil, err
+		}
+	}
+	return values, nil
 }
 
 func encodeRequest(ir *api.InternalRequest) ([]byte, error) {
@@ -1360,13 +1388,12 @@ func (r *RedisSortedSetFlow) cleanupRequestStateByIDAndToken(ctx context.Context
 	if requestID == "" || requestToken == "" {
 		return nil
 	}
-	_, err := cleanupRequestStateScript.Run(
-		ctx,
-		r.rdb,
-		[]string{api.RequestActiveTokenKey(requestID), api.RequestCancellationKey(requestID)},
-		requestToken,
-	).Result()
-	return err
+	for _, key := range []string{api.RequestActiveTokenKey(requestID), api.RequestCancellationKey(requestID)} {
+		if err := deleteIfTokenScript.Run(ctx, r.rdb, []string{key}, requestToken).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *RedisSortedSetFlow) marshalResult(msg api.ResultMessage) string {

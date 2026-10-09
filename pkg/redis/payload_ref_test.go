@@ -294,7 +294,7 @@ func TestSortedSetFlow_ShutdownReleasesClaimsItDidNotDispatch(t *testing.T) {
 	if dispatched.PublicRequest.ReqID() == "first" {
 		undispatched = second
 	}
-	keys := newClaimKeys(queue)
+	keys := newClaimKeys(queue, false)
 	if ok, _ := rdb.HExists(ctx, keys.claimed, claimKey(undispatched.PublicRequest.ReqID(), undispatched.RequestToken)).Result(); ok {
 		t.Fatal("the undispatched request is still claimed")
 	}
@@ -345,7 +345,7 @@ func TestSortedSetFlow_DispatchesPointerRequestWithItsPayload(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("request was not dispatched")
 	}
-	if claimed, _ := rdb.HGet(ctx, newClaimKeys(queue).claimed, claimKey("p1", ir.RequestToken)).Result(); claimed != member {
+	if claimed, _ := rdb.HGet(ctx, newClaimKeys(queue, false).claimed, claimKey("p1", ir.RequestToken)).Result(); claimed != member {
 		t.Fatalf("claimed hash holds %q, want the envelope", claimed)
 	}
 }
@@ -386,7 +386,7 @@ func TestSortedSetFlow_MissingPayloadEndsWithPayloadUnavailable(t *testing.T) {
 	if n, _ := rdb.ZCard(ctx, queue).Result(); n != 0 {
 		t.Fatalf("pending = %d, want the request claimed", n)
 	}
-	if ok, _ := rdb.HExists(ctx, newClaimKeys(queue).claimed, claimKey("gone", ir.RequestToken)).Result(); !ok {
+	if ok, _ := rdb.HExists(ctx, newClaimKeys(queue, false).claimed, claimKey("gone", ir.RequestToken)).Result(); !ok {
 		t.Fatal("the request is not claimed, so its result could never be acked")
 	}
 }

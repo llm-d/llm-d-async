@@ -136,7 +136,7 @@ func TestSubmitRequest_ScoreMatchesQueueScoreAtTheSeqCap(t *testing.T) {
 	ctx := context.Background()
 	deadline := time.Now().Add(time.Hour).Unix()
 	const maxSeq = 1<<21 - 1
-	require.NoError(t, mr.Set(enqueueSeqKey("test-request-queue", deadline), fmt.Sprint(maxSeq-2)))
+	require.NoError(t, mr.Set(enqueueSeqKey("test-request-queue", deadline, false), fmt.Sprint(maxSeq-2)))
 
 	scores := map[int64]float64{}
 	for _, id := range []string{"a", "b", "c"} {
@@ -249,7 +249,7 @@ func TestSubmitRequest_EnqueueSeqExpiresAfterDeadline(t *testing.T) {
 		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
 	}))
 
-	key := enqueueSeqKey("test-request-queue", deadline)
+	key := enqueueSeqKey("test-request-queue", deadline, false)
 	ttl := mr.TTL(key)
 	want := time.Until(time.Unix(deadline, 0).Add(enqueueSeqGrace))
 	assert.InDelta(t, want.Seconds(), ttl.Seconds(), 2, "counter TTL")
@@ -264,7 +264,7 @@ func TestSubmitRequest_ExpiredDeadlineLeavesSeqUntouched(t *testing.T) {
 		ID: "late", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
 	})
 	require.ErrorContains(t, err, "deadline has already expired")
-	assert.False(t, mr.Exists(enqueueSeqKey("test-request-queue", deadline)))
+	assert.False(t, mr.Exists(enqueueSeqKey("test-request-queue", deadline, false)))
 }
 
 func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {

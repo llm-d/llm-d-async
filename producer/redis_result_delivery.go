@@ -20,6 +20,10 @@ const (
 	resultTombstoneCleanupBatchSize   = 100
 )
 
+// resultClaimKeys bundles the keys implementing durable delivery for one
+// result route. The pending list is the shared contract with the dispatcher
+// and keeps its name; the rest are private to the producer and, in cluster
+// mode, hash-tagged into the pending key's slot (see slotKey).
 type resultClaimKeys struct {
 	pending    string
 	claimed    string
@@ -28,13 +32,14 @@ type resultClaimKeys struct {
 	tombstones string
 }
 
-func newResultClaimKeys(route string) resultClaimKeys {
+func newResultClaimKeys(route string, cluster bool) resultClaimKeys {
+	base := slotKey(route, cluster)
 	return resultClaimKeys{
 		pending:    route,
-		claimed:    route + ":result-claimed",
-		owners:     route + ":result-claim-owners",
-		idx:        route + ":result-claims-idx",
-		tombstones: route + ":result-ack-tombstones",
+		claimed:    base + ":result-claimed",
+		owners:     base + ":result-claim-owners",
+		idx:        base + ":result-claims-idx",
+		tombstones: base + ":result-ack-tombstones",
 	}
 }
 
@@ -171,7 +176,7 @@ func (p *RedisSortedSetProducer) ResultDeliveryConfig() ResultDeliveryConfig {
 // result route. The result remains durable in Redis until AckResult succeeds;
 // an expired lease is requeued for another receiver.
 func (p *RedisSortedSetProducer) ReceiveResult(ctx context.Context) (*ResultDelivery, error) {
-	keys := newResultClaimKeys(p.resultQueueName)
+	keys := newResultClaimKeys(p.resultQueueName, p.clusterKeys)
 	ownerToken, err := newRequestToken()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create result claim owner: %w", err)
@@ -248,7 +253,7 @@ func (p *RedisSortedSetProducer) RenewResult(ctx context.Context, delivery *Resu
 	if delivery == nil || delivery.claimID == "" || delivery.ownerToken == "" {
 		return errors.New("result delivery is required")
 	}
-	keys := newResultClaimKeys(p.resultQueueName)
+	keys := newResultClaimKeys(p.resultQueueName, p.clusterKeys)
 	res, err := renewResultScript.Run(ctx, p.client, []string{keys.owners, keys.idx},
 		delivery.claimID, delivery.ownerToken, max(int64(1), p.resultClaimLeaseTTL.Milliseconds())).Int()
 	if err != nil {
@@ -266,7 +271,7 @@ func (p *RedisSortedSetProducer) AckResult(ctx context.Context, delivery *Result
 	if delivery == nil || delivery.claimID == "" || delivery.ownerToken == "" {
 		return errors.New("result delivery is required")
 	}
-	keys := newResultClaimKeys(p.resultQueueName)
+	keys := newResultClaimKeys(p.resultQueueName, p.clusterKeys)
 	res, err := ackResultDeliveryScript.Run(ctx, p.client, []string{
 		keys.claimed, keys.owners, keys.idx, keys.tombstones,
 	}, delivery.claimID, delivery.ownerToken, resultAckTombstoneTTL.Milliseconds(), resultTombstoneCleanupBatchSize).Int()

@@ -136,7 +136,7 @@ var (
 )
 
 type RedisMQFlow struct {
-	rdb             *redis.Client
+	rdb             redis.UniversalClient
 	requestChannels []RequestChannelData
 	retryChannel    chan pipeline.RetryMessage
 	resultChannel   chan api.ResultMessage
@@ -154,11 +154,10 @@ type RedisMQFlow struct {
 // The config is expected to have had ApplyDefaults applied (LoadPubSubConfig
 // does this); workerPools resolves the named pool each queue routes to.
 func NewRedisMQFlow(cfg PubSubConfig, workerPools []pipeline.WorkerPoolConfig) (*RedisMQFlow, error) {
-	redisOpts, err := ParseRedisOptions(cfg.URL)
+	rdb, err := newUniversalClient(cfg.connection())
 	if err != nil {
 		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
 	}
-	rdb := redis.NewClient(redisOpts)
 
 	flow := &RedisMQFlow{
 		rdb:             rdb,
@@ -338,7 +337,7 @@ const (
 )
 
 // Automatically reconnects when the subscription channel closes.
-func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string, labels map[string]string) {
+func requestWorker(ctx context.Context, rdb redis.UniversalClient, msgChannel chan *api.InternalRequest, queueName string, labels map[string]string) {
 	logger := log.FromContext(ctx)
 	for ctx.Err() == nil {
 		shouldReconnect := consumeSubscription(ctx, rdb, msgChannel, queueName, labels)
@@ -356,7 +355,7 @@ func requestWorker(ctx context.Context, rdb *redis.Client, msgChannel chan *api.
 	}
 }
 
-func consumeSubscription(ctx context.Context, rdb *redis.Client, msgChannel chan *api.InternalRequest, queueName string, labels map[string]string) bool {
+func consumeSubscription(ctx context.Context, rdb redis.UniversalClient, msgChannel chan *api.InternalRequest, queueName string, labels map[string]string) bool {
 	logger := log.FromContext(ctx)
 	sub := rdb.Subscribe(ctx, queueName)
 	defer sub.Close() // nolint:errcheck
@@ -405,7 +404,7 @@ func (r *RedisMQFlow) Characteristics() pipeline.Characteristics {
 }
 
 // Puts msgs from the retry channel into a Redis sorted-set with a duration Score.
-func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel chan pipeline.RetryMessage, sortedSetName string) {
+func addMsgToRetryWorker(ctx context.Context, rdb redis.UniversalClient, retryChannel chan pipeline.RetryMessage, sortedSetName string) {
 	logger := log.FromContext(ctx)
 	addRetry := func(msg pipeline.RetryMessage) {
 		if msg.InternalRequest == nil {
@@ -443,7 +442,7 @@ func addMsgToRetryWorker(ctx context.Context, rdb *redis.Client, retryChannel ch
 }
 
 // Every second polls the sorted set and publishes the messages that need to be retried into the request queue
-func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
+func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb redis.UniversalClient) {
 	logger := log.FromContext(ctx)
 	// create a map of queuename to channel based on requestchannels
 	msgChannels := make(map[string]chan *api.InternalRequest)
@@ -525,7 +524,7 @@ func (r *RedisMQFlow) retryWorker(ctx context.Context, rdb *redis.Client) {
 
 // requeueRetryMessages puts undelivered messages back into the retry sorted set.
 // Called only after ctx is cancelled, so context.Background() is used for Redis calls.
-func (r *RedisMQFlow) requeueRetryMessages(rdb *redis.Client, messages []string) {
+func (r *RedisMQFlow) requeueRetryMessages(rdb redis.UniversalClient, messages []string) {
 	if len(messages) == 0 {
 		return
 	}
@@ -545,7 +544,7 @@ func (r *RedisMQFlow) requeueRetryMessages(rdb *redis.Client, messages []string)
 
 // popDueRetryMessages atomically pops up to limit retry messages whose score is <= nowUnixSec.
 // It returns the raw message payloads removed from the sorted set.
-func popDueRetryMessages(ctx context.Context, rdb *redis.Client, key string, nowUnixSec int64, limit int) ([]string, error) {
+func popDueRetryMessages(ctx context.Context, rdb redis.UniversalClient, key string, nowUnixSec int64, limit int) ([]string, error) {
 	raw, err := popDueRetryMessagesScript.Run(ctx, rdb, []string{key}, nowUnixSec, limit).Result()
 	if err != nil {
 		return nil, err

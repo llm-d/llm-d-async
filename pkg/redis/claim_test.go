@@ -75,7 +75,7 @@ func TestClaimRequest_MovesOutOfPendingAndRejectsDoubleClaim(t *testing.T) {
 	if n, _ := rdb.ZCard(ctx, "q").Result(); n != 0 {
 		t.Fatalf("pending zcard = %d, want 0", n)
 	}
-	keys := newClaimKeys("q")
+	keys := newClaimKeys("q", false)
 	if got, _ := rdb.HGet(ctx, keys.claimed, "c1").Result(); got != member {
 		t.Fatalf("claimed payload mismatch")
 	}
@@ -105,7 +105,7 @@ func TestClaimRequest_SelfOverwriteOnRetryReturn(t *testing.T) {
 	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("self re-claim: ok=%v err=%v", ok, err)
 	}
-	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1").Result(); !exists {
+	if exists, _ := rdb.HExists(ctx, newClaimKeys("q", false).claimed, "c1").Result(); !exists {
 		t.Fatal("payload field missing after self-overwrite")
 	}
 }
@@ -124,7 +124,7 @@ func TestReleaseClaim_RestoresOriginalScoreAndHonorsToken(t *testing.T) {
 	if err := flow.releaseClaim(ctx, "q", "c1", ir.RequestToken, member, float64(testDeadline), "deadbeef"); err != nil {
 		t.Fatalf("stale-token release returned error: %v", err)
 	}
-	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1").Result(); !exists {
+	if exists, _ := rdb.HExists(ctx, newClaimKeys("q", false).claimed, "c1").Result(); !exists {
 		t.Fatal("stale token removed a foreign claim")
 	}
 
@@ -134,7 +134,7 @@ func TestReleaseClaim_RestoresOriginalScoreAndHonorsToken(t *testing.T) {
 	if _, err := rdb.ZScore(ctx, "q", member).Result(); err != nil {
 		t.Fatalf("member not restored to pending: %v", err)
 	}
-	if n, _ := rdb.HLen(ctx, newClaimKeys("q").claimed).Result(); n != 0 {
+	if n, _ := rdb.HLen(ctx, newClaimKeys("q", false).claimed).Result(); n != 0 {
 		t.Fatalf("claimed hash len = %d, want 0", n)
 	}
 }
@@ -161,7 +161,7 @@ func TestAckResult_PushesOnceThenFencesDuplicates(t *testing.T) {
 		t.Fatalf("result list len = %d, want 1", n)
 	}
 	// Ack must drop the claim so the reclaimer never redelivers it.
-	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1").Result(); exists {
+	if exists, _ := rdb.HExists(ctx, newClaimKeys("q", false).claimed, "c1").Result(); exists {
 		t.Fatal("claim survived its own ack")
 	}
 }
@@ -170,7 +170,7 @@ func TestAckResult_StaleTokenLeavesForeignClaimIntact(t *testing.T) {
 	_, rdb, ctx, flow := newClaimTestFlow(t)
 
 	// Simulate a claim owned by ANOTHER instance (no local token registered).
-	keys := newClaimKeys("q")
+	keys := newClaimKeys("q", false)
 	_, member := claimEnvelope(t, "c1", testDeadline)
 	rdb.HSet(ctx, keys.claimed, "c1", member)
 	rdb.HSet(ctx, keys.owners, "c1", "foreign-token")
@@ -223,7 +223,7 @@ func TestReclaimExpiredClaims_RedeliversOnlyLapsedLeases(t *testing.T) {
 	if want := irE.QueueScore(); score != want {
 		t.Errorf("redelivered score = %v, want %v", score, want)
 	}
-	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "live").Result(); !exists {
+	if exists, _ := rdb.HExists(ctx, newClaimKeys("q", false).claimed, "live").Result(); !exists {
 		t.Fatal("live claim was reclaimed")
 	}
 }
@@ -237,7 +237,7 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 
-	before, _ := rdb.ZScore(ctx, newClaimKeys("q").idx, "c1").Result()
+	before, _ := rdb.ZScore(ctx, newClaimKeys("q", false).idx, "c1").Result()
 	// Grow the lease so the renewal lands in a later whole-second bucket
 	// (lease scores are unix seconds; same-second rewrites would compare equal).
 	flow.claimLeaseTTL = time.Hour
@@ -251,7 +251,7 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 	if _, err := flow.renewClaim(ctx, "q", "c1", ir.RequestToken, float64(testDeadline), c1Token); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
-	after, _ := rdb.ZScore(ctx, newClaimKeys("q").idx, claimID).Result()
+	after, _ := rdb.ZScore(ctx, newClaimKeys("q", false).idx, claimID).Result()
 	if after <= before {
 		t.Fatalf("lease not extended: before=%f after=%f", before, after)
 	}
@@ -262,7 +262,7 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 	} else if res != 0 {
 		t.Fatalf("ghost renewal should return 0, got %d", res)
 	}
-	if _, err := rdb.ZScore(ctx, newClaimKeys("q").idx, "ghost").Result(); err != redis.Nil {
+	if _, err := rdb.ZScore(ctx, newClaimKeys("q", false).idx, "ghost").Result(); err != redis.Nil {
 		t.Fatalf("ghost renewal created an index entry (err=%v)", err)
 	}
 }
@@ -294,13 +294,13 @@ func TestHeartbeatClaims_ExtendsLiveLeases(t *testing.T) {
 	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	before, _ := rdb.ZScore(ctx, newClaimKeys("q").idx, "c1").Result()
+	before, _ := rdb.ZScore(ctx, newClaimKeys("q", false).idx, "c1").Result()
 
 	// Grow the lease and heartbeat: the expiry must move out accordingly,
 	// proving slow-but-healthy work is not treated as dead.
 	flow.claimLeaseTTL = time.Hour
 	flow.heartbeatClaims(ctx)
-	after, err := rdb.ZScore(ctx, newClaimKeys("q").idx, "c1").Result()
+	after, err := rdb.ZScore(ctx, newClaimKeys("q", false).idx, "c1").Result()
 	if err != nil {
 		t.Fatalf("heartbeat lost the claim: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestHeartbeatClaims_ExtendsLiveLeases(t *testing.T) {
 
 func TestClaimRequest_MultipleGenerationsSameReqID_DoNotOverwrite(t *testing.T) {
 	_, rdb, ctx, flow := newClaimTestFlow(t)
-	keys := newClaimKeys("q")
+	keys := newClaimKeys("q", false)
 
 	// Gen 1
 	ir1 := api.NewInternalRequest(api.InternalRouting{RequestQueueName: "q", RequestToken: "token-gen1"}, &api.RequestMessage{

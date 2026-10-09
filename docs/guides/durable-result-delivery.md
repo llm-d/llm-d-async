@@ -32,6 +32,8 @@ The claim state for result route `<route>` is:
 
 ACK tombstones expire after seven days. Each receive and ACK removes expired entries, and the tombstone key itself has a seven-day Redis expiry, so idle routes clean themselves up.
 
+Against a Redis Cluster (`RedisMode: producer.RedisModeCluster`, or an injected cluster client) the four private keys are hash-tagged onto the route — `{<route>}:result-claimed` and so on — so every script stays within the route's hash slot. The pending list itself keeps its plain name, which is the contract with the dispatcher.
+
 ## Wire compatibility
 
 Published result JSON keeps the existing top-level `ResultMessage` fields and adds only the optional top-level `request_token` field. Legacy `GetResult` and consumers that unmarshal `ResultMessage` continue to work because unknown JSON fields are ignored. New producer parsing restores `request_token` into `Result.Routing.RequestToken`.

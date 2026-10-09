@@ -70,7 +70,7 @@ func registerTestClaim(ctx context.Context, flow *RedisSortedSetFlow, queueName,
 		},
 	)
 	payloadBytes, _ := json.Marshal(ir)
-	keys := newClaimKeys(queueName)
+	keys := newClaimKeys(queueName, false)
 	claimID := claimKey(reqID, reqToken)
 	flow.rdb.HSet(ctx, keys.claimed, claimID, string(payloadBytes))
 	flow.rdb.HSet(ctx, keys.owners, claimID, token)
@@ -1485,7 +1485,7 @@ func TestSortedSetFlow_ResultSustainedOutage_DropsClaimHandle(t *testing.T) {
 	s.SetError("")
 
 	// Expire the lease in Redis claim index by backdating its expiry score.
-	keys := newClaimKeys(queue)
+	keys := newClaimKeys(queue, false)
 	claimID := claimKey("sustained-msg", "")
 	flow.rdb.ZAdd(ctx, keys.idx, redis.Z{Score: float64(time.Now().Add(-10 * time.Second).Unix()), Member: claimID})
 
@@ -1568,7 +1568,7 @@ func TestSortedSetFlow_RetrySustainedOutage_DropsClaimHandle(t *testing.T) {
 	s.SetError("")
 
 	// Expire the lease in Redis claim index by backdating its expiry score.
-	keys := newClaimKeys(queue)
+	keys := newClaimKeys(queue, false)
 	retryClaimID := claimKey("sustained-retry-msg", "token-1")
 	flow.rdb.ZAdd(ctx, keys.idx, redis.Z{Score: float64(time.Now().Add(-10 * time.Second).Unix()), Member: retryClaimID})
 

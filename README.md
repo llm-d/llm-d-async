@@ -293,7 +293,10 @@ Queue hot reload is enabled with `--transport redis-sortedset --transport-config
 
 | Field | Transports | Default | Description |
 |-------|-----------|---------|-------------|
-| `url` | redis-* | `REDIS_URL` env | Redis/Valkey URL (e.g. `redis://user:pass@host:port/db`, `rediss://...` for TLS). An explicit `url` takes precedence; `REDIS_URL` fills it in only when empty. Required (one of the two). |
+| `url` | redis-* | `REDIS_URL` env | Redis/Valkey URL (e.g. `redis://user:pass@host:port/db`, `rediss://...` for TLS). An explicit `url` takes precedence; `REDIS_URL` fills it in only when empty. Required (one of the two). Credentials, TLS and client tuning in the URL apply to every `mode`. |
+| `mode` | redis-* | `standalone` | Redis topology: `standalone`, `cluster` or `sentinel`. See [Redis Cluster and Sentinel](#redis-cluster-and-sentinel). |
+| `addrs` | redis-* | — | Additional cluster seed nodes or sentinel addresses (`host:port`) beyond the host in `url`. Only valid with `mode: cluster` or `mode: sentinel`. |
+| `master_name` | redis-* | — | Sentinel-monitored master name. Required with `mode: sentinel`. |
 | `retry_queue_name` | redis-* | `retry-sortedset` | Sorted set used for retry scheduling. |
 | `result_queue_name` | redis-pubsub | `result-queue` | Channel for results. |
 | `result_queue_name` | redis-sortedset | `result-list` | List for results. |
@@ -1057,6 +1060,26 @@ The Async Processor uses the Redis wire protocol for its message queue implement
 The `url` field in the transport configuration (see [Transport Configuration](#transport-configuration)), the `REDIS_URL` environment variable, and the deprecated `--redis.*` CLI flags all work unchanged with Valkey — point them at your Valkey endpoint the same way you would with Redis.
 
 > **Note:** The `url`/`redis.*` naming is retained because it refers to the wire protocol, not a specific product.
+
+### Redis Cluster and Sentinel
+
+The Redis transports connect to a standalone server by default. Set `mode` in the transport config to use a different topology; the deprecated `--redis.*` flags are standalone only.
+
+```json
+{ "url": "rediss://user:pass@node-1:7000", "mode": "cluster", "addrs": ["node-2:7000", "node-3:7000"], "...": "..." }
+{ "url": "redis://:pass@sentinel-1:26379/0", "mode": "sentinel", "addrs": ["sentinel-2:26379"], "master_name": "mymaster", "...": "..." }
+```
+
+- **`cluster`** builds a go-redis cluster client that follows `MOVED`/`ASK` redirections and slot migrations. A single configuration endpoint (for example an ElastiCache or Memorystore cluster endpoint) is enough; `addrs` adds seed nodes. Clusters serve database 0 only, so the URL must not select another database.
+- **`sentinel`** builds a failover client: `url` and `addrs` are sentinel addresses, `master_name` is the monitored master, and the client follows a failover to the newly promoted master.
+
+Producers must use the same topology: `producer.RedisSortedSetConfig` has matching `RedisMode`, `RedisAddrs` and `RedisMasterName` fields, and an injected cluster client is detected automatically.
+
+In cluster mode every multi-key Lua script must stay within one hash slot. The shared keys keep their names: request queues, the retry queue, result lists and the per-request `request-active:<id>` / `request-cancel:<id>` markers and `request-payload:<id>:<token>` keys are exactly what they are in standalone mode. The private bookkeeping keys are hash-tagged onto the shared key they belong to, so a queue named `request-sortedset` keeps its claims under `{request-sortedset}:claimed` rather than `request-sortedset:claimed` (a tagged key hashes like the bare key, so the pair shares a slot). Standalone and sentinel deployments keep today's key names, so switching an existing deployment to cluster mode is a cutover: drain the queues first, because in-flight claims under the old names are not migrated.
+
+A result list usually lands in a different slot than its request queue. Publishing a result then takes two single-slot steps instead of one atomic script: the dispatcher renews its lease, pushes the record, then drops the claim. A crash between the push and the drop leaves the claim to expire and be redelivered, so a consumer can see that result twice. This is within the transport's documented at-least-once contract, and [durable result delivery](docs/guides/durable-result-delivery.md) de-duplicates it by `(ID, RequestToken)`; name the result list with the queue's hash tag (for example `{request-sortedset}:results`) if you want the atomic path back. A payload stored apart with `WithPayloadKeys` lives in its own slot too, so in cluster mode it is deleted with a separate command after the ack, and the producer writes it before the enqueue; a payload key that outlives a crash expires on its own.
+
+The `redis`, `redis-quota` and `redis-leased-rate` dispatch gates take a single `address` and open a standalone connection to it. Against a cluster, point them at a node that owns the slot of their key (or front the cluster with a proxy); a key on another node answers `MOVED` and the gate fails closed.
 
 ## Implementations
 

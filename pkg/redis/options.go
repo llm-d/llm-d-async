@@ -11,7 +11,11 @@ import (
 // PubSubConfig is the transport config for the Redis pub/sub flow.
 // It is parsed from JSON provided via --transport-config or --transport-config-file.
 type PubSubConfig struct {
-	URL             string        `json:"url,omitempty"`
+	URL string `json:"url,omitempty"`
+	// Mode, Addrs and MasterName select the Redis topology; see ConnectionConfig.
+	Mode            string        `json:"mode,omitempty"`
+	Addrs           []string      `json:"addrs,omitempty"`
+	MasterName      string        `json:"master_name,omitempty"`
 	RetryQueueName  string        `json:"retry_queue_name,omitempty"`
 	ResultQueueName string        `json:"result_queue_name,omitempty"`
 	EnableTracing   bool          `json:"enable_tracing,omitempty"`
@@ -62,6 +66,9 @@ func (c *PubSubConfig) Validate() error {
 	if c.URL == "" {
 		return fmt.Errorf("url is required (set url in the transport config or REDIS_URL)")
 	}
+	if err := validateConnection(c.connection()); err != nil {
+		return err
+	}
 	if len(c.Queues) == 0 {
 		return fmt.Errorf("at least one queue must be configured")
 	}
@@ -76,10 +83,18 @@ func (c *PubSubConfig) Validate() error {
 	return nil
 }
 
+func (c *PubSubConfig) connection() ConnectionConfig {
+	return ConnectionConfig{URL: c.URL, Mode: c.Mode, Addrs: c.Addrs, MasterName: c.MasterName}
+}
+
 // SortedSetConfig is the transport config for the Redis sorted-set flow.
 // It is parsed from JSON provided via --transport-config or --transport-config-file.
 type SortedSetConfig struct {
 	URL string `json:"url,omitempty"`
+	// Mode, Addrs and MasterName select the Redis topology; see ConnectionConfig.
+	Mode       string   `json:"mode,omitempty"`
+	Addrs      []string `json:"addrs,omitempty"`
+	MasterName string   `json:"master_name,omitempty"`
 	// RetryQueueName is the sorted set holding backoff retries, scored by
 	// retry-due time. Retries re-enter their request queue (with the original
 	// deadline score) only once due, so backoff is actually enforced.
@@ -174,6 +189,9 @@ func (c *SortedSetConfig) validate(allowEmptyQueues bool) error {
 	if c.URL == "" {
 		return fmt.Errorf("url is required (set url in the transport config or REDIS_URL)")
 	}
+	if err := validateConnection(c.connection()); err != nil {
+		return err
+	}
 	if c.PollIntervalMs < 0 {
 		return fmt.Errorf("poll_interval_ms must be non-negative")
 	}
@@ -208,6 +226,10 @@ func (c *SortedSetConfig) validate(allowEmptyQueues bool) error {
 		seenQueue[q.QueueName] = true
 	}
 	return nil
+}
+
+func (c *SortedSetConfig) connection() ConnectionConfig {
+	return ConnectionConfig{URL: c.URL, Mode: c.Mode, Addrs: c.Addrs, MasterName: c.MasterName}
 }
 
 // --- Deprecated per-backend flag options (kept for backwards compatibility) ---
