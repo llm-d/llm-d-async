@@ -132,21 +132,28 @@ func BenchmarkPeekAndLoad(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					irs := make([]*api.InternalRequest, len(zs))
+					claimed := make([]claimedRequest, len(zs))
 					for i, z := range zs {
 						member, _ := z.Member.(string)
 						ir, _, ok := flow.parseMessage(member, logger)
 						if !ok {
 							b.Fatal("unparsable member")
 						}
-						irs[i] = ir
+						claimed[i] = claimedRequest{ir: ir, member: member}
 					}
-					payloadErrs, err := flow.fetchPayloads(ctx, irs)
-					if err != nil {
-						b.Fatal(err)
+					if byRef {
+						payloadErrs, err := flow.fetchPayloads(ctx, claimed)
+						if err != nil {
+							b.Fatal(err)
+						}
+						for _, e := range payloadErrs {
+							if e != "" {
+								b.Fatal(e)
+							}
+						}
 					}
-					for i, ir := range irs {
-						if payloadErrs[i] != "" || len(ir.PublicRequest.ReqPayload()) != payloadBytes {
+					for _, c := range claimed {
+						if len(c.ir.PublicRequest.ReqPayload()) != payloadBytes {
 							b.Fatal("payload did not survive the load")
 						}
 					}

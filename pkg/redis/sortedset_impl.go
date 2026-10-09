@@ -813,8 +813,8 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 	}
 
 	var ready []claimedRequest
-	sent := 0
-	defer func() { r.releaseClaimed(queueName, ready[sent:], logger) }()
+	handled := 0
+	defer func() { r.releaseClaimed(queueName, ready[handled:], logger) }()
 
 	for _, z := range zs {
 		member, _ := z.Member.(string)
@@ -864,26 +864,6 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			}
 		}
 
-		// Claims the request and records result as its terminal outcome,
-		// reporting whether the batch must stop.
-		terminate := func(result api.ResultMessage) bool {
-			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
-			if claimErr != nil {
-				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim request", "id", reqID, "outcome", result.ErrorCode)
-				return false
-			}
-			if !claimed {
-				return false
-			}
-			select {
-			case r.resultChannel <- result:
-			case <-ctx.Done():
-				releaseOnShutdown(token, ir.RequestToken)
-				return true
-			}
-			return false
-		}
-
 		if deadline < currentTime {
 			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", reqID)
 			metrics.RecordExceededDeadlineReq(queueID, queueName, poolName)
@@ -918,7 +898,18 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 			// authoritative pre-dispatch cancellation check and fails closed.
 			logger.V(logutil.DEFAULT).Error(err, "Failed to check request cancellation", "id", reqID)
 		} else if cancelled {
-			if terminate(api.NewCancelledResult(rview, ir.InternalRouting)) {
+			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
+			if claimErr != nil {
+				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim cancelled request", "id", reqID)
+				continue
+			}
+			if !claimed {
+				continue
+			}
+			select {
+			case r.resultChannel <- api.NewCancelledResult(rview, ir.InternalRouting):
+			case <-ctx.Done():
+				releaseOnShutdown(token, ir.RequestToken)
 				return
 			}
 			continue
@@ -1000,11 +991,7 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 	if len(ready) == 0 {
 		return
 	}
-	irs := make([]*api.InternalRequest, len(ready))
-	for i, c := range ready {
-		irs[i] = c.ir
-	}
-	payloadErrs, err := r.fetchPayloads(ctx, irs)
+	payloadErrs, err := r.fetchPayloads(ctx, ready)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Failed to load request payloads", "queue", queueName)
 		return
@@ -1019,13 +1006,13 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 				return
 			}
 			pipeline.ReleaseGateReleases(c.releases)
-			sent++
+			handled++
 			continue
 		}
 		if !r.dispatch(ctx, msgChannel, ir, c.releases) {
 			return
 		}
-		sent++
+		handled++
 	}
 }
 
@@ -1077,33 +1064,25 @@ func (r *RedisSortedSetFlow) releaseClaimed(queueName string, claimed []claimedR
 	}
 }
 
-// fetchPayloads attaches each referenced payload to its request with one MGET
-// and returns, per request, why its payload is unavailable ("" when ready).
-func (r *RedisSortedSetFlow) fetchPayloads(ctx context.Context, irs []*api.InternalRequest) ([]string, error) {
-	errs := make([]string, len(irs))
-	var refs []string
-	var at []int
-	for i, ir := range irs {
-		if ir.PayloadRef != "" {
-			refs = append(refs, ir.PayloadRef)
-			at = append(at, i)
-		}
-	}
-	if len(refs) == 0 {
-		return errs, nil
+// fetchPayloads attaches each request's referenced payload with one MGET and
+// returns, per request, why its payload is unavailable ("" when ready).
+func (r *RedisSortedSetFlow) fetchPayloads(ctx context.Context, claimed []claimedRequest) ([]string, error) {
+	refs := make([]string, len(claimed))
+	for i, c := range claimed {
+		refs[i] = c.ir.PayloadRef
 	}
 	values, err := r.rdb.MGet(ctx, refs...).Result()
 	if err != nil {
 		return nil, fmt.Errorf("fetch %d request payloads: %w", len(refs), err)
 	}
-	for j, v := range values {
-		i := at[j]
+	errs := make([]string, len(claimed))
+	for i, v := range values {
 		payload, found := v.(string)
 		if !found {
 			errs[i] = "request payload is missing"
 			continue
 		}
-		if err := api.AttachPayload(irs[i], json.RawMessage(payload)); err != nil {
+		if err := api.AttachPayload(claimed[i].ir, json.RawMessage(payload)); err != nil {
 			errs[i] = "request payload could not be attached"
 		}
 	}

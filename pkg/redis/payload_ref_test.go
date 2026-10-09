@@ -39,12 +39,11 @@ func TestFetchPayloads_AttachesReferencedPayloads(t *testing.T) {
 
 	present, _ := pointerRequest(t, "present", future, `{"prompt":"present"}`)
 	missing, _ := pointerRequest(t, "missing", future, `{"prompt":"missing"}`)
-	inline := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "inline", Deadline: future, Payload: json.RawMessage(`{"prompt":"inline"}`)})
 	if err := rdb.Set(ctx, present.PayloadRef, `{"prompt":"present"}`, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
 
-	errs, err := flow.fetchPayloads(ctx, []*api.InternalRequest{present, missing, inline})
+	errs, err := flow.fetchPayloads(ctx, []claimedRequest{{ir: present}, {ir: missing}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,9 +52,6 @@ func TestFetchPayloads_AttachesReferencedPayloads(t *testing.T) {
 	}
 	if errs[1] == "" {
 		t.Error("missing: want a payload error")
-	}
-	if errs[2] != "" || string(inline.PublicRequest.ReqPayload()) != `{"prompt":"inline"}` {
-		t.Errorf("inline: err=%q payload=%s", errs[2], inline.PublicRequest.ReqPayload())
 	}
 }
 
@@ -66,7 +62,7 @@ func TestFetchPayloads_FetchErrorFailsTheBatch(t *testing.T) {
 	flow := &RedisSortedSetFlow{rdb: rdb}
 	ir, _ := pointerRequest(t, "r", time.Now().Add(time.Hour).Unix(), `{}`)
 	s.Close()
-	if _, err := flow.fetchPayloads(ctx, []*api.InternalRequest{ir}); err == nil {
+	if _, err := flow.fetchPayloads(ctx, []claimedRequest{{ir: ir}}); err == nil {
 		t.Fatal("want an error when payloads cannot be fetched")
 	}
 }
