@@ -370,11 +370,13 @@ func TestSubmitRequestRejectsAPayloadThatIsNotAJSONObject(t *testing.T) {
 
 func TestSubmitRequestAcceptsAnObjectOrNullPayload(t *testing.T) {
 	for name, payload := range map[string]json.RawMessage{
-		"nil":             nil,
-		"null":            json.RawMessage(`null`),
-		"object":          json.RawMessage(`{"model":"m"}`),
-		"indented object": json.RawMessage(" \n\t{\"model\":\"m\"}"),
-		"empty object":    json.RawMessage(`{}`),
+		"nil":              nil,
+		"null":             json.RawMessage(`null`),
+		"padded null":      json.RawMessage(" null \n"),
+		"object":           json.RawMessage(`{"model":"m"}`),
+		"indented object":  json.RawMessage(" \n\t{\"model\":\"m\"}"),
+		"empty object":     json.RawMessage(`{}`),
+		"trailing newline": json.RawMessage("{\"model\":\"m\"}\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			producer, mr := setupTestProducer(t)

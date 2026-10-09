@@ -274,7 +274,7 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 	ir.EnqueueSeq = enqueueSeqPlaceholder
 
 	if payload := r.ReqPayload(); payload != nil {
-		trimmed := bytes.TrimLeft(payload, " \t\r\n")
+		trimmed := bytes.TrimSpace(payload)
 		if !json.Valid(trimmed) || (trimmed[0] != '{' && string(trimmed) != "null") {
 			return errors.New("invalid payload: must be a JSON object or null")
 		}
