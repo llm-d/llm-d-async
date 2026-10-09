@@ -13,21 +13,27 @@ backed by a real vLLM model server and the upstream llm-d stack.
 export LLM_D_REPO=/path/to/llm-d        # local checkout of github.com/llm-d/llm-d
 export ASYNC_REPO=/path/to/llm-d-async   # this repo
 export NAMESPACE=llm-d-async              # choose your namespace
-export GAIE_VERSION=v1.5.0
-export ROUTER_CHART_VERSION=v0.9.0
-export GATEWAY_API_VERSION=v1.5.1
+export GAIE_VERSION=v1.6.2
+export ROUTER_VERSION=main
+export ROUTER_CHART_VERSION=v0
+export GATEWAY_API_VERSION=v1.6.3
 export GUIDE_NAME=optimized-baseline
 ```
 
-`GAIE_VERSION` and `ROUTER_CHART_VERSION` track upstream; `${LLM_D_REPO}/guides/env.sh`
-is the source of truth for the versions the llm-d guides are tested against.
+`${LLM_D_REPO}/guides/env.sh` is the source of truth for these versions. `GAIE_VERSION`
+matches the inference-extension version the EPP image pins; `ROUTER_CHART_VERSION=v0`
+is the chart tag that deploys the `main`-tagged router image.
 
 ## Step 1: Install CRDs
 
 ```bash
 kubectl apply -k "https://github.com/kubernetes-sigs/gateway-api/config/crd?ref=${GATEWAY_API_VERSION}"
 kubectl apply -k "https://github.com/kubernetes-sigs/gateway-api-inference-extension/config/crd?ref=${GAIE_VERSION}"
+kubectl apply -k "https://github.com/llm-d/llm-d-router/config/crd?ref=${ROUTER_VERSION}"
 ```
+
+The llm-d router ships its own `llm-d.ai` CRDs (InferenceObjective and
+InferenceModelRewrite); GAIE v1.6 no longer includes them.
 
 ## Step 2: Create namespace
 
