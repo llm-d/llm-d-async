@@ -54,6 +54,8 @@ func NewPromQLMetricSourceFromLabels(promConfig promapi.Config, metricName strin
 // as a dispatch budget D = 1 − (queue_size / (ready_pods × maxConcurrency)), where queue_size is
 // llm_d_epp_flow_control_queue_size and max_SYS = ready_pods × maxConcurrency is
 // computed dynamically from the llm_d_epp_ready_endpoints metric.
+// EPP replicas each report the pool's endpoint count, so max reduces those reports
+// to one pool capacity before joining with the total queue size.
 // inferencePool and maxConcurrency are required.
 func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64, namespace string) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
@@ -69,7 +71,7 @@ func NewFlowControlQueueSizePromQL(promConfig promapi.Config, inferencePool stri
 		podsLabels["namespace"] = namespace
 	}
 	query := fmt.Sprintf(
-		`1 - (sum by(inference_pool)(%s) / on() (%s * %g))`,
+		`1 - (sum by(inference_pool)(%s) / on() (max(%s) * %g))`,
 		buildPromQL("llm_d_epp_flow_control_queue_size", queueLabels),
 		buildPromQL("llm_d_epp_ready_endpoints", podsLabels),
 		maxConcurrency,
@@ -127,6 +129,7 @@ func NewPoolQueueSizePromQL(promConfig promapi.Config, inferencePool string, max
 // NewVLLMSaturationPromQL builds a PromQLMetricSource that estimates inference pool saturation
 // from vLLM and pool metrics, returning D = 1 − (running_requests / (ready_pods × maxConcurrency)).
 // This serves as a fallback when EPP flow control metrics are unavailable.
+// max reduces the endpoint counts reported by EPP replicas to one pool capacity.
 // inferencePool and maxConcurrency are required.
 func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, maxConcurrency float64, namespace string) (*PromQLMetricSource, error) {
 	if inferencePool == "" {
@@ -142,7 +145,7 @@ func NewVLLMSaturationPromQL(promConfig promapi.Config, inferencePool string, ma
 		podsLabels["namespace"] = namespace
 	}
 	query := fmt.Sprintf(
-		`1 - (sum(%s) / on() (%s * %g))`,
+		`1 - (sum(%s) / on() (max(%s) * %g))`,
 		buildPromQL("vllm:num_requests_running", vllmLabels),
 		buildPromQL("llm_d_epp_ready_endpoints", podsLabels),
 		maxConcurrency,

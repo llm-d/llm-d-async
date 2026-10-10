@@ -232,7 +232,7 @@ saturated and read the per-pod peak:
 ```bash
 kubectl run --rm -i prom-peak --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=max_over_time((sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() llm_d_epp_ready_endpoints{name="optimized-baseline"})[1h:])' \
+    'query=max_over_time((sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() max(llm_d_epp_ready_endpoints{name="optimized-baseline"}))[1h:])' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 ```
 
@@ -289,7 +289,7 @@ kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAM
 # The vLLM fallback (source 2), which needs the relabeled inference_pool label
 kubectl run --rm -i prom-budget-vllm --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
+    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (max(llm_d_epp_ready_endpoints{name="optimized-baseline"}) * 100))' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = 1
 ```
@@ -415,7 +415,7 @@ kubectl run --rm -i prom-running --image=curlimages/curl --restart=Never -n ${NA
 # Verify budget is negative (gate closed)
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
+    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (max(llm_d_epp_ready_endpoints{name="optimized-baseline"}) * 100))' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = -1 (200 running / 100 max = 200% utilization)
 
@@ -465,7 +465,7 @@ kubectl run --rm -i prom-running --image=curlimages/curl --restart=Never -n ${NA
 # Verify budget is negative (gate closed)
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
+    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (max(llm_d_epp_ready_endpoints{name="optimized-baseline"}) * 100))' \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value ~= -0.1 (gate closed)
 

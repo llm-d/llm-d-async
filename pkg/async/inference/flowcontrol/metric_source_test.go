@@ -172,7 +172,7 @@ func TestFlowControlQueueSizePromQL(t *testing.T) {
 		source, err := NewFlowControlQueueSizePromQL(promConfig, "my-pool", 100, "")
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `llm_d_epp_flow_control_queue_size{inference_pool="my-pool"}`)
-		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool"}`)
+		require.Contains(t, source.expr, `max(llm_d_epp_ready_endpoints{name="my-pool"})`)
 		require.Contains(t, source.expr, "* 100")
 		require.NotContains(t, source.expr, "namespace")
 	})
@@ -187,7 +187,7 @@ func TestFlowControlQueueSizePromQL(t *testing.T) {
 		source, err := NewFlowControlQueueSizePromQL(promConfig, "my-pool", 100, "prod")
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `llm_d_epp_flow_control_queue_size{inference_pool="my-pool",namespace="prod"}`)
-		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `max(llm_d_epp_ready_endpoints{name="my-pool",namespace="prod"})`)
 	})
 }
 
@@ -237,7 +237,7 @@ func TestVLLMSaturationPromQL(t *testing.T) {
 		source, err := NewVLLMSaturationPromQL(promConfig, "my-pool", 100, "")
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool"}`)
-		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool"}`)
+		require.Contains(t, source.expr, `max(llm_d_epp_ready_endpoints{name="my-pool"})`)
 		require.Contains(t, source.expr, "* 100")
 		require.NotContains(t, source.expr, "namespace")
 	})
@@ -252,7 +252,7 @@ func TestVLLMSaturationPromQL(t *testing.T) {
 		source, err := NewVLLMSaturationPromQL(promConfig, "my-pool", 100, "prod")
 		require.NoError(t, err)
 		require.Contains(t, source.expr, `vllm:num_requests_running{inference_pool="my-pool",namespace="prod"}`)
-		require.Contains(t, source.expr, `llm_d_epp_ready_endpoints{name="my-pool",namespace="prod"}`)
+		require.Contains(t, source.expr, `max(llm_d_epp_ready_endpoints{name="my-pool",namespace="prod"})`)
 	})
 }
 
