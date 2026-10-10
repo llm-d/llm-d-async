@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -595,12 +596,15 @@ func deadlineExhaustedResult(msg pipeline.EmbelishedRequestMessage, lastResp asy
 }
 
 // headersWithContentType returns a copy of headers with Content-Type set to
-// contentType. The original map is not mutated, so the per-message headers stay
-// intact across retries.
+// contentType, replacing all case-insensitive spellings of the header. The
+// original map is not mutated, so the per-message headers stay intact across
+// retries.
 func headersWithContentType(headers map[string]string, contentType string) map[string]string {
 	out := make(map[string]string, len(headers)+1)
 	for k, v := range headers {
-		out[k] = v
+		if !strings.EqualFold(k, "Content-Type") {
+			out[k] = v
+		}
 	}
 	out["Content-Type"] = contentType
 	return out

@@ -739,6 +739,8 @@ See [Request Merge Policies](#request-merge-policies) for how per-pool merging w
 
 Some providers need a different body shape at dispatch time — for example multi-modal endpoints (Whisper transcription, OCR) that expect `multipart/form-data` with a `url` field rather than JSON. Request body-transform plugins handle this without special-casing the worker: they rewrite the outgoing body and `Content-Type` based on per-message `metadata`, and the default JSON path is preserved byte-for-byte when no plugin applies.
 
+When a transform handles a request, its `Content-Type` replaces caller-supplied values regardless of header-name casing. Other headers are preserved, and the original per-message headers remain intact for retries.
+
 Transforms are configured with `--transform-config-file`, pointing at a JSON object that groups plugins by direction:
 
 ```json
