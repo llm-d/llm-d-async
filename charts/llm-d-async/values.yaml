@@ -301,6 +301,7 @@ ap:
     port: modelserver
     path: /metrics
     interval: 15s
+    labels: {}
     # Namespaces to search for model server pods. Empty means the release
     # namespace only (prometheus-operator's default). Either list namespaces
     # explicitly or search all of them:

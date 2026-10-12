@@ -189,6 +189,21 @@ tests:
           path: spec.podMetricsEndpoints[0].path
           value: /metrics
 
+  - it: should add custom ModelServer PodMonitor labels
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+      ap.modelServerMonitor.labels:
+        monitoring.opendatahub.io/scrape: "true"
+    asserts:
+      - equal:
+          path: metadata.labels["monitoring.opendatahub.io/scrape"]
+          value: "true"
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: llm-d-async
+
   - it: should not set a ModelServer PodMonitor namespaceSelector by default
     templates:
       - templates/modelserver-podmonitor.yaml
