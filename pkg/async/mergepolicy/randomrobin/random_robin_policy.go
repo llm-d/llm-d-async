@@ -10,6 +10,7 @@ import (
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/llm-d/llm-d-async/pkg/async/mergepolicy/internal/fairness"
+	"github.com/llm-d/llm-d-async/pkg/async/mergepolicy/internal/header"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
@@ -185,12 +186,13 @@ func requestURL(chMeta pipeline.RequestChannel, ir *api.InternalRequest) string 
 }
 
 func (r *RandomRobinPolicy) stampHeaders(headers map[string]string, chMeta pipeline.RequestChannel, ir *api.InternalRequest) {
-	headers["Content-Type"] = "application/json"
+	header.Set(headers, "Content-Type", "application/json")
 	if chMeta.InferenceObjective != "" {
-		headers["x-gateway-inference-objective"] = chMeta.InferenceObjective
+		header.Set(headers, "x-gateway-inference-objective", chMeta.InferenceObjective)
 	}
+	// Caller headers override the defaults above in any casing.
 	for k, v := range ir.PublicRequest.ReqHeaders() {
-		headers[k] = v
+		header.Set(headers, k, v)
 	}
 	// Stamped after the caller's headers so the tenant the quota
 	// gate accounts on is the one the gateway arbitrates on.

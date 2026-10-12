@@ -6,11 +6,11 @@ package fairness
 
 import (
 	"fmt"
-	"strings"
 
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pkg/async/mergepolicy/internal/header"
 )
 
 // DefaultAttribute is the message metadata attribute stamped when a policy does
@@ -92,14 +92,5 @@ func (s Stamper) Stamp(headers map[string]string, req api.Request) {
 	if id == "" || len(id) > maxIdentityLen || !httpguts.ValidHeaderFieldValue(id) {
 		return
 	}
-	// HTTP header names are case-insensitive and net/http canonicalizes them on
-	// write, so leaving a caller's case variant in place alongside the stamp
-	// would collapse two map keys onto one wire header with nondeterministic
-	// precedence. Drop every variant first.
-	for k := range headers {
-		if strings.EqualFold(k, s.header) {
-			delete(headers, k)
-		}
-	}
-	headers[s.header] = id
+	header.Set(headers, s.header, id)
 }

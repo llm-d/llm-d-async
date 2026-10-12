@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/llm-d/llm-d-async/pkg/async/mergepolicy/internal/fairness"
+	"github.com/llm-d/llm-d-async/pkg/async/mergepolicy/internal/header"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
@@ -449,8 +450,9 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 				if chMeta.InferenceObjective != "" {
 					headers["x-gateway-inference-objective"] = chMeta.InferenceObjective
 				}
+				// Caller headers override the defaults above in any casing.
 				for k, v := range ir.PublicRequest.ReqHeaders() {
-					headers[k] = v
+					header.Set(headers, k, v)
 				}
 				// Stamped after the caller's headers so the tenant the quota
 				// gate accounts on is the one the gateway arbitrates on.
@@ -458,11 +460,11 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 
 				pri := getPriorityIndex(ir, tierLabel)
 				if priorityHeader != "" {
-					headers[priorityHeader] = strconv.Itoa(pri)
+					header.Set(headers, priorityHeader, strconv.Itoa(pri))
 				}
 				if len(p.laneObjectives) > 0 {
 					if objective, ok := p.laneObjectives[laneKey(ir, tierLabel)]; ok && objective != "" {
-						headers[p.objectiveHeader] = objective
+						header.Set(headers, p.objectiveHeader, objective)
 					}
 				}
 
