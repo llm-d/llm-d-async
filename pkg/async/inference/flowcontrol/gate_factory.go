@@ -426,6 +426,15 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("endpoint-scrape gate failed to parse 'pods_labels': %w", err)
 		}
 
+		var absentValue *float64
+		if _, ok := params["absent_value"]; ok {
+			v, err := paramFloat(params, "absent_value", 0)
+			if err != nil {
+				return nil, err
+			}
+			absentValue = &v
+		}
+
 		scrapeCfg := ScrapeConfig{
 			URL:            url,
 			MetricName:     metric,
@@ -435,6 +444,21 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			PodsURL:        paramString(params, "pods_url", ""),
 			PodsMetric:     paramString(params, "pods_metric", ""),
 			PodsLabels:     podsLabels,
+			AbsentValue:    absentValue,
+		}
+
+		switch admission := paramString(params, "admission", "budget"); admission {
+		case "budget":
+		case "counted":
+			if maxCountPerPod <= 0 || valueType != "saturation" {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' needs a count metric: max_count_per_pod > 0 and value_type saturation")
+			}
+			if baseline != 0 || fallback != 0 {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' takes neither baseline nor fallback: size the headroom with max_count_per_pod; a failed scrape admits nothing")
+			}
+			return NewHeadroomGate(NewScrapeMetricSource(scrapeCfg), f.cacheTTL).WithOwner(cfg.Owner), nil
+		default:
+			return nil, fmt.Errorf("endpoint-scrape admission must be either 'budget' or 'counted', got %q", admission)
 		}
 
 		var ms MetricSource = NewScrapeMetricSource(scrapeCfg)

@@ -493,3 +493,28 @@ func TestGateFactory_PropagatesOwnerToSaturationGate(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, owner, metricGate.owner)
 }
+
+func TestGateFactory_EndpointScrapeAbsentValue(t *testing.T) {
+	server := newTestMetricsServer(testMetricsBody)
+	defer server.Close()
+	params := map[string]any{
+		"url":               server.URL,
+		"metric":            "llm_d_epp_flow_control_queue_size",
+		"max_count_per_pod": 1024,
+		"fallback":          0,
+	}
+	factory := NewGateFactoryWithCacheTTL("", 0)
+
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: params})
+	require.NoError(t, err)
+	assert.Zero(t, gate.Budget(context.Background()), "a missing series falls back closed by default")
+
+	params["absent_value"] = 0
+	gate, err = factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: params})
+	require.NoError(t, err)
+	assert.InDelta(t, 1.0, gate.Budget(context.Background()), 0.001, "absent_value 0 opens the gate on an absent queue")
+
+	params["absent_value"] = "empty"
+	_, err = factory.CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: params})
+	require.Error(t, err)
+}
