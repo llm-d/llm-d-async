@@ -186,7 +186,7 @@ The available gate types, at a glance:
   | # | Metric | Budget | Available when |
   |---|--------|--------|----------------|
   | 0 | `llm_d_epp_flow_control_queue_size` | `D = 1 − (queue_size / max_SYS)` | EPP runs the flow control plugin |
-  | 1 | `llm_d_epp_per_endpoint_queue_size` | `D = 1 − (mean per-pod queue depth / max_concurrency)` | Always — part of EPP's base metric set |
+  | 1 | `llm_d_epp_per_endpoint_queue_size` | `D = 1 − (mean per-pod **waiting** requests / max_concurrency)` | Always — part of EPP's base metric set |
   | 2 | `vllm:num_requests_running` | `D = 1 − (running_requests / max_SYS)` | vLLM metrics carry an `inference_pool` label |
 
   Sources 0 and 2 compute `max_SYS = ready_pods × max_concurrency` dynamically from the
@@ -199,6 +199,28 @@ The available gate types, at a glance:
   and the cascade moves on instead.
   The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
   See [docs/dispatch-budget.md](dispatch-budget.md) for the full derivation.
+
+  > [!WARNING]
+  > **Source 1 measures the model server's waiting queue, not in-flight load.** The router fills
+  > `llm_d_epp_per_endpoint_queue_size` from `vllm:num_requests_waiting`: requests the model server
+  > has accepted but not yet scheduled. Running requests do not count. vLLM runs up to `max_num_seqs`
+  > (256 by default) requests per pod before anything waits, so on a stock llm-d router, where source 1
+  > is the one that resolves, the gate closes only once a pod holds about
+  > `max_num_seqs + max_concurrency × (1 − baseline)` requests — roughly 350 with the defaults, not 95.
+  > The saturation detector's `MaxConcurrency`, which `max_concurrency` is documented to mirror, counts
+  > running plus waiting. Tracked in [#501](https://github.com/llm-d/llm-d-async/issues/501).
+  >
+  > For in-flight semantics today, use `prometheus-saturation` on
+  > `llm_d_epp_flow_control_pool_saturation` where the router runs flow control, or `prometheus-query`
+  > with the EPP's pool averages (no cascade or vLLM fallback, threshold pinned at 0):
+  >
+  > ```json
+  > {"gate_type":"prometheus-query","gate_params":{"pool":"<pool>","fallback":"0",
+  >  "query":"clamp((1 - (avg by(name)(llm_d_epp_average_running_requests{name=\"<pool>\"} + llm_d_epp_average_queue_size{name=\"<pool>\"}) / 100)) and on() (llm_d_epp_ready_endpoints{name=\"<pool>\"} > 0), 0, 1)"}}
+  > ```
+  >
+  > `100` is the per-pod capacity; the `ready_endpoints > 0` guard makes a drained pool yield no
+  > sample (the fallback) instead of the frozen averages. Needs llm-d-router v0.11.0 or later.
 
   The PromQL each source resolved to is logged at startup (`prometheus-budget metric source`), and
   `llm_d_async_async_gate_metric_source_available` reports whether the last evaluation got a reading from any
@@ -236,7 +258,9 @@ The available gate types, at a glance:
   - **Match the EPP.** `max_concurrency` mirrors `MaxConcurrency` in the inference scheduler's
     saturation detector. Using the same number keeps the async gate and the EPP's own admission
     control in agreement about when the pool is full. If you have not configured the saturation
-    detector, both defaults are `100`.
+    detector, both defaults are `100`. This holds for sources 0 and 2; source 1 compares the value
+    against the waiting queue alone (see the warning above), so on a stock router the pool is well
+    past `MaxConcurrency` before the gate reacts.
   - **Measure it.** Drive your pool to the load you consider saturated and read the per-pod peak:
 
     ```promql
