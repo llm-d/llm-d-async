@@ -8,6 +8,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -42,7 +43,7 @@ func TestRedisQuotaGate_Concurrency(t *testing.T) {
 	// 3rd acquisition - Denied (Redeliver)
 	msg3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req3", Metadata: attrs})
 	verdict3, err := gate.Apply(ctx, msg3, &releases3)
-	if err != nil || verdict3.Action != pipeline.ActionRefuse || msg3.GetClassification() != api.ClassificationOverflow {
+	if err != nil || verdict3.Action != pipeline.ActionRefuse || verdict3.Reason != metrics.ReasonQuotaExhausted || msg3.GetClassification() != api.ClassificationOverflow {
 		t.Fatalf("Expected redeliver overflow, got %v classification %v, err: %v", verdict3, msg3.GetClassification(), err)
 	}
 
@@ -107,7 +108,7 @@ func TestRedisQuotaGate_Concurrency_TTLRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire 3: unexpected error %v", err)
 	}
-	if v.Action != pipeline.ActionRefuse || msg3.GetClassification() != api.ClassificationOverflow {
+	if v.Action != pipeline.ActionRefuse || v.Reason != metrics.ReasonQuotaExhausted || msg3.GetClassification() != api.ClassificationOverflow {
 		t.Fatalf("acquire 3: counter reset mid-flight → over-admission (TTL not refreshed): got %v classification %v",
 			v, msg3.GetClassification())
 	}
@@ -152,7 +153,7 @@ func TestRedisQuotaGate_RateLimit(t *testing.T) {
 	// 3rd acquisition - Denied
 	msg3 := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req3", Metadata: attrs})
 	verdict3, err := gate.Apply(ctx, msg3, &releases3)
-	if err != nil || verdict3.Action != pipeline.ActionRefuse || msg3.GetClassification() != api.ClassificationOverflow {
+	if err != nil || verdict3.Action != pipeline.ActionRefuse || verdict3.Reason != metrics.ReasonQuotaExhausted || msg3.GetClassification() != api.ClassificationOverflow {
 		t.Fatalf("Expected redeliver overflow, got %v classification %v, err: %v", verdict3, msg3.GetClassification(), err)
 	}
 

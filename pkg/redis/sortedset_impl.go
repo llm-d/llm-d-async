@@ -930,9 +930,9 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 		}
 
 		if verdict.Action == pipeline.ActionRefuse {
-			reason := metrics.ReasonGateClosed
-			if ir.GetClassification() == api.ClassificationOverflow {
-				reason = metrics.ReasonQuotaExhausted
+			reason := verdict.Reason
+			if reason == "" {
+				reason = metrics.ReasonGateClosed
 			}
 			metrics.RecordGateDecision(reason, queueID, queueName, poolName)
 			// Entry remains pending (peek, not pop): no re-enqueue churn.

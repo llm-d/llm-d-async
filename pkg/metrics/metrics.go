@@ -155,7 +155,7 @@ var (
 	}, []string{LabelPoolName})
 	GateDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_gate_decisions_total",
-		Help: "Count of gate decisions that prevented dispatch, by reason (gate_closed, quota_exhausted, dropped, error). quota_exhausted/dropped/error count individual messages refused after they were dequeued; gate_closed counts those plus each dequeue round in which the gate's budget shrank the batch to zero, which is how budget-based gates (prometheus-budget/-saturation/-query) shed work before any message is dequeued.",
+		Help: "Count of gate decisions that prevented dispatch, by reason (gate_closed, quota_exhausted, dropped, error). quota_exhausted is set by a quota gate refusing an over-quota request (redis-quota in blocking mode); every other Refuse or Wait, including a saturation gate holding an overflow-classified request, is gate_closed. quota_exhausted/dropped/error count individual messages refused after they were dequeued; gate_closed counts those plus each dequeue round in which the gate's budget shrank the batch to zero, which is how budget-based gates (prometheus-budget/-saturation/-query) shed work before any message is dequeued.",
 	}, []string{LabelQueueID, LabelQueueName, LabelPoolName, LabelReason})
 	GateMetricValue = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_gate_metric_value",

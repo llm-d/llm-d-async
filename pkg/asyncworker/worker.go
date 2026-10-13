@@ -224,11 +224,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						}
 
 						if verdict.Action == pipeline.ActionRefuse {
-							reason := metrics.ReasonGateClosed
-							if msg.GetClassification() == asyncapi.ClassificationOverflow {
-								reason = metrics.ReasonQuotaExhausted
-							}
-							metrics.RecordGateDecision(reason, "", "", msg.WorkerPoolID)
+							metrics.RecordGateDecision(gateDecisionReason(verdict), "", "", msg.WorkerPoolID)
 							select {
 							case retryChannel <- pipeline.RetryMessage{
 								EmbelishedRequestMessage: msg,
@@ -242,11 +238,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						// ActionWait: park/wait and retry in-memory
 						if verdict.Action == pipeline.ActionWait {
 							if !waitRecorded {
-								reason := metrics.ReasonGateClosed
-								if msg.GetClassification() == asyncapi.ClassificationOverflow {
-									reason = metrics.ReasonQuotaExhausted
-								}
-								metrics.RecordGateDecision(reason, "", "", msg.WorkerPoolID)
+								metrics.RecordGateDecision(gateDecisionReason(verdict), "", "", msg.WorkerPoolID)
 								waitRecorded = true
 							}
 							if !gateWaiting {
@@ -741,4 +733,15 @@ func payloadModel(payload json.RawMessage) string {
 		return ""
 	}
 	return p.Model
+}
+
+// gateDecisionReason maps a Refuse or Wait verdict to the reason label of
+// async_gate_decisions_total: the reason the gate set, or gate_closed when the
+// gate did not say. The message's classification plays no part: an overflow
+// request refused by a saturation gate is a closed gate, not an exhausted quota.
+func gateDecisionReason(verdict pipeline.Verdict) string {
+	if verdict.Reason != "" {
+		return verdict.Reason
+	}
+	return metrics.ReasonGateClosed
 }

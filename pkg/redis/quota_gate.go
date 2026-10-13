@@ -8,6 +8,7 @@ import (
 
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -91,7 +92,7 @@ func (g *RedisQuotaGate) Apply(ctx context.Context, msg *api.InternalRequest, re
 	if g.gatingMode == GatingModeBlocking {
 		if classification != api.ClassificationReserved {
 			msg.SetClassification(classification)
-			return pipeline.Refuse(), nil
+			return pipeline.Refuse().WithReason(metrics.ReasonQuotaExhausted), nil
 		}
 	}
 

@@ -682,9 +682,9 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		}
 
 		if verdict.Action == pipeline.ActionRefuse {
-			reason := metrics.ReasonGateClosed
-			if ir.GetClassification() == api.ClassificationOverflow {
-				reason = metrics.ReasonQuotaExhausted
+			reason := verdict.Reason
+			if reason == "" {
+				reason = metrics.ReasonGateClosed
 			}
 			metrics.RecordGateDecision(reason, "", subscriberID, poolID)
 			logger.V(logutil.DEBUG).Info("Quota exceeded or capacity full, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)

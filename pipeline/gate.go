@@ -24,6 +24,17 @@ const (
 type Verdict struct {
 	Action VerdictAction
 	Result *api.ResultMessage
+	// Reason names why a Refuse or Wait verdict was issued and becomes the
+	// reason label of async_gate_decisions_total. Gates that leave it empty
+	// are recorded as gate_closed; a quota gate that refuses an over-quota
+	// request sets quota_exhausted. Wrapping gates pass it through.
+	Reason string
+}
+
+// WithReason returns a copy of the verdict carrying the given reason.
+func (v Verdict) WithReason(reason string) Verdict {
+	v.Reason = reason
+	return v
 }
 
 // Continue returns a verdict to proceed.

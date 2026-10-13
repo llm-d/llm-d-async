@@ -28,6 +28,18 @@ func TestWaitOnRefuseGate_Apply(t *testing.T) {
 		assert.Equal(t, pipeline.ActionWait, res.Action)
 	})
 
+	t.Run("Keeps the inner gate's reason", func(t *testing.T) {
+		inner := &mockGate{verdict: pipeline.Refuse().WithReason("quota_exhausted")}
+		gate := NewWaitOnRefuseGate(inner)
+
+		msg := api.NewInternalRequest(api.InternalRouting{}, &api.RequestMessage{ID: "req"})
+		var releases []pipeline.GateReleaseFunc
+		res, err := gate.Apply(context.Background(), msg, &releases)
+		assert.NoError(t, err)
+		assert.Equal(t, pipeline.ActionWait, res.Action)
+		assert.Equal(t, "quota_exhausted", res.Reason)
+	})
+
 	t.Run("Keep Continue", func(t *testing.T) {
 		inner := &mockGate{verdict: pipeline.Continue()}
 		gate := NewWaitOnRefuseGate(inner)
