@@ -30,6 +30,22 @@ The transport (message queue) is selected with `--transport` and configured with
 
 Queue hot reload is enabled with `--transport redis-sortedset --transport-config-file FILE --transport-config-watch-interval INTERVAL`. Only `queues` may change; URL, retry/result queue names, polling, batch, tracing, and any other transport fields are rejected until restart. An empty `queues` array drains all queues, and queues may be added again by a later reload. Inline `--transport-config` and deprecated per-backend queue configuration do not support hot reload.
 
+**`sql`:**
+```json
+{
+  "url": "postgres://user:pass@host:5432/db?sslmode=disable",
+  "result_queue_name": "result-sql",
+  "poll_interval_ms": 1000,
+  "batch_size": 10,
+  "result_batch_size": 32,
+  "lease_ttl_seconds": 30,
+  "handoff_timeout_seconds": 900,
+  "queues": [ { "queue_name": "request-sql", "igw_base_url": "http://localhost:30800", "gate_type": "constant", "gate_params": {} } ]
+}
+```
+
+The `sql` transport stores requests, results, and partition leases in tables it creates on startup (`async_requests`, `async_results`, `async_partitions`, `async_dispatchers`, and the `async_quota_*` tables behind `sql-quota`). Each request hashes by ID into one of 64 partitions per queue, and processors sharing a database split the partitions evenly between them, so they never contend for the same requests. Each processor dispatches earliest-deadline-first from its own partitions. When a processor joins or stops, the partitions it gives up stop taking new work and move once their in-flight requests finish, so a rolling restart redelivers nothing. If a processor dies, its partitions move after `lease_ttl_seconds` and the new owner redelivers whatever it had in flight. A processor that is alive but not dispatching (its gate closed, its workers stuck) keeps its partitions, so requests hashed to them wait even when peers are idle. `url` accepts `postgres://` (via pgx). Producers use the `producer-sql` module against the same database and can submit a batch of requests in one transaction with `SubmitRequests`.
+
 **`gcp-pubsub`:**
 ```json
 {
@@ -48,12 +64,21 @@ Queue hot reload is enabled with `--transport redis-sortedset --transport-config
 | `mode` | redis-* | `standalone` | Redis topology: `standalone`, `cluster` or `sentinel`. See [Redis Cluster and Sentinel](#redis-cluster-and-sentinel). |
 | `addrs` | redis-* | — | Additional cluster seed nodes or sentinel addresses (`host:port`) beyond the host in `url`. Only valid with `mode: cluster` or `mode: sentinel`. |
 | `master_name` | redis-* | — | Sentinel-monitored master name. Required with `mode: sentinel`. |
+| `url` | sql | — | Postgres DSN: `postgres://user:pass@host:port/db`. `SQL_URL` in the environment overrides it. Required (one of the two). |
 | `retry_queue_name` | redis-* | `retry-sortedset` | Sorted set used for retry scheduling. |
 | `result_queue_name` | redis-pubsub | `result-queue` | Channel for results. |
 | `result_queue_name` | redis-sortedset | `result-list` | List for results. |
-| `poll_interval_ms` | redis-sortedset | `1000` | Poll interval in milliseconds. |
-| `batch_size` | redis-sortedset, gcp-pubsub | `10` | Messages per poll (sortedset) / inflight messages (Pub/Sub). |
+| `result_queue_name` | sql | `result-sql` | Default result route. |
+| `result_batch_size` | sql | `32` | Most results written per transaction. If a write fails after retries, up to this many requests are redelivered and run inference again; lower values bound that cost at some throughput. |
+| `cancel_check_batch_size` | sql | `256` | Most cancellation checks coalesced into one query. Workers check before sending each request and about once a second while it executes; batching keeps these checks off the per-request round-trip path. Size it near the worker count. |
+| `cancel_check_linger_ms` | sql | `5` | How long a partial batch of cancellation checks waits for more before querying. |
+| `max_connections` | sql | `32` | Most Postgres connections the processor opens; it keeps that many idle so bursts reuse them instead of starting a new backend per statement. Budget this times the processor count against the server's `max_connections`. |
+| `lease_ttl_seconds` | sql | `30` | How long a processor that stopped heartbeating keeps its partitions before peers take them over and redeliver its in-flight requests. |
+| `handoff_timeout_seconds` | sql | `900` | How long a processor handing partitions to a peer waits for its in-flight requests before the peer redelivers them. Set above the longest a worker can hold a request (gate wait plus `request-timeout`). |
+| `poll_interval_ms` | redis-sortedset, sql | `1000` | Poll interval in milliseconds. |
+| `batch_size` | redis-sortedset, sql, gcp-pubsub | `10` | Messages per poll (sortedset, sql) / inflight messages (Pub/Sub). |
 | `enable_tracing` | redis-* | `false` | Per-command Redis tracing spans via `redisotel`. High span volume — debugging only. |
+| `enable_tracing` | sql | `false` | Per-statement Postgres tracing spans via `otelpgx`. High span volume, debugging only. |
 | `project_id` | gcp-pubsub | — | GCP project ID (required). |
 | `result_topic_id` | gcp-pubsub | — | Default results topic ID. Required unless every topic entry sets its own `result_topic_id`. |
 | `queues` / `topics` | all | — | Array of queue/topic entries (at least one required). See below. |
@@ -86,7 +111,7 @@ Each entry in `queues`/`topics` describes one request source and where its reque
 | `worker_pool_id` | no | `default` | The worker pool to route to (defined in the [worker pools configuration](deployment.md#worker-pools-configuration)). |
 | `labels` | no | — | Key-value string pairs injected as routing metadata (`Labels`) into the internal request envelope at ingestion/pull time. Used e.g. for the `tier` label. |
 
-**Gate fields (`redis-sortedset` and `gcp-pubsub` only):**
+**Gate fields (`redis-sortedset`, `sql`, and `gcp-pubsub` only):**
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -95,7 +120,7 @@ Each entry in `queues`/`topics` describes one request source and where its reque
 
 > **Note:** The ephemeral `redis-pubsub` transport does not support per-queue dispatch gates — `gate_type`/`gate_params` on its queue entries are ignored. Use `redis-sortedset` for per-queue gating.
 
-**Additional fields (`redis-sortedset` only):**
+**Additional fields (`redis-sortedset` and `sql` only):**
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
@@ -272,6 +297,12 @@ This transport does not support per-queue dispatch gates (see [Queue and Topic E
 - `redis.retry-queue-name`: The name of the channel for the retries. Default is <u>retry-sortedset</u>.
 - `redis.result-queue-name`: The name of the channel for the results. Default is <u>result-queue</u>.
 - `redis.queues-config-file`: The configuration file name when using multiple queues — a JSON array of [queue entries](#queue-and-topic-entry-fields). <br> Mutually exclusive with `redis.igw-base-url`, `redis.request-queue-name`, `redis.request-path-url` and `redis.inference-objective` flags.
+
+### SQL (Postgres)
+
+> **Experimental:** opt in with `--transport sql`. Its tables and config may change between releases without a migration or deprecation period; when a release changes the schema, drop the `async_*` tables before upgrading.
+
+A persisted implementation on Postgres, selected with `--transport sql`. It keeps the `redis-sortedset` semantics (earliest-deadline-first dispatch, fenced claims with lease-based redelivery, per-queue gates, exact backlog and deadline-proximity metrics) without a Redis dependency: several processors share one database. Producers submit with the `producer-sql` module against the same database. The `redis` and `redis-leased-rate` gate types still need Redis; use `sql-quota` in place of `redis-quota`. Every other gate type works unchanged.
 
 ### GCP Pub/Sub
 

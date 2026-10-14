@@ -81,6 +81,15 @@ Transport config JSON document passed via --transport-config. On the new surface
 it is ap.transportConfig verbatim; otherwise it is synthesized from the deprecated
 per-backend values so existing values files keep working.
 */}}
+{{- define "llm-d-async.urlEnvVar" -}}
+{{- $transport := include "llm-d-async.transport" . -}}
+{{- if hasPrefix "redis" $transport -}}
+REDIS_URL
+{{- else if eq $transport "sql" -}}
+SQL_URL
+{{- end -}}
+{{- end -}}
+
 {{- define "llm-d-async.transportConfig" -}}
 {{- if .Values.ap.transport -}}
 {{- /* urlSecret is a chart-only directive (it wires REDIS_URL from a Secret);
@@ -164,19 +173,31 @@ true
 {{- end }}
 
 {{/*
+Name of the connection Secret the chart creates from a literal URL.
+*/}}
+{{- define "llm-d-async.createdSecretName" -}}
+{{- if eq (include "llm-d-async.transport" .) "sql" -}}
+{{- printf "%s-sql" (include "llm-d-async.fullname" .) -}}
+{{- else -}}
+{{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Resolve the Redis secret name.
 If redis.url is set, the chart creates a Secret named <fullname>-redis.
 Otherwise, use the user-provided redis.secretName.
 */}}
 {{- define "llm-d-async.redisSecretName" -}}
 {{- $ts := .Values.ap.transportConfig | default dict -}}
+{{- $transport := include "llm-d-async.transport" . -}}
 {{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
-{{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
+{{- include "llm-d-async.createdSecretName" . -}}
 {{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
 {{- dig "urlSecret" "name" "" $ts -}}
-{{- else if .Values.ap.redis.url -}}
+{{- else if and (hasPrefix "redis" $transport) .Values.ap.redis.url -}}
 {{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
-{{- else -}}
+{{- else if hasPrefix "redis" $transport -}}
 {{- .Values.ap.redis.secretName -}}
 {{- end -}}
 {{- end }}
@@ -187,13 +208,14 @@ When the chart creates the Secret, the key is always "url".
 */}}
 {{- define "llm-d-async.redisSecretKey" -}}
 {{- $ts := .Values.ap.transportConfig | default dict -}}
+{{- $transport := include "llm-d-async.transport" . -}}
 {{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
 url
 {{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
 {{- dig "urlSecret" "key" "url" $ts | default "url" -}}
-{{- else if .Values.ap.redis.url -}}
+{{- else if and (hasPrefix "redis" $transport) .Values.ap.redis.url -}}
 url
-{{- else -}}
+{{- else if hasPrefix "redis" $transport -}}
 {{- .Values.ap.redis.secretKey -}}
 {{- end -}}
 {{- end }}

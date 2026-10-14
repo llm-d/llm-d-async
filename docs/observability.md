@@ -34,7 +34,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `llm_d_async_async_queue_depth` | Gauge | Requests received from the broker and buffered in-process awaiting an available worker |
 | `llm_d_async_async_gate_waiting_requests` | Gauge | Requests currently held by workers waiting for the pool dispatch gate to admit them (blocked in gate-wait). |
 | `llm_d_async_async_inflight_requests` | Gauge | Requests currently being processed by workers (dispatched to inference, awaiting a response) |
-| `llm_d_async_async_broker_backlog` | Gauge | Undelivered/pending messages held by the broker queue (polled every `metrics-backlog-poll-interval`; `redis-sortedset` and `gcp-pubsub` only). A zero is trustworthy only when the matching source-availability gauge is `1`. |
+| `llm_d_async_async_broker_backlog` | Gauge | Undelivered/pending messages held by the broker queue (polled every `metrics-backlog-poll-interval`; `redis-sortedset`, `sql`, and `gcp-pubsub` only). A zero is trustworthy only when the matching source-availability gauge is `1`. |
 | `llm_d_async_async_broker_backlog_source_available` | Gauge | `1` when the most recent broker-backlog read succeeded; `0` when the source was unavailable or errored. |
 | `llm_d_async_async_pool_worker_limit` | Gauge | Configured worker concurrency limit for a pool (carries only the `pool_name` label). Compare against `llm_d_async_async_inflight_requests` to compute worker utilization. |
 
@@ -56,7 +56,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 
 | Label | Description |
 |-------|-------------|
-| `queue_id` | Queue identifier. For `redis-sortedset`, from the queue config `id` field (defaults to the queue name); other transports use the queue name / subscriber ID. |
+| `queue_id` | Queue identifier. For `redis-sortedset` and `sql`, from the queue config `id` field (defaults to the queue name); other transports use the queue name / subscriber ID. |
 | `queue_name` | Logical queue name (Redis sorted set name, channel name, or Pub/Sub subscriber ID) |
 | `pool_name` | Async worker pool that owns the series; it never identifies the InferencePool queried by a gate |
 | `reason` | Gate-decision reason (only on `async_gate_decisions_total`): `gate_closed`, `quota_exhausted`, `dropped`, `error` |

@@ -65,7 +65,7 @@ Short orientation topics. Each links to the full reference section further down.
 
 ### Transports
 
-The transport is the message queue backend the processor pulls requests from and writes results to. Three implementations are available: `redis-pubsub` (ephemeral Redis channels — **deprecated**, prefer `redis-sortedset`), `redis-sortedset` (persisted, priority-sorted Redis — recommended for production), and `gcp-pubsub` (GCP Pub/Sub). The transport is selected with `--transport` and configured with a single JSON document. Redis-protocol-compatible backends such as Valkey work unchanged (see [Backend Compatibility](docs/transports.md#backend-compatibility)). → [Transport Configuration](docs/transports.md#transport-configuration)
+The transport is the message queue backend the processor pulls requests from and writes results to. Four implementations are available: `redis-pubsub` (ephemeral Redis channels — **deprecated**, prefer `redis-sortedset`), `redis-sortedset` (persisted, priority-sorted Redis — recommended for production), `gcp-pubsub` (GCP Pub/Sub), and `sql` (**experimental**; Postgres, deadline-sorted, with processors leasing hash partitions of each queue and no broker beyond the database). The transport is selected with `--transport` and configured with a single JSON document. Redis-protocol-compatible backends such as Valkey work unchanged (see [Backend Compatibility](docs/transports.md#backend-compatibility)). → [Transport Configuration](docs/transports.md#transport-configuration)
 
 ### Queues, Topics, and Worker Pools
 
@@ -100,7 +100,7 @@ flowchart TD
 
 ### Reserved and Overflow
 
-Quota gates can run in *classifying* mode: instead of blocking a message that exceeds its quota, they tag it with a classification label — `reserved` (within quota) or `overflow` (over quota). Downstream components then act on the tag: the `tier-priority` merge policy buckets reserved traffic ahead of overflow traffic, and the `tier-priority-admission` gate parks reserved requests but sheds overflow requests when the pool is saturated. A message with no classification is treated as overflow by the merge policy. The `redis-quota` gate classifies when `gating_mode` is set to `classifying`.
+Quota gates can run in *classifying* mode: instead of blocking a message that exceeds its quota, they tag it with a classification label — `reserved` (within quota) or `overflow` (over quota). Downstream components then act on the tag: the `tier-priority` merge policy buckets reserved traffic ahead of overflow traffic, and the `tier-priority-admission` gate parks reserved requests but sheds overflow requests when the pool is saturated. A message with no classification is treated as overflow by the merge policy. The `redis-quota` and `sql-quota` gates classify when `gating_mode` is set to `classifying`.
 
 ### Tiers and Priority Lanes
 
