@@ -391,90 +391,129 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 	}()
 
 	now := time.Now().Unix()
+	entries := make([]polled, len(rows))
 	for i, row := range rows {
-		stop := func() {
-			for _, r := range rows[i:] {
-				undispatch = append(undispatch, r.Stamp())
-			}
-		}
+		entries[i] = polled{row: row}
 		ir, ok := parseRequest(row, logger)
 		if !ok {
-			ir = &api.InternalRequest{PublicRequest: &api.RequestMessage{ID: row.ID}}
-			ir.RequestToken = row.Token
-			ir.DispatchAttempt = row.Attempt
-			f.stampRouting(ir, cfg)
-			if !f.emit(ctx, api.NewErrorResult(ir.PublicRequest, ir.InternalRouting, api.ErrCodeInvalidRequest, "unparsable queued request")) {
-				stop()
-				return
-			}
 			continue
 		}
 		ir.DispatchAttempt = row.Attempt
 		f.stampRouting(ir, cfg)
-		reqID := ir.PublicRequest.ReqID()
-
+		entries[i].ir = ir
 		if row.Deadline < now {
-			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", reqID)
-			metrics.RecordExceededDeadlineReq(cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
-			if !f.emit(ctx, api.NewDeadlineExceededResult(ir.PublicRequest, ir.InternalRouting)) {
-				stop()
-				return
-			}
+			entries[i].expired = true
 			continue
 		}
 		if row.Cancelled {
-			if !f.emit(ctx, api.NewCancelledResult(ir.PublicRequest, ir.InternalRouting)) {
-				stop()
-				return
-			}
 			continue
 		}
+		gated := make(chan gateOutcome, 1)
+		entries[i].gated = gated
+		go func() {
+			var out gateOutcome
+			out.verdict, out.err = q.gate.Apply(ctx, ir, &out.releases)
+			gated <- out
+		}()
+	}
 
-		var releases []pipeline.GateReleaseFunc
-		verdict, err := q.gate.Apply(ctx, ir, &releases)
-		if err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
-			metrics.RecordGateDecision(metrics.ReasonError, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
-			pipeline.ReleaseGateReleases(releases)
-			undispatch = append(undispatch, row.Stamp())
-			continue
-		}
-		switch verdict.Action {
-		case pipeline.ActionRefuse:
-			reason := verdict.Reason
-			if reason == "" {
-				reason = metrics.ReasonGateClosed
+	for i, e := range entries {
+		if !f.dispatchPolled(ctx, q, e, &undispatch, logger) {
+			for _, rest := range entries[i+1:] {
+				if rest.gated != nil {
+					pipeline.ReleaseGateReleases((<-rest.gated).releases)
+				}
+				undispatch = append(undispatch, rest.row.Stamp())
 			}
-			metrics.RecordGateDecision(reason, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
-			pipeline.ReleaseGateReleases(releases)
-			undispatch = append(undispatch, row.Stamp())
-			continue
-		case pipeline.ActionDrop:
-			metrics.RecordGateDecision(metrics.ReasonDropped, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
-			result := api.NewGateDroppedResult(ir.PublicRequest, ir.InternalRouting)
-			if verdict.Result != nil {
-				result = *verdict.Result
-				result.Routing = ir.InternalRouting
-			}
-			pipeline.ReleaseGateReleases(releases)
-			if !f.emit(ctx, result) {
-				stop()
-				return
-			}
-			continue
-		}
-
-		if len(releases) > 0 {
-			f.trackGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Attempt: ir.DispatchAttempt}, releases)
-		}
-		ir.IngestionTime = time.Now()
-		select {
-		case q.channel.Channel <- ir:
-		case <-ctx.Done():
-			f.releaseGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Attempt: ir.DispatchAttempt})
-			stop()
 			return
 		}
+	}
+}
+
+type polled struct {
+	row sqlqueue.Request
+	// ir is nil when the queued request does not parse.
+	ir      *api.InternalRequest
+	expired bool
+	// gated is nil when the request terminates without reaching the gate.
+	gated <-chan gateOutcome
+}
+
+type gateOutcome struct {
+	verdict  pipeline.Verdict
+	releases []pipeline.GateReleaseFunc
+	err      error
+}
+
+// dispatchPolled returns false when ctx ended first; e is then queued for undispatch.
+func (f *Flow) dispatchPolled(ctx context.Context, q *queueRuntime, e polled, undispatch *[]sqlqueue.Stamp, logger logr.Logger) bool {
+	cfg := q.config
+	row, ir := e.row, e.ir
+	emit := func(result api.ResultMessage) bool {
+		if f.emit(ctx, result) {
+			return true
+		}
+		*undispatch = append(*undispatch, row.Stamp())
+		return false
+	}
+	if ir == nil {
+		ir = &api.InternalRequest{PublicRequest: &api.RequestMessage{ID: row.ID}}
+		ir.RequestToken = row.Token
+		ir.DispatchAttempt = row.Attempt
+		f.stampRouting(ir, cfg)
+		return emit(api.NewErrorResult(ir.PublicRequest, ir.InternalRouting, api.ErrCodeInvalidRequest, "unparsable queued request"))
+	}
+	reqID := ir.PublicRequest.ReqID()
+	if e.expired {
+		logger.V(logutil.DEFAULT).Info("Deadline expired", "id", reqID)
+		metrics.RecordExceededDeadlineReq(cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
+		return emit(api.NewDeadlineExceededResult(ir.PublicRequest, ir.InternalRouting))
+	}
+	if e.gated == nil {
+		return emit(api.NewCancelledResult(ir.PublicRequest, ir.InternalRouting))
+	}
+
+	out := <-e.gated
+	if out.err != nil {
+		logger.V(logutil.DEFAULT).Error(out.err, "Gating failed")
+		metrics.RecordGateDecision(metrics.ReasonError, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
+		pipeline.ReleaseGateReleases(out.releases)
+		*undispatch = append(*undispatch, row.Stamp())
+		return true
+	}
+	switch out.verdict.Action {
+	case pipeline.ActionRefuse:
+		reason := out.verdict.Reason
+		if reason == "" {
+			reason = metrics.ReasonGateClosed
+		}
+		metrics.RecordGateDecision(reason, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
+		pipeline.ReleaseGateReleases(out.releases)
+		*undispatch = append(*undispatch, row.Stamp())
+		return true
+	case pipeline.ActionDrop:
+		metrics.RecordGateDecision(metrics.ReasonDropped, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
+		result := api.NewGateDroppedResult(ir.PublicRequest, ir.InternalRouting)
+		if out.verdict.Result != nil {
+			result = *out.verdict.Result
+			result.Routing = ir.InternalRouting
+		}
+		pipeline.ReleaseGateReleases(out.releases)
+		return emit(result)
+	}
+
+	stamp := sqlqueue.Stamp{Key: sqlqueue.Key{ID: reqID, Token: ir.RequestToken}, Attempt: ir.DispatchAttempt}
+	if len(out.releases) > 0 {
+		f.trackGateReleases(stamp, out.releases)
+	}
+	ir.IngestionTime = time.Now()
+	select {
+	case q.channel.Channel <- ir:
+		return true
+	case <-ctx.Done():
+		f.releaseGateReleases(stamp)
+		*undispatch = append(*undispatch, row.Stamp())
+		return false
 	}
 }
 

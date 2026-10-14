@@ -12,6 +12,7 @@ import (
 	"github.com/go-logr/logr/testr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -130,4 +131,80 @@ func TestRefusalIsLabelledByTheGatesReason(t *testing.T) {
 			}
 		})
 	}
+}
+
+func quotaGatedFlow(t *testing.T, rows, limit int) (*Flow, *queueRuntime, *sqlqueue.Store) {
+	t.Helper()
+	store := cancelTestStore(t)
+	ctx := context.Background()
+	f, err := NewWithStore(ctx, store, Config{BatchSize: rows, Queues: []QueueConfig{{ID: "q", QueueName: "q", WorkerPoolID: "default"}}}, []pipeline.WorkerPoolConfig{{ID: "default"}}, nil)
+	require.NoError(t, err)
+	t.Cleanup(f.cancelChecks.stop)
+	t.Cleanup(f.quota.Close)
+	q := f.queues[0]
+	q.gate = flowcontrol.NewQuotaGate(f.quota, "userid", flowcontrol.QuotaModeConcurrency, limit, time.Minute, "quota:")
+	f.rebalance(ctx)
+
+	deadline := time.Now().Add(time.Hour).Unix()
+	reqs := make([]sqlqueue.Request, 0, rows)
+	for i := range rows {
+		id := fmt.Sprintf("r%02d", i)
+		envelope, payload, err := api.SplitPayload(api.NewInternalRequest(api.InternalRouting{RequestToken: "t"},
+			&api.RequestMessage{ID: id, Deadline: deadline, Payload: []byte("{}"), Metadata: map[string]string{"userid": "alice"}}))
+		require.NoError(t, err)
+		reqs = append(reqs, sqlqueue.Request{ID: id, Token: "t", Queue: "q", Deadline: deadline, Envelope: string(envelope), Payload: payload})
+	}
+	require.NoError(t, store.Enqueue(ctx, reqs...))
+	return f, q, store
+}
+
+func TestQueueGateCountsAPollInFewStatements(t *testing.T) {
+	const rows, limit = 64, 10
+	f, q, store := quotaGatedFlow(t, rows, limit)
+	ctx := context.Background()
+	refused := func() float64 {
+		return testutil.ToFloat64(metrics.GateDecisions.WithLabelValues("q", "q", "default", metrics.ReasonQuotaExhausted))
+	}
+	before := refused()
+
+	var dispatched []string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ir := range q.channel.Channel {
+			dispatched = append(dispatched, ir.PublicRequest.ReqID())
+		}
+	}()
+	f.processQueue(ctx, q, testr.New(t))
+	close(q.channel.Channel)
+	<-done
+
+	assert.LessOrEqual(t, f.quota.slots.statements.Load(), int64(rows/4), "one poll shares statements per key instead of one per request")
+	assert.Len(t, dispatched, limit, "exactly the limit is admitted")
+	assert.Equal(t, float64(rows-limit), refused()-before)
+	depth, _, err := store.Backlog(ctx, "q", time.Now().Unix(), nil)
+	require.NoError(t, err)
+	assert.EqualValues(t, rows-limit, depth, "refused requests are pending again")
+}
+
+func TestCancelledPollReturnsEveryRowAndSlot(t *testing.T) {
+	const rows, limit = 16, 4
+	f, q, store := quotaGatedFlow(t, rows, limit)
+	ctx, cancel := context.WithCancel(context.Background())
+	db := quotaDB(t)
+
+	handed := make(chan *api.InternalRequest, 1)
+	go func() {
+		handed <- <-q.channel.Channel
+		cancel()
+	}()
+	f.processQueue(ctx, q, testr.New(t))
+	ir := <-handed
+
+	depth, _, err := store.Backlog(context.Background(), "q", time.Now().Unix(), nil)
+	require.NoError(t, err)
+	assert.EqualValues(t, rows-1, depth, "every row but the one handed to a worker is pending again")
+	eventuallySlots(t, db, "quota:userid:alice", 1)
+	f.releaseGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: ir.PublicRequest.ReqID(), Token: ir.RequestToken}, Attempt: ir.DispatchAttempt})
+	eventuallySlots(t, db, "quota:userid:alice", 0)
 }
