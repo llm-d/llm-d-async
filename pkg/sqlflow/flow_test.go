@@ -3,13 +3,18 @@ package sqlflow
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/testr"
+	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,4 +71,63 @@ func TestRebalanceRunsQueuesConcurrently(t *testing.T) {
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed, f.storeTimeout(), "every queue waits on the lock until its store timeout")
 	assert.Less(t, elapsed, 2*f.storeTimeout(), "queues share one heartbeat pass instead of queuing behind each other")
+}
+
+type refusingGate struct{ reason string }
+
+func (g refusingGate) Budget(context.Context) float64 { return 1 }
+
+func (g refusingGate) Apply(_ context.Context, msg *api.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	msg.SetClassification(api.ClassificationOverflow)
+	return pipeline.Refuse().WithReason(g.reason), nil
+}
+
+func TestRefusalIsLabelledByTheGatesReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		want   string
+	}{
+		{name: "overflow refused by a later gate", reason: "", want: metrics.ReasonGateClosed},
+		{name: "quota refusal", reason: metrics.ReasonQuotaExhausted, want: metrics.ReasonQuotaExhausted},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := cancelTestStore(t)
+			ctx := context.Background()
+			queue := fmt.Sprintf("refuse-%d", i)
+			f, err := NewWithStore(ctx, store, Config{Queues: []QueueConfig{{ID: queue, QueueName: queue, WorkerPoolID: "default"}}}, []pipeline.WorkerPoolConfig{{ID: "default"}}, nil)
+			require.NoError(t, err)
+			t.Cleanup(f.cancelChecks.stop)
+			t.Cleanup(f.quota.Close)
+			q := f.queues[0]
+			q.gate = refusingGate{reason: tc.reason}
+			f.rebalance(ctx)
+
+			deadline := time.Now().Add(time.Hour).Unix()
+			envelope, payload, err := api.SplitPayload(api.NewInternalRequest(api.InternalRouting{RequestToken: "t1"},
+				&api.RequestMessage{ID: "r1", Deadline: deadline, Payload: []byte("{}")}))
+			require.NoError(t, err)
+			require.NoError(t, store.Enqueue(ctx, sqlqueue.Request{
+				ID: "r1", Token: "t1", Queue: queue, Deadline: deadline, Envelope: string(envelope), Payload: payload,
+			}))
+			counted := func(reason string) float64 {
+				return testutil.ToFloat64(metrics.GateDecisions.WithLabelValues(queue, queue, "default", reason))
+			}
+			reasons := []string{metrics.ReasonGateClosed, metrics.ReasonQuotaExhausted}
+			before := map[string]float64{}
+			for _, r := range reasons {
+				before[r] = counted(r)
+			}
+			f.processQueue(ctx, q, testr.New(t))
+
+			for _, r := range reasons {
+				want := 0.0
+				if r == tc.want {
+					want = 1
+				}
+				assert.Equal(t, want, counted(r)-before[r], "refusals counted under %s", r)
+			}
+		})
+	}
 }
