@@ -541,6 +541,6 @@ tests:
             name: SQL_URL
             valueFrom:
               secretKeyRef:
-                name: RELEASE-NAME-llm-d-async-redis
+                name: RELEASE-NAME-llm-d-async-sql
                 key: url
           any: true
