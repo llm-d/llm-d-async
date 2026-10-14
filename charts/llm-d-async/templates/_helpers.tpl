@@ -173,6 +173,17 @@ true
 {{- end }}
 
 {{/*
+Name of the connection Secret the chart creates from a literal URL.
+*/}}
+{{- define "llm-d-async.createdSecretName" -}}
+{{- if eq (include "llm-d-async.transport" .) "sql" -}}
+{{- printf "%s-sql" (include "llm-d-async.fullname" .) -}}
+{{- else -}}
+{{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Resolve the Redis secret name.
 If redis.url is set, the chart creates a Secret named <fullname>-redis.
 Otherwise, use the user-provided redis.secretName.
@@ -181,7 +192,7 @@ Otherwise, use the user-provided redis.secretName.
 {{- $ts := .Values.ap.transportConfig | default dict -}}
 {{- $transport := include "llm-d-async.transport" . -}}
 {{- if and .Values.ap.transport (dig "urlSecret" "url" "" $ts) -}}
-{{- printf "%s-redis" (include "llm-d-async.fullname" .) -}}
+{{- include "llm-d-async.createdSecretName" . -}}
 {{- else if and .Values.ap.transport (dig "urlSecret" "name" "" $ts) -}}
 {{- dig "urlSecret" "name" "" $ts -}}
 {{- else if and (hasPrefix "redis" $transport) .Values.ap.redis.url -}}
