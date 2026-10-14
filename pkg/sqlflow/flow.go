@@ -441,9 +441,9 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 		}
 		switch verdict.Action {
 		case pipeline.ActionRefuse:
-			reason := metrics.ReasonGateClosed
-			if ir.GetClassification() == api.ClassificationOverflow {
-				reason = metrics.ReasonQuotaExhausted
+			reason := verdict.Reason
+			if reason == "" {
+				reason = metrics.ReasonGateClosed
 			}
 			metrics.RecordGateDecision(reason, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
 			pipeline.ReleaseGateReleases(releases)
