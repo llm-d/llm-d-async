@@ -64,7 +64,7 @@ The `sql` transport stores requests, results, and partition leases in tables it 
 | `mode` | redis-* | `standalone` | Redis topology: `standalone`, `cluster` or `sentinel`. See [Redis Cluster and Sentinel](#redis-cluster-and-sentinel). |
 | `addrs` | redis-* | — | Additional cluster seed nodes or sentinel addresses (`host:port`) beyond the host in `url`. Only valid with `mode: cluster` or `mode: sentinel`. |
 | `master_name` | redis-* | — | Sentinel-monitored master name. Required with `mode: sentinel`. |
-| `url` | sql | — | Postgres DSN: `postgres://user:pass@host:port/db`. `SQL_URL` in the environment overrides it. Required (one of the two). |
+| `url` | sql | — | Postgres DSN: `postgres://user:pass@host:port/db`. An explicit `url` takes precedence; `SQL_URL` fills it in only when empty. Required (one of the two). |
 | `retry_queue_name` | redis-* | `retry-sortedset` | Sorted set used for retry scheduling. |
 | `result_queue_name` | redis-pubsub | `result-queue` | Channel for results. |
 | `result_queue_name` | redis-sortedset | `result-list` | List for results. |

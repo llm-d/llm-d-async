@@ -42,8 +42,8 @@ func LoadConfig(data []byte) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse sql transport config: %w", err)
 	}
-	if v := os.Getenv("SQL_URL"); v != "" {
-		cfg.URL = v
+	if cfg.URL == "" {
+		cfg.URL = os.Getenv("SQL_URL")
 	}
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {

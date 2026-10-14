@@ -27,9 +27,16 @@ func TestLoadConfigAppliesDefaults(t *testing.T) {
 	assert.Equal(t, "/v1/completions", cfg.Queues[0].RequestPathURL)
 }
 
-func TestLoadConfigEnvOverridesURL(t *testing.T) {
+func TestLoadConfigURLTakesPrecedenceOverEnv(t *testing.T) {
 	t.Setenv("SQL_URL", "postgres://env@host/db")
 	cfg, err := LoadConfig([]byte(`{"url":"postgres://u@h/db","queues":[{"queue_name":"q","igw_base_url":"http://igw"}]}`))
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://u@h/db", cfg.URL)
+}
+
+func TestLoadConfigFillsURLFromEnv(t *testing.T) {
+	t.Setenv("SQL_URL", "postgres://env@host/db")
+	cfg, err := LoadConfig([]byte(`{"queues":[{"queue_name":"q","igw_base_url":"http://igw"}]}`))
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://env@host/db", cfg.URL)
 }
