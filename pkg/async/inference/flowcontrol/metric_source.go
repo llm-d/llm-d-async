@@ -87,12 +87,18 @@ func (s *PromQLMetricSource) Expr() string {
 func (s *PromQLMetricSource) Query(ctx context.Context) ([]Sample, error) {
 	logger := log.FromContext(ctx)
 
-	result, warnings, err := s.api.Query(ctx, s.expr, time.Now())
+	// client_golang v1.25 added a fourth return value with PromQL info
+	// annotations; they are advisory, so they are logged like warnings but
+	// at debug level.
+	result, warnings, infos, err := s.api.Query(ctx, s.expr, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("error querying Prometheus: %w", err)
 	}
 	if len(warnings) > 0 {
 		logger.V(logutil.DEFAULT).Info("Prometheus query returned warnings", "warnings", warnings)
+	}
+	if len(infos) > 0 {
+		logger.V(logutil.DEBUG).Info("Prometheus query returned infos", "infos", infos)
 	}
 
 	vec, ok := result.(model.Vector)
