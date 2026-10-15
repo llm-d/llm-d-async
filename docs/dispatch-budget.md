@@ -49,7 +49,19 @@ When capacity is measured in requests, a natural estimate for $\mathrm{max}\_\ma
 
 $$\mathrm{max}\_\mathrm{SYS} = \texttt{ready\\_model\\_servers} \times \texttt{max\\_concurrency}$$
 
-where `ready_model_servers` is the number of ready endpoints in the inference pool (available as the `llm_d_epp_ready_endpoints` metric) and `max_concurrency` is the per-endpoint request capacity, corresponding to the [`MaxConcurrency` config value in the inference scheduler's saturation detector (default 100)](https://github.com/llm-d/llm-d-inference-scheduler/blob/b9f77ee9/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go#L32-L58). The number of dispatchable requests is then:
+where `ready_model_servers` is the number of ready endpoints in the inference pool (available as the `llm_d_epp_ready_endpoints` metric) and `max_concurrency` is the per-endpoint request capacity, corresponding to the [`MaxConcurrency` config value in the inference scheduler's saturation detector (default 100)](https://github.com/llm-d/llm-d-inference-scheduler/blob/b9f77ee9/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go#L32-L58).
+
+When several EPP replicas report this pool metric, the budget queries use `max`
+to obtain one endpoint count for the pool, rather than summing repeated capacity reports.
+If reports temporarily disagree, this retains the largest observed capacity; `min` would
+instead use the smallest report. Readiness reconciliation is separate from replica deduplication.
+
+Set the `namespace` gate parameter when pool names are shared across namespaces. Without
+it, each source returns no samples if its metric selectors match more than one namespace,
+so the cascade tries the next source and ultimately uses the configured fallback if none
+resolve. Load and capacity are never intentionally combined across different pools.
+
+The number of dispatchable requests is then:
 
 $$N = \mathrm{max}\_\mathrm{SYS} \times (D-B) = \texttt{ready\\_model\\_servers} \times \texttt{max\\_concurrency} \times (D-B) $$
 

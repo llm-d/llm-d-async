@@ -137,10 +137,12 @@ Verify EPP metrics are flowing into Prometheus:
 
 ```bash
 kubectl run --rm -i prom-check --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
-    curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=llm_d_epp_ready_endpoints"
+    curl -s --data-urlencode \
+    "query=llm_d_epp_ready_endpoints{name=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}" \
+    'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 ```
 
-Expected: `llm_d_epp_ready_endpoints{name="optimized-baseline"} = 1`
+Expected: one `llm_d_epp_ready_endpoints` series per scraped EPP replica, each reporting `1` ready model server for this guide.
 
 ## Step 8: Install Redis (or Valkey)
 
@@ -165,6 +167,7 @@ helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled
 ```bash
 helm install llm-d-async ${ASYNC_REPO}/charts/llm-d-async/ \
     -f ${ASYNC_REPO}/docs/guides/e2e-deploy/llm-d-async-values.yaml \
+    --set-string "ap.transportConfig.queues[0].gate_params.namespace=${NAMESPACE}" \
     -n ${NAMESPACE}
 ```
 
@@ -175,16 +178,18 @@ The values file (`docs/guides/e2e-deploy/llm-d-async-values.yaml`) configures:
   injects it as `REDIS_URL` (kept out of the pod args). This dev Redis is unauthenticated;
   for a **credentialed or production** Redis, reference an existing Secret instead with
   `ap.transportConfig.urlSecret: {name: <secret>, key: url}`
-- Gate: `prometheus-budget` with pool=`optimized-baseline`, max_concurrency=100, baseline=0.05 (per-queue).
+- Gate: `prometheus-budget` with pool=`optimized-baseline`, namespace=`${NAMESPACE}`, max_concurrency=100, baseline=0.05 (per-queue).
   `max_concurrency` is a **per ready pod** capacity — see [Size `max_concurrency` for your pool](#size-max_concurrency-for-your-pool)
   before reusing this value on your own model
 - Prometheus URL pointing to the cluster's `llmd-kube-prometheus-stack-prometheus` service
 
 > **Multi-namespace deployments:** If the cluster has multiple inference pools
 > with the same name in different namespaces, the `prometheus-budget` and
-> `prometheus-saturation` gate queries may match multiple time series and fail
-> with many-to-many matching errors. Add `namespace` to `gate_params` to scope
-> the queries:
+> `prometheus-saturation` gates need an explicit namespace to identify the pool.
+> Unscoped `prometheus-budget` sources return no samples when their metrics match
+> multiple namespaces; if no source resolves, the configured fallback applies
+> (default `0`). The install command above scopes the gate to `${NAMESPACE}`.
+> For a pool in a different namespace, set `namespace` in `gate_params`:
 > ```yaml
 > gate_params:
 >   pool: "optimized-baseline"
@@ -238,7 +243,7 @@ saturated and read the per-pod peak:
 ```bash
 kubectl run --rm -i prom-peak --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=max_over_time((sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() llm_d_epp_ready_endpoints{name="optimized-baseline"})[1h:])' \
+    "query=max_over_time((sum(vllm:num_requests_running{inference_pool=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) / on() max(llm_d_epp_ready_endpoints{name=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}))[1h:])" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 ```
 
@@ -268,14 +273,16 @@ kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=llm-d-async --tail=20
 ```bash
 # EPP metrics in Prometheus
 kubectl run --rm -i prom-check --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
-    curl -s "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query?query=llm_d_epp_ready_endpoints"
-# Expected: llm_d_epp_ready_endpoints{name="optimized-baseline"} = 1
+    curl -s --data-urlencode \
+    "query=llm_d_epp_ready_endpoints{name=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}" \
+    'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
+# Expected: one series per scraped EPP replica, each reporting 1 ready model server.
 
 # Wait for vLLM metrics with inference_pool label to appear (via PodMonitor relabeling).
 # The entire process might take a couple of minutes.
 echo "Waiting for vLLM metrics with inference_pool label..."
 until kubectl run --rm -i prom-wait-$RANDOM --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
-    curl -sf --data-urlencode 'query=count(vllm:num_requests_running{inference_pool="optimized-baseline"})' \
+    curl -sf --data-urlencode "query=count(vllm:num_requests_running{inference_pool=\"optimized-baseline\",namespace=\"${NAMESPACE}\"})" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query' \
     | grep -q '"result":\[{"metric"'; do
   echo "  not yet, retrying in 10s..."
@@ -288,14 +295,14 @@ echo "vLLM metrics available."
 # nothing, and source 0 needs EPP's flow control plugin.
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (avg by(name)(llm_d_epp_per_endpoint_queue_size{name="optimized-baseline"}) / 100)' \
+    "query=1 - (avg by(name)(llm_d_epp_per_endpoint_queue_size{name=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) / 100)" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = 1
 
 # The vLLM fallback (source 2), which needs the relabeled inference_pool label
 kubectl run --rm -i prom-budget-vllm --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
+    "query=1 - (sum(vllm:num_requests_running{inference_pool=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) / on() (max(llm_d_epp_ready_endpoints{name=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) * 100))" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = 1
 ```
@@ -414,14 +421,14 @@ kubectl apply -n ${NAMESPACE} -f ${ASYNC_REPO}/docs/guides/e2e-deploy/hey-loadte
 sleep 20
 kubectl run --rm -i prom-running --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=vllm:num_requests_running{inference_pool="optimized-baseline"}' \
+    "query=vllm:num_requests_running{inference_pool=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: vllm:num_requests_running = 200 (saturated)
 
 # Verify budget is negative (gate closed)
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
+    "query=1 - (sum(vllm:num_requests_running{inference_pool=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) / on() (max(llm_d_epp_ready_endpoints{name=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) * 100))" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value = -1 (200 running / 100 max = 200% utilization)
 
@@ -464,14 +471,14 @@ kubectl wait --for=condition=Ready pod -l job-name=guidellm-loadtest -n ${NAMESP
 sleep 30
 kubectl run --rm -i prom-running --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=vllm:num_requests_running{inference_pool="optimized-baseline"}' \
+    "query=vllm:num_requests_running{inference_pool=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: vllm:num_requests_running ~= 110 (saturated)
 
 # Verify budget is negative (gate closed)
 kubectl run --rm -i prom-budget --image=curlimages/curl --restart=Never -n ${NAMESPACE} -- \
     curl -s --data-urlencode \
-    'query=1 - (sum(vllm:num_requests_running{inference_pool="optimized-baseline"}) / on() (llm_d_epp_ready_endpoints{name="optimized-baseline"} * 100))' \
+    "query=1 - (sum(vllm:num_requests_running{inference_pool=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) / on() (max(llm_d_epp_ready_endpoints{name=\"optimized-baseline\",namespace=\"${NAMESPACE}\"}) * 100))" \
     'http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090/api/v1/query'
 # Expected: value ~= -0.1 (gate closed)
 

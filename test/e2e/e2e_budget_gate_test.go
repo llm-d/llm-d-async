@@ -79,7 +79,7 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", ginkgo.Ordered, func(
 		// Previous tests may have left probes queued.
 		setSimWaitingRequests(simAdminURL, 0)
 		gomega.Eventually(func() bool {
-			v := queryProm(promURL, budgetPromQL)
+			v := queryProm(promURL, budgetPromQL(promURL))
 			return !math.IsNaN(v) && v > 0.5
 		}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to recover between tests")
 	})
@@ -112,7 +112,7 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", ginkgo.Ordered, func(
 		// sim fake_metrics → EPP scrapes sim → EPP detects saturation →
 		// EPP throttles flood probes → queue_size rises → Prometheus scrapes.
 		gomega.Eventually(func() bool {
-			v := queryProm(promURL, budgetPromQL)
+			v := queryProm(promURL, budgetPromQL(promURL))
 			return !math.IsNaN(v) && v < 0.05
 		}, 120*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to reach zero")
 
@@ -144,7 +144,7 @@ var _ = ginkgo.Describe("Budget Metric Dispatch Gate E2E", ginkgo.Ordered, func(
 		defer stopFlood()
 
 		gomega.Eventually(func() bool {
-			v := queryProm(promURL, budgetPromQL)
+			v := queryProm(promURL, budgetPromQL(promURL))
 			return !math.IsNaN(v) && v < 0.05
 		}, 120*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to reach zero")
 

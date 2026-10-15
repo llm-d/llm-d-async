@@ -230,7 +230,7 @@ The available gate types, at a glance:
     `llm_d_epp_ready_endpoints{name="<pool>"}` and `llm_d_epp_per_endpoint_queue_size{name="<pool>"}`
     (EPP metrics) and, for the vLLM source, the `inference_pool` label on scraped vLLM metrics
     (added via relabeling from pod labels).
-  - `namespace` (optional): Kubernetes namespace to scope metric queries. Required when multiple namespaces share the same pool name with a shared Prometheus instance.
+  - `namespace` (optional): Kubernetes namespace to scope metric queries. When omitted, each source requires its matching metrics to identify a single namespace. An ambiguous source returns no samples, so the cascade tries the next source; if none resolve, the configured `fallback` applies (default `0`). Set this explicitly when a shared Prometheus instance contains same-named pools in multiple namespaces.
   - `max_concurrency` (optional): Per-endpoint request capacity (`MaxConcurrency` in the [inference scheduler's saturation detector](https://github.com/llm-d/llm-d-inference-scheduler/blob/main/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency/config.go)). Default is `100` (matching the inference scheduler default). See [sizing `max_concurrency`](#sizing-max_concurrency) below — this is a **per-pod** number, and setting it above what a pod actually serves makes the gate inert.
   - `baseline` (optional): Reserved baseline B. The gate closes when D ≤ B. Default is `0.05`.
   - `fallback` (optional): Fallback budget value (0.0-1.0) returned when all metric sources are unavailable. Default is `0.0` (fail closed).
@@ -265,7 +265,7 @@ The available gate types, at a glance:
 
     ```promql
     max_over_time(
-      (sum(vllm:num_requests_running{inference_pool="<pool>"}) / on() llm_d_epp_ready_endpoints{name="<pool>"})[1h:]
+      (sum(vllm:num_requests_running{inference_pool="<pool>",namespace="<namespace>"}) / on() max(llm_d_epp_ready_endpoints{name="<pool>",namespace="<namespace>"}))[1h:]
     )
     ```
 

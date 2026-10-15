@@ -16,11 +16,13 @@ import (
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	promapi "github.com/prometheus/client_golang/api"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
 )
 
 const (
@@ -303,7 +305,11 @@ func queryProm(promURL, query string) float64 {
 // must match the budget processor's gate-params in llm-d-async.yaml.
 // We use max_concurrency=1 so a single queued request in EPP's admission
 // layer is enough to drive the budget to zero.
-const budgetPromQL = `1 - (sum by(inference_pool)(llm_d_epp_flow_control_queue_size{inference_pool="e2e-pool"}) / on() (llm_d_epp_ready_endpoints{name="e2e-pool"} * 1))`
+func budgetPromQL(promURL string) string {
+	source, err := flowcontrol.NewFlowControlQueueSizePromQL(promapi.Config{Address: promURL}, "e2e-pool", 1, "")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	return source.Expr()
+}
 
 // waitForBudget polls Prometheus using the same PromQL the budget gate uses.
 // It sends probe requests through Envoy to trigger EPP metric recording, then
@@ -312,7 +318,7 @@ const budgetPromQL = `1 - (sum by(inference_pool)(llm_d_epp_flow_control_queue_s
 func waitForBudget(promURL, envoyURL string, pred func(float64) bool) {
 	gomega.EventuallyWithOffset(1, func() bool {
 		sendProbeRequest(envoyURL)
-		v := queryProm(promURL, budgetPromQL)
+		v := queryProm(promURL, budgetPromQL(promURL))
 		return !math.IsNaN(v) && pred(v)
 	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to satisfy condition")
 }
