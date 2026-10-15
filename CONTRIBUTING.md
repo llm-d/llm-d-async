@@ -184,6 +184,35 @@ See [SECURITY.md](SECURITY.md) for our vulnerability disclosure process.
 
 ## API Changes and Deprecation
 
+### Versioning and compatibility
+
+Since **v1.0.0** the repository is versioned as one release across its modules, and the
+compatibility promise applies to the three library modules:
+
+| Module | Import path | Covered by the v1 promise |
+| --- | --- | --- |
+| `api` | `github.com/llm-d/llm-d-async/api` | Yes: message and result types, the `Request` interface, header and error-code constants, Redis key helpers |
+| `pipeline` | `github.com/llm-d/llm-d-async/pipeline` | Yes: the `Flow`, `Gate`, `GateFactory` and merge-policy contracts that plugins implement |
+| `producer` | `github.com/llm-d/llm-d-async/producer` | Yes: the `Producer` and `DurableResultProducer` interfaces and their Redis implementations |
+| root | `github.com/llm-d/llm-d-async` | No: this is the processor binary. Its packages under `pkg/` and `internal/` may change in any release; depend on the library modules instead |
+
+Within a major version, the library modules may add exported identifiers, optional fields and
+optional configuration, but may not remove or change the meaning of existing ones. A change that
+would break a compiled consumer or an existing configuration needs a major-version bump of the
+affected module. Adding a method to an interface that consumers implement (rather than call) counts
+as breaking.
+
+The same promise covers the operator-facing surface the binary exposes: command-line flags, the
+`--transport-config` JSON schema, the Helm chart values, Prometheus metric names and label sets, and
+the Redis key layout a running deployment depends on. Changes there follow the deprecation policy
+below rather than a module bump.
+
+All modules are tagged together from one commit (`vX.Y.Z` plus `api/vX.Y.Z`, `pipeline/vX.Y.Z`,
+`producer/vX.Y.Z`); see [Releasing](#releasing). A pre-release tag such as `v1.1.0-rc.1` carries no
+compatibility promise beyond the final it precedes.
+
+### Rules
+
 * **No breaking changes**: Once an API/protocol is in GA release, it cannot be removed or behavior changed
 * **Versioning**: All protocols and APIs should be versionable with clear compatibility requirements
 * **Documentation**: All APIs must have documented specs describing expected behavior
