@@ -653,3 +653,52 @@ func requireNearbyDatabase(t *testing.T) {
 }
 
 const nearbyRoundTrip = 5 * time.Millisecond
+
+func TestQuotaStoreCloseWaitsForItsStatements(t *testing.T) {
+	store := cancelTestStore(t)
+	db := quotaDB(t)
+	q := NewQuotaStore(store, time.Minute, 5*time.Second, logr.Discard())
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `INSERT INTO async_quota_keys (key) VALUES ('k')`)
+	require.NoError(t, err)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	var pid int
+	require.NoError(t, tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
+	_, err = tx.ExecContext(ctx, `SELECT 1 FROM async_quota_keys WHERE key = 'k' FOR UPDATE`)
+	require.NoError(t, err)
+	blockedOnTx := func() bool {
+		var waiting bool
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))`, pid).Scan(&waiting))
+		return waiting
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	go func() { _, _, _ = q.AcquireSlot(waitCtx, "k", 1) }()
+	require.Eventually(t, blockedOnTx, 5*time.Second, 5*time.Millisecond, "the acquire never reached the key lock")
+	<-waitCtx.Done()
+	_, err = tx.ExecContext(ctx, `SELECT 1 FROM async_quota_holders FOR UPDATE`)
+	require.NoError(t, err)
+
+	closed := make(chan struct{})
+	go func() {
+		q.Close()
+		close(closed)
+	}()
+	require.Eventually(t, blockedOnTx, 5*time.Second, 5*time.Millisecond, "the cancelled acquire never went on to delete its holder")
+	select {
+	case <-closed:
+		t.Fatal("Close returned while one of its statements still ran")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	require.NoError(t, tx.Rollback())
+	<-closed
+	assert.Empty(t, holderNames(t, db))
+	_, _, err = q.AcquireSlot(ctx, "k", 1)
+	assert.Error(t, err, "a closed store admits nothing")
+}

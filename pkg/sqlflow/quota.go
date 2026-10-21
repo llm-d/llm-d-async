@@ -30,6 +30,8 @@ type QuotaStore struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	lifeMu sync.Mutex
+	closed bool
 	wg     sync.WaitGroup
 
 	registerMu sync.Mutex
@@ -83,19 +85,35 @@ func NewQuotaStore(store *sqlqueue.Store, ttl, timeout time.Duration, logger log
 		holders: map[*quotaHolder]struct{}{},
 		pending: map[*quotaHolder]map[string]int{},
 	}
-	s.slots = newAdmitBatcher(s.acquireSlots)
-	s.rates = newAdmitBatcher(s.admitRate)
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.heartbeat()
-	}()
+	s.slots = newAdmitBatcher(s.acquireSlots, s.spawn)
+	s.rates = newAdmitBatcher(s.admitRate, s.spawn)
+	s.spawn(s.heartbeat)
 	return s
 }
 
-// Close waits for queued releases, then deletes the holders nothing names so
-// their rows do not wait out the lease.
+// spawn runs fn on a goroutine Close waits for, and reports false once Close
+// has begun.
+func (s *QuotaStore) spawn(fn func()) bool {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		fn()
+	}()
+	return true
+}
+
+// Close waits for every statement and queued release, then deletes the holders
+// nothing names so their rows do not wait out the lease. A closed store admits
+// nothing.
 func (s *QuotaStore) Close() {
+	s.lifeMu.Lock()
+	s.closed = true
+	s.lifeMu.Unlock()
 	s.cancel()
 	s.wg.Wait()
 	s.mu.Lock()
@@ -321,12 +339,8 @@ func (s *QuotaStore) release(h *quotaHolder, key string) {
 	start := !s.releasing
 	s.releasing = true
 	s.releaseMu.Unlock()
-	if start {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.flushReleases()
-		}()
+	if start && !s.spawn(s.flushReleases) {
+		s.flushReleases()
 	}
 }
 
@@ -371,46 +385,65 @@ type admitReply struct {
 	err    error
 }
 
+var errQuotaStoreClosed = errors.New("quota store closed")
+
 // admitBatcher sends one statement per key at a time; callers that arrive
 // while it runs share the next one, first come first admitted.
 type admitBatcher[K comparable] struct {
 	run        func(key K, n int) (granted int, holder *quotaHolder, err error)
+	spawn      func(func()) bool
 	mu         sync.Mutex
 	queues     map[K]*admitQueue
 	statements atomic.Int64
 }
 
 type admitQueue struct {
-	waiting []chan admitReply
+	waiting []*admitWaiter
 }
 
-func newAdmitBatcher[K comparable](run func(key K, n int) (int, *quotaHolder, error)) *admitBatcher[K] {
-	return &admitBatcher[K]{run: run, queues: map[K]*admitQueue{}}
+const (
+	waiterPending int32 = iota
+	waiterAnswered
+	waiterAbandoned
+)
+
+// admitWaiter is answered by the flush that serves it unless its caller gave
+// up first, in which case that flush hands the reply to abandoned.
+type admitWaiter struct {
+	state     atomic.Int32
+	reply     chan admitReply
+	abandoned func(admitReply)
+}
+
+func newAdmitBatcher[K comparable](run func(key K, n int) (int, *quotaHolder, error), spawn func(func()) bool) *admitBatcher[K] {
+	return &admitBatcher[K]{run: run, spawn: spawn, queues: map[K]*admitQueue{}}
 }
 
 // admit waits for key's next statement. If ctx ends first, abandoned receives
 // the reply once it arrives so the caller can give back what it was granted.
 func (b *admitBatcher[K]) admit(ctx context.Context, key K, abandoned func(admitReply)) (admitReply, error) {
-	reply := make(chan admitReply, 1)
+	w := &admitWaiter{reply: make(chan admitReply, 1), abandoned: abandoned}
 	b.mu.Lock()
 	q, busy := b.queues[key]
 	if !busy {
 		q = &admitQueue{}
+		if !b.spawn(func() { b.flush(key, q) }) {
+			b.mu.Unlock()
+			return admitReply{}, errQuotaStoreClosed
+		}
 		b.queues[key] = q
 	}
-	q.waiting = append(q.waiting, reply)
+	q.waiting = append(q.waiting, w)
 	b.mu.Unlock()
-	if !busy {
-		go b.flush(key, q)
-	}
 	select {
-	case r := <-reply:
+	case r := <-w.reply:
 		return r, r.err
 	case <-ctx.Done():
-		if abandoned != nil {
-			go func() { abandoned(<-reply) }()
+		if w.state.CompareAndSwap(waiterPending, waiterAbandoned) {
+			return admitReply{}, fmt.Errorf("await quota admission: %w", ctx.Err())
 		}
-		return admitReply{}, fmt.Errorf("await quota admission: %w", ctx.Err())
+		r := <-w.reply
+		return r, r.err
 	}
 }
 
@@ -427,8 +460,13 @@ func (b *admitBatcher[K]) flush(key K, q *admitQueue) {
 		b.mu.Unlock()
 		b.statements.Add(1)
 		granted, holder, err := b.run(key, len(batch))
-		for i, reply := range batch {
-			reply <- admitReply{ok: err == nil && i < granted, holder: holder, err: err}
+		for i, w := range batch {
+			r := admitReply{ok: err == nil && i < granted, holder: holder, err: err}
+			if w.state.CompareAndSwap(waiterPending, waiterAnswered) {
+				w.reply <- r
+			} else if w.abandoned != nil {
+				w.abandoned(r)
+			}
 		}
 	}
 }
