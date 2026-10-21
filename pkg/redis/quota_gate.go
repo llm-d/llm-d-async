@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/llm-d/llm-d-async/api"
@@ -178,8 +179,11 @@ func (g *RedisQuotaGate) releaseConcurrency(ctx context.Context, key string, ttl
 }
 
 func (g *RedisQuotaGate) acquireRateLimit(ctx context.Context, key string) (api.QuotaClassification, func(), error) {
+	return g.acquireRateLimitAt(ctx, key, time.Now().UnixNano())
+}
+
+func (g *RedisQuotaGate) acquireRateLimitAt(ctx context.Context, key string, now int64) (api.QuotaClassification, func(), error) {
 	// Sliding window rate limit using Sorted Set
-	now := time.Now().UnixNano()
 	windowNano := g.window.Nanoseconds()
 	min := now - windowNano
 
@@ -189,7 +193,7 @@ func (g *RedisQuotaGate) acquireRateLimit(ctx context.Context, key string) (api.
 		if count >= tonumber(ARGV[2]) then
 			return 0
 		end
-		redis.call("ZADD", KEYS[1], ARGV[3], ARGV[3])
+		redis.call("ZADD", KEYS[1], ARGV[3], ARGV[5])
 		redis.call("EXPIRE", KEYS[1], ARGV[4])
 		return 1
 	`
@@ -199,7 +203,8 @@ func (g *RedisQuotaGate) acquireRateLimit(ctx context.Context, key string) (api.
 		ttl = 3600
 	}
 
-	res, err := g.rdb.Eval(ctx, script, []string{key}, min, g.limit, now, ttl).Result()
+	member := fmt.Sprintf("%d-%016x", now, rand.Uint64())
+	res, err := g.rdb.Eval(ctx, script, []string{key}, min, g.limit, now, ttl, member).Result()
 	if err != nil {
 		return api.ClassificationNone, nil, err
 	}
