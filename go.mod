@@ -11,7 +11,7 @@ require (
 	github.com/llm-d/llm-d-async/api v1.0.0
 	github.com/llm-d/llm-d-async/pipeline v1.0.0
 	github.com/llm-d/llm-d-async/producer v1.0.0
-	github.com/llm-d/llm-d-async/producer-sql v0.0.0
+	github.com/llm-d/llm-d-async/producer-sql v1.0.0
 	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.25.0
