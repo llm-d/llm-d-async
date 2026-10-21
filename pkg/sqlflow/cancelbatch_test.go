@@ -3,6 +3,7 @@ package sqlflow
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -132,4 +133,48 @@ func TestCancelBatcherBoundsAStalledQuery(t *testing.T) {
 	cancelled, err := b.isCancelled(ctx, sqlqueue.Key{ID: "blocked", Token: "t"})
 	require.NoError(t, err, "the batcher recovers once the lock is gone")
 	assert.False(t, cancelled)
+}
+
+func TestCancelBatcherKeepsCheckingWhileAFlushIsSlow(t *testing.T) {
+	store := cancelTestStore(t)
+	db := quotaDB(t)
+	ctx := context.Background()
+	b := newCancelBatcher(store, 256, time.Millisecond, 10*time.Second)
+	t.Cleanup(b.stop)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	var pid int
+	require.NoError(t, tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
+	_, err = tx.ExecContext(ctx, `LOCK TABLE async_requests IN ACCESS EXCLUSIVE MODE`)
+	require.NoError(t, err)
+	blocked := func() int {
+		var n int
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, pid).Scan(&n))
+		return n
+	}
+
+	errs := make(chan error, 6)
+	check := func(id string) {
+		_, err := b.isCancelled(ctx, sqlqueue.Key{ID: id, Token: "t"})
+		errs <- err
+	}
+	go check("first")
+	require.Eventually(t, func() bool { return blocked() == 1 }, 5*time.Second, 5*time.Millisecond)
+	go check("second")
+	require.Eventually(t, func() bool { return blocked() == 2 }, 2*time.Second, 5*time.Millisecond,
+		"a check that arrived during a slow flush waited for it instead of starting its own")
+	for i := range 4 {
+		go check(fmt.Sprintf("more-%d", i))
+		require.Eventually(t, func() bool { return blocked() == min(3+i, maxCancelFlushes) }, 2*time.Second, 5*time.Millisecond)
+	}
+	assert.Never(t, func() bool { return blocked() > maxCancelFlushes }, 300*time.Millisecond, 10*time.Millisecond,
+		"more flushes ran at once than the cap")
+
+	require.NoError(t, tx.Rollback())
+	for range 6 {
+		require.NoError(t, <-errs)
+	}
 }

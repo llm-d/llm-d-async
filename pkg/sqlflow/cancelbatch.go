@@ -3,11 +3,14 @@ package sqlflow
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 )
+
+const maxCancelFlushes = 4
 
 type cancelQuery struct {
 	key   sqlqueue.Key
@@ -23,7 +26,8 @@ type cancelReply struct {
 // request and about once a second while it executes. Dispatch already reports
 // requests cancelled before they were claimed, so these checks only catch a
 // cancellation that lands after the claim; one query per batch keeps that
-// guarantee without one round trip per request.
+// guarantee without one round trip per request. Up to maxCancelFlushes batches
+// query at once.
 type cancelBatcher struct {
 	store   *sqlqueue.Store
 	queries chan cancelQuery
@@ -33,6 +37,8 @@ type cancelBatcher struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	flushes atomic.Int64
+	running chan struct{}
+	wg      sync.WaitGroup
 }
 
 // newCancelBatcher starts the coalescing goroutine; the flow stops it in
@@ -48,6 +54,7 @@ func newCancelBatcher(store *sqlqueue.Store, size int, linger, timeout time.Dura
 		timeout: timeout,
 		cancel:  cancel,
 		done:    make(chan struct{}),
+		running: make(chan struct{}, maxCancelFlushes),
 	}
 	go func() {
 		defer close(b.done)
@@ -59,6 +66,7 @@ func newCancelBatcher(store *sqlqueue.Store, size int, linger, timeout time.Dura
 func (b *cancelBatcher) stop() {
 	b.cancel()
 	<-b.done
+	b.wg.Wait()
 }
 
 func (b *cancelBatcher) run(ctx context.Context) {
@@ -81,7 +89,17 @@ func (b *cancelBatcher) run(ctx context.Context) {
 				}
 			}
 			timer.Stop()
-			b.flush(ctx, batch)
+			select {
+			case b.running <- struct{}{}:
+			case <-ctx.Done():
+				b.flush(ctx, batch)
+				return
+			}
+			b.wg.Add(1)
+			go func() {
+				defer func() { <-b.running; b.wg.Done() }()
+				b.flush(ctx, batch)
+			}()
 		}
 	}
 }
