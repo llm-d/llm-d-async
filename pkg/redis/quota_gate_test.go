@@ -169,6 +169,47 @@ func TestRedisQuotaGate_RateLimit(t *testing.T) {
 	}
 }
 
+func TestRedisQuotaGate_RateLimitSameTimestamp(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	gate := NewRedisQuotaGate(rdb, "userid", QuotaModeRateLimit, 2, 10*time.Second, "quota:")
+
+	ctx := context.Background()
+	key := "quota:user1"
+	now := time.Now().UnixNano()
+
+	for i := range 2 {
+		classification, _, err := gate.acquireRateLimitAt(ctx, key, now)
+		if err != nil || classification != api.ClassificationReserved {
+			t.Fatalf("admission %d: expected reserved, got %v, err: %v", i+1, classification, err)
+		}
+	}
+
+	members, err := rdb.ZRangeWithScores(ctx, key, 0, -1).Result()
+	if err != nil {
+		t.Fatalf("ZRangeWithScores: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("expected 2 members after 2 admissions at the same timestamp, got %d", len(members))
+	}
+	for _, m := range members {
+		if m.Score != float64(now) {
+			t.Fatalf("expected score %d, got %v", now, m.Score)
+		}
+	}
+
+	classification, _, err := gate.acquireRateLimitAt(ctx, key, now)
+	if err != nil || classification != api.ClassificationOverflow {
+		t.Fatalf("third admission: expected overflow, got %v, err: %v", classification, err)
+	}
+	if n := rdb.ZCard(ctx, key).Val(); n != 2 {
+		t.Fatalf("expected ZCARD 2 after rejected admission, got %d", n)
+	}
+}
+
 func TestRedisQuotaGate_Classifying(t *testing.T) {
 	s := miniredis.RunT(t)
 	defer s.Close()
