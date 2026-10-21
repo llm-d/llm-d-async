@@ -543,3 +543,26 @@ END $$`,
 		}
 	})
 }
+
+func TestQuotaStoreHeartbeatReapsIdleRows(t *testing.T) {
+	store := cancelTestStore(t)
+	db := quotaDB(t)
+	q := newTestQuotaStore(t, store, 300*time.Millisecond, time.Second)
+	ctx := context.Background()
+
+	release, ok, err := q.AcquireSlot(ctx, "slots", 2)
+	require.NoError(t, err)
+	require.True(t, ok)
+	release()
+	admitted, err := q.Admit(ctx, "rate", 5, 10*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, admitted)
+
+	assert.Eventually(t, func() bool {
+		var rows int
+		require.NoError(t, db.QueryRowContext(ctx, `
+			SELECT (SELECT count(*) FROM async_quota_keys) + (SELECT count(*) FROM async_quota_slots)
+				+ (SELECT count(*) FROM async_quota_windows) + (SELECT count(*) FROM async_quota_admits)`).Scan(&rows))
+		return rows == 0
+	}, 5*time.Second, 20*time.Millisecond, "idle quota rows outlived the heartbeat")
+}

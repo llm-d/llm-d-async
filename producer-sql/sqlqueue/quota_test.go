@@ -324,3 +324,232 @@ func TestAdmitQuotaIsExactUnderContention(t *testing.T) {
 		}
 	})
 }
+
+func quotaRows(t *testing.T, s *Store) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for _, table := range []string{"async_quota_keys", "async_quota_slots", "async_quota_windows", "async_quota_admits"} {
+		var n int
+		require.NoError(t, s.db.QueryRowContext(context.Background(), `SELECT count(*) FROM `+table).Scan(&n))
+		out[table] = n
+	}
+	return out
+}
+
+func ageAdmits(t *testing.T, s *Store, key string, by time.Duration) {
+	t.Helper()
+	_, err := s.db.ExecContext(context.Background(), `UPDATE async_quota_admits SET at_ms = at_ms - $2 WHERE key = $1`, key, by.Milliseconds())
+	require.NoError(t, err)
+}
+
+func TestReapQuotaDropsEverythingAnIdleTenantLeft(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		require.NoError(t, s.RegisterQuotaHolder(ctx, "a", leaseTTL))
+		got, err := s.AcquireQuotaSlots(ctx, "a", "slots", 2, 5)
+		require.NoError(t, err)
+		require.Equal(t, 2, got)
+		require.NoError(t, s.ReleaseQuotaSlots(ctx, "a", []string{"slots"}, []int{2}))
+		got, err = s.AdmitQuota(ctx, "rate", 3, 5, time.Minute)
+		require.NoError(t, err)
+		require.Equal(t, 3, got)
+		ageAdmits(t, s, "rate", 2*time.Minute)
+
+		_, err = s.ReapQuota(ctx, 100)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]int{"async_quota_keys": 0, "async_quota_slots": 0, "async_quota_windows": 0, "async_quota_admits": 0}, quotaRows(t, s))
+
+		got, err = s.AcquireQuotaSlots(ctx, "a", "slots", 9, 5)
+		require.NoError(t, err)
+		assert.Equal(t, 5, got, "a reaped key counts from zero again")
+		got, err = s.AdmitQuota(ctx, "rate", 9, 5, time.Minute)
+		require.NoError(t, err)
+		assert.Equal(t, 5, got, "a reaped window counts from zero again")
+	})
+}
+
+func TestReapQuotaKeepsWhatStillCounts(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		require.NoError(t, s.RegisterQuotaHolder(ctx, "a", leaseTTL))
+		got, err := s.AcquireQuotaSlots(ctx, "a", "slots", 2, 3)
+		require.NoError(t, err)
+		require.Equal(t, 2, got)
+
+		got, err = s.AdmitQuota(ctx, "rate", 2, 3, time.Minute)
+		require.NoError(t, err)
+		require.Equal(t, 2, got)
+		ageAdmits(t, s, "rate", 2*time.Minute)
+		got, err = s.AdmitQuota(ctx, "rate", 1, 3, time.Minute)
+		require.NoError(t, err)
+		require.Equal(t, 1, got)
+
+		_, err = s.ReapQuota(ctx, 100)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]int{"async_quota_keys": 1, "async_quota_slots": 1, "async_quota_windows": 1, "async_quota_admits": 1}, quotaRows(t, s))
+
+		got, err = s.AcquireQuotaSlots(ctx, "a", "slots", 9, 3)
+		require.NoError(t, err)
+		assert.Equal(t, 1, got, "held slots still count after a reap")
+		got, err = s.AdmitQuota(ctx, "rate", 9, 3, time.Minute)
+		require.NoError(t, err)
+		assert.Equal(t, 2, got, "the live admission still counts and the reaped ones no longer do")
+	})
+}
+
+func TestReapQuotaIsBounded(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		for i := range 5 {
+			_, err := s.AdmitQuota(ctx, fmt.Sprintf("k%d", i), 1, 1, time.Minute)
+			require.NoError(t, err)
+		}
+		_, err := s.db.ExecContext(ctx, `UPDATE async_quota_admits SET at_ms = at_ms - 120000`)
+		require.NoError(t, err)
+
+		n, err := s.ReapQuota(ctx, 2)
+		require.NoError(t, err)
+		assert.Equal(t, 4, n, "two windows drained and those two dropped")
+		assert.Equal(t, 3, quotaRows(t, s)["async_quota_windows"])
+	})
+}
+
+func TestQuotaStaysExactWhileTheReaperRuns(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		const limit, workers = 3, 12
+		for w := range workers {
+			require.NoError(t, s.RegisterQuotaHolder(ctx, fmt.Sprintf("h%d", w), leaseTTL))
+		}
+
+		var reaps atomic.Int64
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				if _, err := s.ReapQuota(ctx, 100); err == nil {
+					reaps.Add(1)
+				}
+			}
+		}()
+
+		var held atomic.Int64
+		var over atomic.Int64
+		errs := make(chan error, workers)
+		for w := range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				holder := fmt.Sprintf("h%d", w)
+				for ctx.Err() == nil {
+					got, err := s.AcquireQuotaSlots(ctx, holder, "slots", 1, limit)
+					if err != nil {
+						if ctx.Err() == nil {
+							errs <- err
+						}
+						return
+					}
+					if got == 1 {
+						if held.Add(1) > limit {
+							over.Add(1)
+						}
+						held.Add(-1)
+						if err := s.ReleaseQuotaSlots(context.Background(), holder, []string{"slots"}, []int{1}); err != nil {
+							errs <- err
+							return
+						}
+					}
+					if _, err := s.AdmitQuota(ctx, "rate", 1+rand.IntN(3), limit, time.Millisecond); err != nil {
+						if ctx.Err() == nil {
+							errs <- err
+						}
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+		assert.Zero(t, over.Load(), "more slots were held at once than the limit")
+		assert.Positive(t, reaps.Load())
+	})
+}
+
+// deleteUnderWaiter locks the row that where selects in table, waits until another session
+// blocks on it, then deletes the row and commits.
+func deleteUnderWaiter(t *testing.T, s *Store, table, where string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	var pid int
+	require.NoError(t, tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
+	_, err = tx.ExecContext(ctx, `SELECT 1 FROM `+table+` WHERE `+where+` FOR UPDATE`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var waiting bool
+		require.NoError(t, s.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))`, pid).Scan(&waiting))
+		return waiting
+	}, 5*time.Second, 5*time.Millisecond, "nothing blocked on the locked row")
+	_, err = tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+where)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+}
+
+func TestAdmitLocksAWindowReapedUnderIt(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		_, err := s.db.ExecContext(ctx, `INSERT INTO async_quota_windows (key, window_ms) VALUES ('rate', 60000)`)
+		require.NoError(t, err)
+
+		type reply struct {
+			got int
+			err error
+		}
+		done := make(chan reply, 1)
+		go func() {
+			got, err := s.AdmitQuota(ctx, "rate", 2, 5, time.Minute)
+			done <- reply{got, err}
+		}()
+		deleteUnderWaiter(t, s, "async_quota_windows", "key = 'rate'")
+
+		r := <-done
+		require.NoError(t, r.err)
+		assert.Equal(t, 2, r.got)
+		var used int
+		require.NoError(t, s.db.QueryRowContext(ctx, `SELECT used FROM async_quota_windows WHERE key = 'rate'`).Scan(&used))
+		assert.Equal(t, 2, used, "the admission is counted in a window row that exists")
+	})
+}
+
+func TestAcquireLocksAKeyReapedUnderIt(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		require.NoError(t, s.RegisterQuotaHolder(ctx, "a", leaseTTL))
+		_, err := s.db.ExecContext(ctx, `INSERT INTO async_quota_keys (key) VALUES ('k')`)
+		require.NoError(t, err)
+
+		type reply struct {
+			got int
+			err error
+		}
+		done := make(chan reply, 1)
+		go func() {
+			got, err := s.AcquireQuotaSlots(ctx, "a", "k", 2, 5)
+			done <- reply{got, err}
+		}()
+		deleteUnderWaiter(t, s, "async_quota_keys", "key = 'k'")
+
+		r := <-done
+		require.NoError(t, r.err)
+		assert.Equal(t, 2, r.got)
+		assert.Equal(t, 1, quotaRows(t, s)["async_quota_keys"], "acquire held a key row it locked, not one that was gone")
+	})
+}

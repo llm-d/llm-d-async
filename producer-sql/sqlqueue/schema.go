@@ -167,8 +167,11 @@ DECLARE
 	v_used  BIGINT;
 	v_grant INTEGER;
 BEGIN
-	INSERT INTO async_quota_keys (key) VALUES (p_key) ON CONFLICT (key) DO NOTHING;
-	PERFORM 1 FROM async_quota_keys WHERE key = p_key FOR UPDATE;
+	LOOP
+		PERFORM 1 FROM async_quota_keys WHERE key = p_key FOR UPDATE;
+		EXIT WHEN FOUND;
+		INSERT INTO async_quota_keys (key) VALUES (p_key) ON CONFLICT (key) DO NOTHING;
+	END LOOP;
 	v_now := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 	PERFORM 1 FROM async_quota_holders WHERE holder = p_holder AND expires_ms > v_now;
 	IF NOT FOUND THEN
@@ -192,8 +195,11 @@ DECLARE
 	v_expired BIGINT;
 	v_grant   INTEGER;
 BEGIN
-	INSERT INTO async_quota_windows (key, window_ms) VALUES (p_key, p_window_ms) ON CONFLICT (key, window_ms) DO NOTHING;
-	SELECT used INTO v_used FROM async_quota_windows WHERE key = p_key AND window_ms = p_window_ms FOR UPDATE;
+	LOOP
+		SELECT used INTO v_used FROM async_quota_windows WHERE key = p_key AND window_ms = p_window_ms FOR UPDATE;
+		EXIT WHEN FOUND;
+		INSERT INTO async_quota_windows (key, window_ms) VALUES (p_key, p_window_ms) ON CONFLICT (key, window_ms) DO NOTHING;
+	END LOOP;
 	v_now := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 	WITH gone AS (
 		DELETE FROM async_quota_admits
@@ -210,6 +216,55 @@ BEGIN
 		UPDATE async_quota_windows SET used = v_used + v_grant WHERE key = p_key AND window_ms = p_window_ms;
 	END IF;
 	RETURN v_grant;
+END $$`, `
+CREATE OR REPLACE FUNCTION async_quota_reap(p_limit INTEGER)
+RETURNS INTEGER LANGUAGE plpgsql AS $$
+DECLARE
+	v_now   BIGINT := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+	v_total INTEGER := 0;
+	v_rows  INTEGER;
+	v_n     BIGINT;
+	w       RECORD;
+BEGIN
+	FOR w IN
+		SELECT qw.key, qw.window_ms FROM async_quota_windows qw
+		WHERE EXISTS (
+			SELECT 1 FROM async_quota_admits a
+			WHERE a.key = qw.key AND a.window_ms = qw.window_ms AND a.at_ms <= v_now - qw.window_ms)
+		LIMIT p_limit
+		FOR UPDATE SKIP LOCKED
+	LOOP
+		WITH gone AS (
+			DELETE FROM async_quota_admits
+			WHERE key = w.key AND window_ms = w.window_ms AND at_ms <= v_now - w.window_ms
+			RETURNING n
+		)
+		SELECT coalesce(sum(n), 0) INTO v_n FROM gone;
+		UPDATE async_quota_windows SET used = used - v_n WHERE key = w.key AND window_ms = w.window_ms;
+		v_total := v_total + 1;
+	END LOOP;
+
+	DELETE FROM async_quota_windows WHERE ctid = ANY(ARRAY(
+		SELECT qw.ctid FROM async_quota_windows qw
+		WHERE qw.used = 0 AND NOT EXISTS (
+			SELECT 1 FROM async_quota_admits a WHERE a.key = qw.key AND a.window_ms = qw.window_ms)
+		LIMIT p_limit
+		FOR UPDATE SKIP LOCKED));
+	GET DIAGNOSTICS v_rows = ROW_COUNT;
+	v_total := v_total + v_rows;
+
+	DELETE FROM async_quota_slots WHERE ctid = ANY(ARRAY(
+		SELECT ctid FROM async_quota_slots WHERE used = 0 LIMIT p_limit FOR UPDATE SKIP LOCKED));
+	GET DIAGNOSTICS v_rows = ROW_COUNT;
+	v_total := v_total + v_rows;
+
+	DELETE FROM async_quota_keys WHERE ctid = ANY(ARRAY(
+		SELECT k.ctid FROM async_quota_keys k
+		WHERE NOT EXISTS (SELECT 1 FROM async_quota_slots s WHERE s.key = k.key)
+		LIMIT p_limit
+		FOR UPDATE SKIP LOCKED));
+	GET DIAGNOSTICS v_rows = ROW_COUNT;
+	RETURN v_total + v_rows;
 END $$`}
 }
 

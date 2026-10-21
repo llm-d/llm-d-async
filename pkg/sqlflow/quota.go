@@ -12,6 +12,8 @@ import (
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 )
 
+const quotaReapBatch = 1000
+
 // QuotaStore counts sql-quota gates in the transport's database. Every
 // dispatcher runs at most one statement per quota key at a time; requests that
 // arrive while it runs go in the next statement together.
@@ -36,6 +38,7 @@ type QuotaStore struct {
 
 	slots *admitBatcher[slotKey]
 	rates *admitBatcher[rateKey]
+	used  atomic.Bool
 
 	releaseMu sync.Mutex
 	pending   map[*quotaHolder]map[string]int
@@ -108,6 +111,7 @@ func (s *QuotaStore) Close() {
 }
 
 func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (func(), bool, error) {
+	s.used.Store(true)
 	r, err := s.slots.admit(ctx, slotKey{key: key, limit: limit}, func(r admitReply) {
 		if r.ok {
 			s.release(r.holder, key)
@@ -121,6 +125,7 @@ func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (fu
 }
 
 func (s *QuotaStore) Admit(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
+	s.used.Store(true)
 	r, err := s.rates.admit(ctx, rateKey{key: key, limit: limit, window: window}, nil)
 	return r.ok, err
 }
@@ -227,15 +232,15 @@ func (s *QuotaStore) heartbeat() {
 			return
 		case <-ticker.C:
 		}
+		if !s.used.Load() {
+			continue
+		}
 		s.mu.Lock()
 		holders := make([]*quotaHolder, 0, len(s.holders))
 		for h := range s.holders {
 			holders = append(holders, h)
 		}
 		s.mu.Unlock()
-		if len(holders) == 0 {
-			continue
-		}
 		for _, h := range holders {
 			s.mu.Lock()
 			deleting := h.deleting
@@ -249,6 +254,9 @@ func (s *QuotaStore) heartbeat() {
 		ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
 		if err := s.store.ReapQuotaHolders(ctx, s.ttl); err != nil {
 			s.logger.Error(err, "Failed to reap lapsed quota holders")
+		}
+		if _, err := s.store.ReapQuota(ctx, quotaReapBatch); err != nil {
+			s.logger.Error(err, "Failed to reap idle quota rows")
 		}
 		cancel()
 	}

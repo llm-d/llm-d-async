@@ -105,3 +105,14 @@ DELETE FROM async_quota_slots s USING dead WHERE s.holder = dead.holder`, grace.
 	}
 	return nil
 }
+
+// ReapQuota deletes up to limit rows of each kind that no longer count: expired rate
+// admissions, windows and slots that hold nothing, and keys no slot names. It returns how
+// many windows and rows it changed.
+func (s *Store) ReapQuota(ctx context.Context, limit int) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT async_quota_reap($1)`, limit).Scan(&n); err != nil {
+		return 0, fmt.Errorf("sqlqueue: reap quota: %w", err)
+	}
+	return n, nil
+}
