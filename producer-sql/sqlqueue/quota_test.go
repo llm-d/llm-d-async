@@ -2,8 +2,11 @@ package sqlqueue
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -79,6 +82,7 @@ func TestQuotaSlotsReleaseNeverGoesNegative(t *testing.T) {
 }
 
 func TestQuotaSlotsOfALapsedHolderStopCounting(t *testing.T) {
+	requireNearbyDatabase(t)
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		const ttl = 300 * time.Millisecond
@@ -110,6 +114,7 @@ func TestQuotaSlotsOfALapsedHolderStopCounting(t *testing.T) {
 }
 
 func TestQuotaHolderRenewKeepsSlots(t *testing.T) {
+	requireNearbyDatabase(t)
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		const ttl = 400 * time.Millisecond
@@ -153,6 +158,7 @@ func TestDeleteQuotaHolderFreesItsSlots(t *testing.T) {
 }
 
 func TestReapQuotaHoldersDeletesLongLapsedHolders(t *testing.T) {
+	requireNearbyDatabase(t)
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		require.NoError(t, s.RegisterQuotaHolder(ctx, "dead", 50*time.Millisecond))
@@ -236,6 +242,7 @@ func TestQuotaSlotsNeverExceedTheLimitUnderContention(t *testing.T) {
 }
 
 func TestAdmitQuotaSlidingWindow(t *testing.T) {
+	requireNearbyDatabase(t)
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		const window = 600 * time.Millisecond
@@ -270,6 +277,7 @@ func TestAdmitQuotaSlidingWindow(t *testing.T) {
 // A short-window gate on the same key must not delete a long-window gate's
 // admissions as expired for its own window.
 func TestAdmitQuotaWindowsCountSeparately(t *testing.T) {
+	requireNearbyDatabase(t)
 	withStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		const long, short = time.Minute, 200 * time.Millisecond
@@ -553,3 +561,31 @@ func TestAcquireLocksAKeyReapedUnderIt(t *testing.T) {
 		assert.Equal(t, 1, quotaRows(t, s)["async_quota_keys"], "acquire held a key row it locked, not one that was gone")
 	})
 }
+
+// requireNearbyDatabase skips a test whose sub-second leases or windows assume the
+// database is at most a few milliseconds away.
+func requireNearbyDatabase(t *testing.T) {
+	t.Helper()
+	pgURL := os.Getenv("TEST_POSTGRES_URL")
+	if pgURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+	db, err := sql.Open("pgx", pgURL)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	require.NoError(t, db.PingContext(ctx))
+	rtts := make([]time.Duration, 5)
+	for i := range rtts {
+		start := time.Now()
+		_, err := db.ExecContext(ctx, `SELECT 1`)
+		require.NoError(t, err)
+		rtts[i] = time.Since(start)
+	}
+	slices.Sort(rtts)
+	if rtt := rtts[len(rtts)/2]; rtt > nearbyRoundTrip {
+		t.Skipf("database round trip %s exceeds the %s these timings assume", rtt, nearbyRoundTrip)
+	}
+}
+
+const nearbyRoundTrip = 5 * time.Millisecond

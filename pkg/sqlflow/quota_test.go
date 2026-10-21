@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -166,6 +167,7 @@ func TestQuotaStoresAdmitExactlyTheRateLimitTogether(t *testing.T) {
 }
 
 func TestQuotaStoreRateLimitWindowSlides(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	q := newTestQuotaStore(t, store, 30*time.Second, time.Second)
 	ctx := context.Background()
@@ -185,6 +187,7 @@ func TestQuotaStoreRateLimitWindowSlides(t *testing.T) {
 }
 
 func TestQuotaStoreGivesBackASlotItsCallerAbandoned(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	q := newTestQuotaStore(t, store, 30*time.Second, 5*time.Second)
 	db := quotaDB(t)
@@ -217,6 +220,7 @@ func TestQuotaStoreGivesBackASlotItsCallerAbandoned(t *testing.T) {
 }
 
 func TestQuotaStoreRetiresTheHolderOfAFailedRelease(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	q := newTestQuotaStore(t, store, 600*time.Millisecond, 150*time.Millisecond)
 	db := quotaDB(t)
@@ -248,6 +252,7 @@ func TestQuotaStoreRetiresTheHolderOfAFailedRelease(t *testing.T) {
 // A release commits but its reply is lost. Retrying it would subtract the
 // slot twice and free one a running request still holds.
 func TestQuotaStoreLostReleaseReplyCannotOverAdmit(t *testing.T) {
+	requireNearbyDatabase(t)
 	proxy, store := proxiedStore(t)
 	q := newTestQuotaStore(t, store, 30*time.Second, time.Second)
 	db := quotaDB(t)
@@ -309,6 +314,7 @@ func TestQuotaStoreLostGrantReplyDoesNotLeak(t *testing.T) {
 }
 
 func TestQuotaStoreRenewsARetiredHolderUntilItsGrantsFinish(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	const ttl = 300 * time.Millisecond
 	q := newTestQuotaStore(t, store, ttl, 100*time.Millisecond)
@@ -347,6 +353,7 @@ func TestQuotaStoreRenewsARetiredHolderUntilItsGrantsFinish(t *testing.T) {
 }
 
 func TestQuotaStoreRegistersAgainAfterItsLeaseLapses(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	q := newTestQuotaStore(t, store, 30*time.Second, time.Second)
 	db := quotaDB(t)
@@ -370,6 +377,7 @@ func TestQuotaStoreRegistersAgainAfterItsLeaseLapses(t *testing.T) {
 }
 
 func TestQuotaStoreHeartbeatKeepsSlotsPastTheTTL(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	const ttl = 300 * time.Millisecond
 	holder := newTestQuotaStore(t, store, ttl, time.Second)
@@ -386,6 +394,7 @@ func TestQuotaStoreHeartbeatKeepsSlotsPastTheTTL(t *testing.T) {
 }
 
 func TestQuotaStoreSlotsOfAStoppedDispatcherFree(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	const ttl = 300 * time.Millisecond
 	crashed := NewQuotaStore(store, ttl, time.Second, logr.Discard())
@@ -545,6 +554,7 @@ END $$`,
 }
 
 func TestQuotaStoreHeartbeatReapsIdleRows(t *testing.T) {
+	requireNearbyDatabase(t)
 	store := cancelTestStore(t)
 	db := quotaDB(t)
 	q := newTestQuotaStore(t, store, 300*time.Millisecond, time.Second)
@@ -615,3 +625,31 @@ func TestQuotaStoreRegistrationDoesNotHoldTheStoreLock(t *testing.T) {
 	require.NoError(t, <-acquired)
 	release()
 }
+
+// requireNearbyDatabase skips a test whose sub-second leases or windows assume the
+// database is at most a few milliseconds away.
+func requireNearbyDatabase(t *testing.T) {
+	t.Helper()
+	pgURL := os.Getenv("TEST_POSTGRES_URL")
+	if pgURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+	db, err := sql.Open("pgx", pgURL)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	require.NoError(t, db.PingContext(ctx))
+	rtts := make([]time.Duration, 5)
+	for i := range rtts {
+		start := time.Now()
+		_, err := db.ExecContext(ctx, `SELECT 1`)
+		require.NoError(t, err)
+		rtts[i] = time.Since(start)
+	}
+	slices.Sort(rtts)
+	if rtt := rtts[len(rtts)/2]; rtt > nearbyRoundTrip {
+		t.Skipf("database round trip %s exceeds the %s these timings assume", rtt, nearbyRoundTrip)
+	}
+}
+
+const nearbyRoundTrip = 5 * time.Millisecond
