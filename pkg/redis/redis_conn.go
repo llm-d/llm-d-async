@@ -86,6 +86,7 @@ func universalOptions(c ConnectionConfig) (*redis.UniversalOptions, error) {
 		MinIdleConns:          o.MinIdleConns,
 		MaxIdleConns:          o.MaxIdleConns,
 		MaxActiveConns:        o.MaxActiveConns,
+		PipelinePoolSize:      o.PipelinePoolSize,
 		MaxConcurrentDials:    o.MaxConcurrentDials,
 		ConnMaxIdleTime:       o.ConnMaxIdleTime,
 		ConnMaxLifetime:       o.ConnMaxLifetime,

@@ -11,11 +11,11 @@ import (
 
 func TestUniversalOptions_MapsURLAndTopology(t *testing.T) {
 	t.Run("standalone keeps a single address and the database", func(t *testing.T) {
-		o, err := universalOptions(ConnectionConfig{URL: "redis://user:pw@h1:6379/2?pool_size=7"})
+		o, err := universalOptions(ConnectionConfig{URL: "redis://user:pw@h1:6379/2?pool_size=7&pipeline_pool_size=-1"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(o.Addrs) != 1 || o.Addrs[0] != "h1:6379" || o.DB != 2 || o.Username != "user" || o.Password != "pw" || o.PoolSize != 7 {
+		if len(o.Addrs) != 1 || o.Addrs[0] != "h1:6379" || o.DB != 2 || o.Username != "user" || o.Password != "pw" || o.PoolSize != 7 || o.PipelinePoolSize != -1 {
 			t.Fatalf("unexpected options: %+v", o)
 		}
 		if o.IsClusterMode || o.MasterName != "" {
