@@ -229,3 +229,58 @@ func TestExpireResultsDrainsMoreThanOneBatch(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM async_results`).Scan(&left))
 	assert.Zero(t, left)
 }
+
+type refuseTenant struct{ tenant string }
+
+func (g refuseTenant) Budget(context.Context) float64 { return 1 }
+
+func (g refuseTenant) Apply(_ context.Context, msg *api.InternalRequest, _ *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	if msg.PublicRequest.ReqMetadata()["tenant"] == g.tenant {
+		return pipeline.Refuse().WithReason(metrics.ReasonQuotaExhausted), nil
+	}
+	return pipeline.Continue(), nil
+}
+
+func TestRefusedRequestsDoNotBlockTheQueueBehindThem(t *testing.T) {
+	store := cancelTestStore(t)
+	ctx := context.Background()
+	f, err := NewWithStore(ctx, store, Config{BatchSize: 2, PollIntervalMs: 50, Queues: []QueueConfig{{ID: "q", QueueName: "q", WorkerPoolID: "default"}}}, []pipeline.WorkerPoolConfig{{ID: "default"}}, nil)
+	require.NoError(t, err)
+	t.Cleanup(f.cancelChecks.stop)
+	t.Cleanup(f.quota.Close)
+	q := f.queues[0]
+	q.gate = refuseTenant{tenant: "over"}
+	f.rebalance(ctx)
+
+	base := time.Now().Add(time.Hour).Unix()
+	enqueue := func(id, tenant string, deadline int64) {
+		envelope, payload, err := api.SplitPayload(api.NewInternalRequest(api.InternalRouting{RequestToken: "t"},
+			&api.RequestMessage{ID: id, Deadline: deadline, Payload: []byte("{}"), Metadata: map[string]string{"tenant": tenant}}))
+		require.NoError(t, err)
+		require.NoError(t, store.Enqueue(ctx, sqlqueue.Request{ID: id, Token: "t", Queue: "q", Deadline: deadline, Envelope: string(envelope), Payload: payload}))
+	}
+	enqueue("over-1", "over", base)
+	enqueue("over-2", "over", base+1)
+	enqueue("ok-1", "ok", base+2)
+
+	dispatched := make(chan string, 4)
+	go func() {
+		for ir := range q.channel.Channel {
+			dispatched <- ir.PublicRequest.ReqID()
+		}
+	}()
+	t.Cleanup(func() { close(q.channel.Channel) })
+
+	f.processQueue(ctx, q, testr.New(t))
+	f.processQueue(ctx, q, testr.New(t))
+	select {
+	case id := <-dispatched:
+		assert.Equal(t, "ok-1", id, "the poll after a refusal reaches the request behind it")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the refused requests took the whole batch again")
+	}
+
+	var held int
+	require.NoError(t, quotaDB(t).QueryRowContext(ctx, `SELECT count(*) FROM async_requests WHERE id LIKE 'over-%' AND dispatch_epoch = 0 AND not_before > $1`, time.Now().Unix()).Scan(&held))
+	assert.Equal(t, 2, held, "refused requests are pending and held back")
+}

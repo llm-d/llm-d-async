@@ -114,6 +114,16 @@ func (c *Consumer) Undispatch(ctx context.Context, stamps []Stamp) error {
 	return nil
 }
 
+// Defer is Undispatch for requests that must not dispatch again before notBefore.
+func (c *Consumer) Defer(ctx context.Context, stamps []Stamp, notBefore int64) error {
+	if err := c.store.Defer(ctx, c.owner, stamps, notBefore); err != nil {
+		c.Abandon(stamps...)
+		return err
+	}
+	c.doneStamps(stamps)
+	return nil
+}
+
 // Abandon hands requests whose outcome could not be written to the next Rebalance.
 func (c *Consumer) Abandon(stamps ...Stamp) {
 	c.mu.Lock()

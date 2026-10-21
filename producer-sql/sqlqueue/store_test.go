@@ -916,3 +916,37 @@ func TestExpireResultsReachesEveryRoute(t *testing.T) {
 		assert.Equal(t, []string{"c", "d"}, left, "unexpired and TTL-less results stay")
 	})
 }
+
+func TestDeferHoldsRequestsBackUntilNotBefore(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		require.NoError(t, s.Enqueue(ctx, req("held", now.Unix()+10), req("behind", now.Unix()+20)))
+		got, err := s.Dispatch(ctx, "q", "a", now, 1)
+		require.NoError(t, err)
+		require.Equal(t, []string{"held"}, ids(got))
+
+		require.NoError(t, s.Defer(ctx, "a", []Stamp{got[0].Stamp()}, now.Unix()+5))
+		assert.Equal(t, []string{"behind"}, dispatchIDs(t, s, "a", now, 10), "a held request is skipped for the one behind it")
+		assert.Empty(t, dispatchIDs(t, s, "a", now.Add(4*time.Second), 10))
+		assert.Equal(t, []string{"held"}, dispatchIDs(t, s, "a", now.Add(5*time.Second), 10))
+	})
+}
+
+func TestDeferNeverShortensARetryBackoff(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		require.NoError(t, s.Enqueue(ctx, req("r", now.Unix()+60)))
+		got, err := s.Dispatch(ctx, "q", "a", now, 1)
+		require.NoError(t, err)
+		_, err = s.db.ExecContext(ctx, `UPDATE async_requests SET not_before = $1`, now.Unix()+30)
+		require.NoError(t, err)
+
+		require.NoError(t, s.Defer(ctx, "a", []Stamp{got[0].Stamp()}, now.Unix()+5))
+		assert.Empty(t, dispatchIDs(t, s, "a", now.Add(10*time.Second), 10))
+		assert.Equal(t, []string{"r"}, dispatchIDs(t, s, "a", now.Add(30*time.Second), 10))
+	})
+}

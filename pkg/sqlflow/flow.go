@@ -399,15 +399,20 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 		return
 	}
 
-	var undispatch []sqlqueue.Stamp
+	var back pollReturns
 	defer func() {
-		if len(undispatch) == 0 {
-			return
-		}
 		uctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 		defer cancel()
-		if err := q.consumer.Undispatch(uctx, undispatch); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "Failed to return requests to the queue; the next rebalance retries", "count", len(undispatch))
+		if len(back.now) > 0 {
+			if err := q.consumer.Undispatch(uctx, back.now); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to return requests to the queue; the next rebalance retries", "count", len(back.now))
+			}
+		}
+		if len(back.later) > 0 {
+			notBefore := time.Now().Add(f.pollInterval).Unix() + 1
+			if err := q.consumer.Defer(uctx, back.later, notBefore); err != nil {
+				logger.V(logutil.DEFAULT).Error(err, "Failed to hold back refused requests; the next rebalance returns them", "count", len(back.later))
+			}
 		}
 	}()
 
@@ -439,16 +444,22 @@ func (f *Flow) processQueue(ctx context.Context, q *queueRuntime, logger logr.Lo
 	}
 
 	for i, e := range entries {
-		if !f.dispatchPolled(ctx, q, e, &undispatch, logger) {
+		if !f.dispatchPolled(ctx, q, e, &back, logger) {
 			for _, rest := range entries[i+1:] {
 				if rest.gated != nil {
 					pipeline.ReleaseGateReleases((<-rest.gated).releases)
 				}
-				undispatch = append(undispatch, rest.row.Stamp())
+				back.now = append(back.now, rest.row.Stamp())
 			}
 			return
 		}
 	}
+}
+
+// pollReturns collects the polled requests a poll gives back: now are pending again at
+// once, later are held back past the next poll because their gate refused them.
+type pollReturns struct {
+	now, later []sqlqueue.Stamp
 }
 
 type polled struct {
@@ -466,15 +477,15 @@ type gateOutcome struct {
 	err      error
 }
 
-// dispatchPolled returns false when ctx ended first; e is then queued for undispatch.
-func (f *Flow) dispatchPolled(ctx context.Context, q *queueRuntime, e polled, undispatch *[]sqlqueue.Stamp, logger logr.Logger) bool {
+// dispatchPolled returns false when ctx ended first; e is then given back.
+func (f *Flow) dispatchPolled(ctx context.Context, q *queueRuntime, e polled, back *pollReturns, logger logr.Logger) bool {
 	cfg := q.config
 	row, ir := e.row, e.ir
 	emit := func(result api.ResultMessage) bool {
 		if f.emit(ctx, result) {
 			return true
 		}
-		*undispatch = append(*undispatch, row.Stamp())
+		back.now = append(back.now, row.Stamp())
 		return false
 	}
 	if ir == nil {
@@ -499,7 +510,7 @@ func (f *Flow) dispatchPolled(ctx context.Context, q *queueRuntime, e polled, un
 		logger.V(logutil.DEFAULT).Error(out.err, "Gating failed")
 		metrics.RecordGateDecision(metrics.ReasonError, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
 		pipeline.ReleaseGateReleases(out.releases)
-		*undispatch = append(*undispatch, row.Stamp())
+		back.later = append(back.later, row.Stamp())
 		return true
 	}
 	switch out.verdict.Action {
@@ -510,7 +521,7 @@ func (f *Flow) dispatchPolled(ctx context.Context, q *queueRuntime, e polled, un
 		}
 		metrics.RecordGateDecision(reason, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
 		pipeline.ReleaseGateReleases(out.releases)
-		*undispatch = append(*undispatch, row.Stamp())
+		back.later = append(back.later, row.Stamp())
 		return true
 	case pipeline.ActionDrop:
 		metrics.RecordGateDecision(metrics.ReasonDropped, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
@@ -533,7 +544,7 @@ func (f *Flow) dispatchPolled(ctx context.Context, q *queueRuntime, e polled, un
 		return true
 	case <-ctx.Done():
 		f.releaseGateReleases(stamp)
-		*undispatch = append(*undispatch, row.Stamp())
+		back.now = append(back.now, row.Stamp())
 		return false
 	}
 }

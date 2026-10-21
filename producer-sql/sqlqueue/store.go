@@ -289,10 +289,21 @@ func (s *Store) ResetStale(ctx context.Context, queue, owner string, partitions 
 	return nil
 }
 
-// Undispatch and Retry only touch a request still carrying the given stamp in a partition owner holds.
+// Undispatch, Defer and Retry only touch a request still carrying the given stamp in a partition owner holds.
 func (s *Store) Undispatch(ctx context.Context, owner string, stamps []Stamp) error {
 	ctx, span := s.span(ctx, "Undispatch")
 	defer span.End()
+	return s.undispatch(ctx, owner, stamps, 0)
+}
+
+// Defer returns dispatched requests to pending, not dispatched again before notBefore.
+func (s *Store) Defer(ctx context.Context, owner string, stamps []Stamp, notBefore int64) error {
+	ctx, span := s.span(ctx, "Defer")
+	defer span.End()
+	return s.undispatch(ctx, owner, stamps, notBefore)
+}
+
+func (s *Store) undispatch(ctx context.Context, owner string, stamps []Stamp, notBefore int64) error {
 	stamps = uniqueStamps(stamps)
 	if len(stamps) == 0 {
 		return nil
@@ -303,13 +314,13 @@ func (s *Store) Undispatch(ctx context.Context, owner string, stamps []Stamp) er
 			ids[i], tokens[i], attempts[i] = st.ID, st.Token, st.Attempt
 		}
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE async_requests SET dispatch_epoch = 0
+			UPDATE async_requests SET dispatch_epoch = 0, not_before = greatest(async_requests.not_before, $5)
 			FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt), async_partitions p
 			WHERE async_requests.id = ANY($2::text[])
 				AND async_requests.id = k.id AND async_requests.request_token = k.request_token
 				AND async_requests.dispatch_epoch > 0 AND async_requests.dispatch_attempt = k.attempt
 				AND p.queue = async_requests.queue AND p.partition_id = async_requests.partition_id
-				AND p.owner = $1`, owner, ids, tokens, attempts); err != nil {
+				AND p.owner = $1`, owner, ids, tokens, attempts, notBefore); err != nil {
 			return fmt.Errorf("update: %w", err)
 		}
 		return nil
