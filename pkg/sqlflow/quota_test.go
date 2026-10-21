@@ -566,3 +566,52 @@ func TestQuotaStoreHeartbeatReapsIdleRows(t *testing.T) {
 		return rows == 0
 	}, 5*time.Second, 20*time.Millisecond, "idle quota rows outlived the heartbeat")
 }
+
+func TestQuotaStoreRegistrationDoesNotHoldTheStoreLock(t *testing.T) {
+	store := cancelTestStore(t)
+	db := quotaDB(t)
+	q := newTestQuotaStore(t, store, time.Minute, 3*time.Second)
+	ctx := context.Background()
+
+	release, ok, err := q.AcquireSlot(ctx, "k", 2)
+	require.NoError(t, err)
+	require.True(t, ok)
+	q.mu.Lock()
+	first := q.current
+	q.mu.Unlock()
+	q.retire(first)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	var pid int
+	require.NoError(t, tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
+	_, err = tx.ExecContext(ctx, `LOCK TABLE async_quota_holders IN ACCESS EXCLUSIVE MODE`)
+	require.NoError(t, err)
+	acquired := make(chan error, 1)
+	go func() {
+		_, _, err := q.AcquireSlot(ctx, "other", 2)
+		acquired <- err
+	}()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))`, pid).Scan(&waiting))
+		return waiting
+	}, 5*time.Second, 5*time.Millisecond, "registration never blocked on the lock")
+
+	settled := make(chan struct{})
+	go func() {
+		q.settle(first, 0)
+		close(settled)
+	}()
+	select {
+	case <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("settling a holder waited for another holder's registration")
+	}
+
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, <-acquired)
+	release()
+}

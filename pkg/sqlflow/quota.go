@@ -32,9 +32,10 @@ type QuotaStore struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu      sync.Mutex
-	current *quotaHolder
-	holders map[*quotaHolder]struct{}
+	registerMu sync.Mutex
+	mu         sync.Mutex
+	current    *quotaHolder
+	holders    map[*quotaHolder]struct{}
 
 	slots *admitBatcher[slotKey]
 	rates *admitBatcher[rateKey]
@@ -165,24 +166,40 @@ func (s *QuotaStore) admitRate(k rateKey, n int) (int, *quotaHolder, error) {
 // begin counts a statement against the current holder, registering one first
 // if there is none.
 func (s *QuotaStore) begin() (*quotaHolder, error) {
+	if h := s.countCurrent(); h != nil {
+		return h, nil
+	}
+	s.registerMu.Lock()
+	defer s.registerMu.Unlock()
+	if h := s.countCurrent(); h != nil {
+		return h, nil
+	}
+	name, err := newOwner()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
+	defer cancel()
+	started := time.Now()
+	if err := s.store.RegisterQuotaHolder(ctx, name, s.ttl); err != nil {
+		return nil, fmt.Errorf("register quota holder: %w", err)
+	}
+	h := &quotaHolder{name: name, renewed: started, known: 1}
+	s.mu.Lock()
+	s.current = h
+	s.holders[h] = struct{}{}
+	s.mu.Unlock()
+	return h, nil
+}
+
+func (s *QuotaStore) countCurrent() *quotaHolder {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.current == nil {
-		name, err := newOwner()
-		if err != nil {
-			return nil, err
-		}
-		ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
-		defer cancel()
-		started := time.Now()
-		if err := s.store.RegisterQuotaHolder(ctx, name, s.ttl); err != nil {
-			return nil, fmt.Errorf("register quota holder: %w", err)
-		}
-		s.current = &quotaHolder{name: name, renewed: started}
-		s.holders[s.current] = struct{}{}
+		return nil
 	}
 	s.current.known++
-	return s.current, nil
+	return s.current
 }
 
 func (s *QuotaStore) retire(h *quotaHolder) {
