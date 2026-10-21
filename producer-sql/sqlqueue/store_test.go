@@ -811,7 +811,7 @@ func TestQueueTablesVacuumOnFixedThresholds(t *testing.T) {
 	for _, table := range []string{"async_requests", "async_results"} {
 		var opts string
 		require.NoError(t, s.db.QueryRowContext(context.Background(),
-			`SELECT array_to_string(reloptions, ',') FROM pg_class WHERE relname = $1`, table).Scan(&opts))
+			`SELECT array_to_string(reloptions, ',') FROM pg_class WHERE oid = $1::regclass`, table).Scan(&opts))
 		for _, want := range []string{"autovacuum_vacuum_scale_factor=0", "autovacuum_vacuum_threshold=10000", "autovacuum_vacuum_cost_delay=0"} {
 			assert.Contains(t, opts, want, table)
 		}

@@ -3,7 +3,6 @@ package sqlqueue
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,11 +60,7 @@ func (r *planRecorder) take() []explainPlan {
 
 func openExplainedStore(t *testing.T) (*Store, *planRecorder) {
 	t.Helper()
-	pgURL := os.Getenv("TEST_POSTGRES_URL")
-	if pgURL == "" {
-		t.Skip("TEST_POSTGRES_URL not set")
-	}
-	cfg, err := pgx.ParseConfig(pgURL)
+	cfg, err := pgx.ParseConfig(isolatedDSN(t))
 	require.NoError(t, err)
 	rec := &planRecorder{}
 	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
@@ -138,7 +133,7 @@ func TestQueueStatementsStayKeyedUnderEmptyStatistics(t *testing.T) {
 	exec(`DELETE FROM async_results`)
 	exec(`ANALYZE async_requests, async_results, async_partitions`)
 	var tuples float64
-	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT reltuples FROM pg_class WHERE relname = 'async_requests'`).Scan(&tuples))
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT reltuples FROM pg_class WHERE oid = 'async_requests'::regclass`).Scan(&tuples))
 	require.Zero(t, tuples, "statistics describe the drained table")
 	fill("live")
 
