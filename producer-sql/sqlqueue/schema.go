@@ -2,7 +2,9 @@ package sqlqueue
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
@@ -28,6 +30,10 @@ func redactDSN(dsn string) string {
 // cost throttling; percentage thresholds let dead tuples pile up at the head of the pending
 // index until every dispatch scans them.
 const postgresDDL = `
+CREATE TABLE IF NOT EXISTS async_schema (
+	version TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS async_requests (
 	id             TEXT     NOT NULL,
 	request_token  TEXT     NOT NULL,
@@ -209,13 +215,25 @@ END $$`}
 
 const migrateLockID = 0x6173796e6371 // "asyncq"
 
-// Migrate is safe to run concurrently; an existing schema takes no DDL locks.
-func (s *Store) Migrate(ctx context.Context) error {
-	var present bool
-	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('async_quota_windows') IS NOT NULL AND to_regproc('async_quota_admit') IS NOT NULL AND to_regproc('async_pop_results') IS NOT NULL`).Scan(&present); err != nil {
-		return fmt.Errorf("sqlqueue: migrate: check schema: %w", err)
+// schemaVersion identifies the DDL and functions this build creates.
+func schemaVersion() string {
+	h := sha256.New()
+	h.Write([]byte(postgresDDL))
+	for _, fn := range postgresFunctions() {
+		h.Write([]byte(fn))
 	}
-	if present {
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// Migrate creates the schema in a database that has none and refuses one that another
+// build created. It is safe to run concurrently; a current schema takes no DDL locks.
+func (s *Store) Migrate(ctx context.Context) error {
+	want := schemaVersion()
+	have, err := readSchemaVersion(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if have == want {
 		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -226,6 +244,22 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, migrateLockID); err != nil {
 		return fmt.Errorf("sqlqueue: migrate: lock: %w", err)
 	}
+	if have, err = readSchemaVersion(ctx, tx); err != nil {
+		return err
+	}
+	switch {
+	case have == want:
+		return nil
+	case have != "":
+		return fmt.Errorf("sqlqueue: migrate: the database holds schema %s but this build uses %s, and the sql transport does not migrate: drop the async_* tables to recreate them", have, want)
+	}
+	var tables int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'async\_%'`).Scan(&tables); err != nil {
+		return fmt.Errorf("sqlqueue: migrate: list tables: %w", err)
+	}
+	if tables > 0 {
+		return fmt.Errorf("sqlqueue: migrate: the database holds async_* tables with no schema version, and the sql transport does not migrate: drop them to recreate them")
+	}
 	if err := execDDL(ctx, tx, postgresDDL); err != nil {
 		return err
 	}
@@ -234,10 +268,33 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("sqlqueue: migrate: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO async_schema (version) VALUES ($1)`, want); err != nil {
+		return fmt.Errorf("sqlqueue: migrate: record schema version: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sqlqueue: migrate: commit: %w", err)
 	}
 	return nil
+}
+
+type queryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// readSchemaVersion returns "" when the database has no schema version.
+func readSchemaVersion(ctx context.Context, db queryer) (string, error) {
+	var present bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = current_schema() AND tablename = 'async_schema')`).Scan(&present); err != nil {
+		return "", fmt.Errorf("sqlqueue: migrate: check schema: %w", err)
+	}
+	if !present {
+		return "", nil
+	}
+	var version string
+	if err := db.QueryRowContext(ctx, `SELECT coalesce(max(version), '') FROM async_schema`).Scan(&version); err != nil {
+		return "", fmt.Errorf("sqlqueue: migrate: read schema version: %w", err)
+	}
+	return version, nil
 }
 
 type execer interface {

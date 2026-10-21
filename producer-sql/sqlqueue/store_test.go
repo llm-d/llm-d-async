@@ -2,7 +2,9 @@ package sqlqueue
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -30,6 +32,28 @@ func openStore(t *testing.T) *Store {
 	t.Cleanup(func() { _ = s.Close() })
 	require.NoError(t, s.TruncateForTest(ctx))
 	return s
+}
+
+// isolatedDSN returns a DSN whose search_path is a schema of its own, dropped when the test ends.
+func isolatedDSN(t *testing.T) string {
+	t.Helper()
+	pgURL := os.Getenv("TEST_POSTGRES_URL")
+	if pgURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+	admin, err := sql.Open("pgx", pgURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	schema := fmt.Sprintf("sqlqueue_%d", time.Now().UnixNano())
+	_, err = admin.Exec("CREATE SCHEMA " + schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	u, err := url.Parse(pgURL)
+	require.NoError(t, err)
+	query := u.Query()
+	query.Set("search_path", schema)
+	u.RawQuery = query.Encode()
+	return u.String()
 }
 
 func withStore(t *testing.T, fn func(t *testing.T, s *Store)) {
@@ -107,6 +131,45 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		require.NoError(t, s.Migrate(context.Background()))
 		require.NoError(t, s.Migrate(context.Background()))
 	})
+}
+
+func TestMigrateRecordsTheSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, isolatedDSN(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	var version string
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT version FROM async_schema`).Scan(&version))
+	assert.Equal(t, schemaVersion(), version)
+}
+
+func TestMigrateRefusesASchemaFromAnotherBuild(t *testing.T) {
+	ctx := context.Background()
+	dsn := isolatedDSN(t)
+	s, err := Open(ctx, dsn)
+	require.NoError(t, err)
+	_, err = s.db.ExecContext(ctx, `UPDATE async_schema SET version = 'older-build'`)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	_, err = Open(ctx, dsn)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "older-build")
+	assert.Contains(t, err.Error(), "drop the async_* tables")
+}
+
+func TestMigrateRefusesUnversionedTables(t *testing.T) {
+	ctx := context.Background()
+	dsn := isolatedDSN(t)
+	s, err := Open(ctx, dsn)
+	require.NoError(t, err)
+	_, err = s.db.ExecContext(ctx, `DROP TABLE async_schema`)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	_, err = Open(ctx, dsn)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no schema version")
 }
 
 func TestPartitionOfIsStableAndCoversEveryPartition(t *testing.T) {
@@ -302,7 +365,10 @@ func TestConcurrentOpenCreatesSchemaOnce(t *testing.T) {
 	var tables int
 	require.NoError(t, admin.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1`, schema).Scan(&tables))
-	assert.Equal(t, 9, tables)
+	assert.Equal(t, 10, tables)
+	var versions int
+	require.NoError(t, admin.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+schema+`.async_schema`).Scan(&versions))
+	assert.Equal(t, 1, versions, "one opener created the schema")
 }
 
 func TestResetStaleIsScopedAndSkipsLockedRows(t *testing.T) {
