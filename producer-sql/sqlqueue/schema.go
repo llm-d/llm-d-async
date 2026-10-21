@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS async_results (
 	autovacuum_vacuum_cost_delay = 0
 );
 CREATE INDEX IF NOT EXISTS async_results_route_seq ON async_results (route, seq);
-CREATE INDEX IF NOT EXISTS async_results_expiry ON async_results (route, expires_at) WHERE expires_at > 0;
+CREATE INDEX IF NOT EXISTS async_results_expiry ON async_results (expires_at) WHERE expires_at > 0;
 
 CREATE SEQUENCE IF NOT EXISTS async_dispatch_attempts;
 

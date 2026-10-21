@@ -883,3 +883,36 @@ func TestOpenCapsAndReusesConnections(t *testing.T) {
 	assert.LessOrEqual(t, sessions()-before, int64(maxConns), "bursts reuse idle connections instead of starting new backends")
 	assert.Equal(t, maxConns, s.db.Stats().Idle)
 }
+
+func TestExpireResultsReachesEveryRoute(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		const now = 1_000_000
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO async_results (route, id, request_token, payload, expires_at, created_at) VALUES
+				('polled', 'a', 't', '{}', $1 - 1, 0),
+				('abandoned', 'b', 't', '{}', $1 - 1, 0),
+				('abandoned', 'c', 't', '{}', $1 + 60, 0),
+				('abandoned', 'd', 't', '{}', 0, 0)`, now)
+		require.NoError(t, err)
+
+		n, err := s.ExpireResults(ctx, now, 1)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, n, "the batch limit bounds one call")
+		n, err = s.ExpireResults(ctx, now, 100)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, n)
+
+		var left []string
+		rows, err := s.db.QueryContext(ctx, `SELECT id FROM async_results ORDER BY id`)
+		require.NoError(t, err)
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var id string
+			require.NoError(t, rows.Scan(&id))
+			left = append(left, id)
+		}
+		require.NoError(t, rows.Err())
+		assert.Equal(t, []string{"c", "d"}, left, "unexpired and TTL-less results stay")
+	})
+}

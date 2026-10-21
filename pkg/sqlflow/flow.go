@@ -28,6 +28,7 @@ const (
 	storeAttempts       = 3
 	storeBackoff        = 100 * time.Millisecond
 	releaseTimeout      = 5 * time.Second
+	resultExpiryBatch   = 1000
 )
 
 var (
@@ -299,10 +300,30 @@ func (f *Flow) heartbeat(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		f.rebalance(ctx)
+		f.expireResults(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+// expireResults deletes expired results on every route, including ones no consumer polls.
+func (f *Flow) expireResults(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, f.storeTimeout())
+	defer cancel()
+	now := time.Now().Unix()
+	for {
+		n, err := f.store.ExpireResults(ctx, now, resultExpiryBatch)
+		if err != nil {
+			if parent.Err() == nil {
+				log.FromContext(ctx).V(logutil.DEFAULT).Error(err, "Failed to expire results")
+			}
+			return
+		}
+		if n < resultExpiryBatch {
+			return
 		}
 	}
 }

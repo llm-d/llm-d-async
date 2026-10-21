@@ -208,3 +208,24 @@ func TestCancelledPollReturnsEveryRowAndSlot(t *testing.T) {
 	f.releaseGateReleases(sqlqueue.Stamp{Key: sqlqueue.Key{ID: ir.PublicRequest.ReqID(), Token: ir.RequestToken}, Attempt: ir.DispatchAttempt})
 	eventuallySlots(t, db, "quota:userid:alice", 0)
 }
+
+func TestExpireResultsDrainsMoreThanOneBatch(t *testing.T) {
+	store := cancelTestStore(t)
+	ctx := context.Background()
+	f, err := NewWithStore(ctx, store, Config{Queues: []QueueConfig{{ID: "q", QueueName: "q", WorkerPoolID: "default"}}}, []pipeline.WorkerPoolConfig{{ID: "default"}}, nil)
+	require.NoError(t, err)
+	t.Cleanup(f.cancelChecks.stop)
+	t.Cleanup(f.quota.Close)
+
+	db := quotaDB(t)
+	const expired = resultExpiryBatch*2 + 7
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO async_results (route, id, request_token, payload, expires_at, created_at)
+		SELECT 'route-' || (g % 5), 'r' || g, 't', '{}', 1, 0 FROM generate_series(1, $1) g`, expired)
+	require.NoError(t, err)
+
+	f.expireResults(ctx)
+	var left int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM async_results`).Scan(&left))
+	assert.Zero(t, left)
+}

@@ -506,6 +506,25 @@ func (s *Store) PopResults(ctx context.Context, route string, now int64, limit i
 	return out, nil
 }
 
+// ExpireResults deletes up to limit results on any route whose TTL ended before now and
+// returns how many it deleted.
+func (s *Store) ExpireResults(ctx context.Context, now int64, limit int) (int64, error) {
+	ctx, span := s.span(ctx, "ExpireResults")
+	defer span.End()
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM async_results WHERE seq = ANY(ARRAY(
+			SELECT seq FROM async_results WHERE expires_at > 0 AND expires_at < $1
+			ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED))`, now, limit)
+	if err != nil {
+		return 0, fmt.Errorf("sqlqueue: expire results: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sqlqueue: expire results: %w", err)
+	}
+	return n, nil
+}
+
 func (s *Store) HasRequests(ctx context.Context, queue string) (bool, error) {
 	var found int
 	if err := s.db.QueryRowContext(ctx, `
