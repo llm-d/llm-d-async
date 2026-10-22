@@ -1,36 +1,26 @@
 # SQL Transport Schema Migrations
 
 The `sql` transport's Postgres schema is owned by the `migrate` package
-(`producer-sql/sqlqueue/migrate`). The processor and `producer-sql` never run
-DDL. On startup they read the `async_schema_migrations` table and refuse to
-start if it is missing or behind the version they were built with.
+(`producer-sql/sqlqueue/migrate`). The processor applies pending migrations
+when it starts, so upgrading is just rolling out the new image. `producer-sql`
+never runs DDL: it reads the `async_schema_migrations` table and refuses to
+start if it is missing or behind the version it was built with, so an
+application that submits through it needs a processor of the same release or
+newer to have started against the database first.
 
 ## How the schema gets applied
 
-The processor binary has a `migrate` subcommand:
-
-```bash
-llm-d-async migrate                                          # URL from SQL_URL
-llm-d-async migrate --postgresql-url 'postgres://user:pass@host:5432/async'
-```
-
-The Helm chart renders it as an initContainer on the processor Deployment when
-`ap.transport` is `sql`, using the processor's own image and the same `SQL_URL`
-Secret, so `helm upgrade` migrates the database before the new processor
-starts. Nothing else is needed to upgrade.
-
-A run takes a transaction-scoped advisory lock before it does anything else,
-creates `async_schema_migrations` if needed, applies every migration newer than
-the recorded version, and commits. Concurrent runs (several replicas starting
-at once, or several pods in a rollout) queue on the lock; the first one applies
+The processor opens its store with `sqlqueue.WithMigrate()`. A run takes a
+transaction-scoped advisory lock before it does anything else, creates
+`async_schema_migrations` if needed, applies every migration newer than the
+recorded version, and commits. Concurrent runs (several replicas starting at
+once, or several pods in a rollout) queue on the lock; the first one applies
 the migrations and the rest find nothing to do. A failed migration rolls back
-completely, so the database is never left half-migrated.
+completely, so the database is never left half-migrated, and the processor
+exits instead of starting.
 
-A processor whose database is newer than it expects logs that and keeps
-running, so a rollback after a migration works. `producer-sql` applies the same
-check, so an application that submits through it needs the database migrated
-before it starts: run the subcommand from its deploy, or start the processor
-first.
+A database newer than a build expects is accepted, so a rollback after a
+migration works.
 
 Upgrading a database created before migrations existed needs nothing special.
 Migration `0001` uses `IF NOT EXISTS` and `CREATE OR REPLACE`, so it adopts

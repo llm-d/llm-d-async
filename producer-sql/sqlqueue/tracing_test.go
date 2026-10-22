@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -21,10 +20,9 @@ func TestTracingRecordsPostgresStatements(t *testing.T) {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
 	ctx := context.Background()
-	require.NoError(t, migrate.RunCommand(ctx, []string{"--postgresql-url", pgURL}))
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
-	s, err := Open(ctx, pgURL, WithTracerProvider(tp))
+	s, err := Open(ctx, pgURL, WithTracerProvider(tp), WithMigrate())
 	require.NoError(t, err)
 	defer func() { _ = s.Close() }()
 	require.NoError(t, s.TruncateForTest(ctx))

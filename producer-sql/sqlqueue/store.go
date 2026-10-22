@@ -42,6 +42,7 @@ type Store struct {
 type openOptions struct {
 	tracerProvider trace.TracerProvider
 	maxConns       int
+	migrate        bool
 }
 
 // OpenOption configures Open.
@@ -56,6 +57,12 @@ func WithMaxConns(n int) OpenOption {
 // WithTracerProvider records a span per database statement.
 func WithTracerProvider(tp trace.TracerProvider) OpenOption {
 	return func(o *openOptions) { o.tracerProvider = tp }
+}
+
+// WithMigrate applies pending schema migrations instead of only checking that
+// the schema is current.
+func WithMigrate() OpenOption {
+	return func(o *openOptions) { o.migrate = true }
 }
 
 func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
@@ -88,7 +95,12 @@ func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlqueue: ping: %w", err)
 	}
-	if err := migrate.Check(ctx, db); err != nil {
+	if o.migrate {
+		_, err = migrate.Run(ctx, db)
+	} else {
+		err = migrate.Check(ctx, db)
+	}
+	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlqueue: %w", err)
 	}

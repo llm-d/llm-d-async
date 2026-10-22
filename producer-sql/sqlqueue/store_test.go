@@ -27,8 +27,7 @@ func openStore(t *testing.T) *Store {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
 	ctx := context.Background()
-	require.NoError(t, migrate.RunCommand(ctx, []string{"--postgresql-url", pgURL}))
-	s, err := Open(ctx, pgURL)
+	s, err := Open(ctx, pgURL, WithMigrate())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	require.NoError(t, s.TruncateForTest(ctx))
@@ -279,14 +278,16 @@ func TestInFlightListsCurrentEpochStampsOfOwnedPartitions(t *testing.T) {
 	})
 }
 
-func TestOpenRefusesAnUnmigratedDatabase(t *testing.T) {
+func TestOpenMigratesOnlyWhenAsked(t *testing.T) {
 	ctx := context.Background()
 	dsn := isolatedDSN(t)
 	_, err := Open(ctx, dsn)
 	require.ErrorIs(t, err, migrate.ErrSchemaMissing)
 
-	require.NoError(t, migrate.RunCommand(ctx, []string{"--postgresql-url", dsn}))
-	s, err := Open(ctx, dsn)
+	s, err := Open(ctx, dsn, WithMigrate())
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	s, err = Open(ctx, dsn)
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 }
@@ -294,12 +295,13 @@ func TestOpenRefusesAnUnmigratedDatabase(t *testing.T) {
 func TestOpenRunsAgainstANewerAdditiveSchema(t *testing.T) {
 	ctx := context.Background()
 	dsn := isolatedDSN(t)
-	require.NoError(t, migrate.RunCommand(ctx, []string{"--postgresql-url", dsn}))
-	latest, err := migrate.LatestVersion()
-	require.NoError(t, err)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+	_, err = migrate.Run(ctx, db)
+	require.NoError(t, err)
+	latest, err := migrate.LatestVersion()
+	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
 		ALTER TABLE async_requests ADD COLUMN note TEXT NOT NULL DEFAULT '';
 		ALTER TABLE async_results ADD COLUMN note TEXT NOT NULL DEFAULT ''`)

@@ -18,7 +18,6 @@ import (
 	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	"github.com/llm-d/llm-d-async/pkg/sqlflow"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
-	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,8 +61,7 @@ func openSQLStore(t *testing.T) *sqlqueue.Store {
 	query := u.Query()
 	query.Set("search_path", schema)
 	u.RawQuery = query.Encode()
-	require.NoError(t, migrate.RunCommand(context.Background(), []string{"--postgresql-url", u.String()}))
-	store, err := sqlqueue.Open(context.Background(), u.String())
+	store, err := sqlqueue.Open(context.Background(), u.String(), sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -213,35 +214,5 @@ func TestCheck(t *testing.T) {
 		_, err = db.Exec(insertVersion, 9999, "from_the_future")
 		require.NoError(t, err)
 		require.NoError(t, Check(ctx, db))
-	})
-}
-
-func TestRunCommand(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("flag", func(t *testing.T) {
-		u := isolatedURL(t)
-		require.NoError(t, RunCommand(ctx, []string{"--postgresql-url", u}))
-		db, err := sql.Open("pgx", u)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = db.Close() })
-		require.NoError(t, Check(ctx, db))
-	})
-
-	t.Run("environment", func(t *testing.T) {
-		u := isolatedURL(t)
-		t.Setenv(urlEnv, u)
-		require.NoError(t, RunCommand(ctx, nil))
-		db, err := sql.Open("pgx", u)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = db.Close() })
-		require.NoError(t, Check(ctx, db))
-	})
-
-	t.Run("no url", func(t *testing.T) {
-		t.Setenv(urlEnv, "")
-		err := RunCommand(ctx, nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--postgresql-url")
 	})
 }

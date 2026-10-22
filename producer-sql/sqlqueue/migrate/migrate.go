@@ -40,9 +40,9 @@ const (
 
 var (
 	// ErrSchemaMissing means the database has never been migrated.
-	ErrSchemaMissing = errors.New("sql transport schema not initialized: run llm-d-async migrate")
+	ErrSchemaMissing = errors.New("sql transport schema not initialized: start an llm-d-async processor against this database")
 	// ErrSchemaBehind means the database is at an older version than the binary expects.
-	ErrSchemaBehind = errors.New("sql transport schema is behind: run llm-d-async migrate")
+	ErrSchemaBehind = errors.New("sql transport schema is behind: upgrade the llm-d-async processor")
 )
 
 var fileNamePattern = regexp.MustCompile(`^(\d{4})_([a-z0-9_]+)\.sql$`)

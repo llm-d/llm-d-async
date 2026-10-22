@@ -300,7 +300,7 @@ This transport does not support per-queue dispatch gates (see [Queue and Topic E
 
 ### SQL (Postgres)
 
-> **Experimental:** opt in with `--transport sql`. Its config may change between releases without a deprecation period. The schema is versioned: `llm-d-async migrate` applies it (the Helm chart runs it as an initContainer), and a processor or producer refuses to start against a database that is missing it or behind. See [SQL Transport Schema Migrations](sql-migrations.md).
+> **Experimental:** opt in with `--transport sql`. Its config may change between releases without a deprecation period. The schema is versioned: the processor applies pending migrations at startup, and a producer refuses to start against a database that is missing the schema or behind it. See [SQL Transport Schema Migrations](sql-migrations.md).
 
 A persisted implementation on Postgres, selected with `--transport sql`. It keeps the `redis-sortedset` semantics (earliest-deadline-first dispatch, fenced claims with lease-based redelivery, per-queue gates, exact backlog and deadline-proximity metrics) without a Redis dependency: several processors share one database. Producers submit with the `producer-sql` module against the same database. The `redis` and `redis-leased-rate` gate types still need Redis; use `sql-quota` in place of `redis-quota`. Every other gate type works unchanged.
 

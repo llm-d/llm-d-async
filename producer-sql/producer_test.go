@@ -10,7 +10,6 @@ import (
 
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
-	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,8 +21,7 @@ func newProducer(t *testing.T) (*Producer, *sqlqueue.Store) {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
 	ctx := context.Background()
-	require.NoError(t, migrate.RunCommand(ctx, []string{"--postgresql-url", pgURL}))
-	store, err := sqlqueue.Open(ctx, pgURL)
+	store, err := sqlqueue.Open(ctx, pgURL, sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	require.NoError(t, store.TruncateForTest(ctx))
 	t.Cleanup(func() { _ = store.Close() })

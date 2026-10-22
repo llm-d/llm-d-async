@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
-	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 )
 
 func cancelTestStore(t *testing.T) *sqlqueue.Store {
@@ -24,8 +23,7 @@ func cancelTestStore(t *testing.T) *sqlqueue.Store {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
 	ctx := context.Background()
-	require.NoError(t, migrate.RunCommand(ctx, []string{"--postgresql-url", pgURL}))
-	s, err := sqlqueue.Open(ctx, pgURL)
+	s, err := sqlqueue.Open(ctx, pgURL, sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	require.NoError(t, s.TruncateForTest(ctx))
