@@ -21,7 +21,7 @@ func newProducer(t *testing.T) (*Producer, *sqlqueue.Store) {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
 	ctx := context.Background()
-	store, err := sqlqueue.Open(ctx, pgURL)
+	store, err := sqlqueue.Open(ctx, pgURL, sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	require.NoError(t, store.TruncateForTest(ctx))
 	t.Cleanup(func() { _ = store.Close() })
