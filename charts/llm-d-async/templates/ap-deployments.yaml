@@ -58,6 +58,9 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      {{- with include "llm-d-async.migrateInitContainer" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
       - command:
         # Must match the binary produced by the Dockerfile (ENTRYPOINT /llm-d-async).

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -86,11 +88,27 @@ func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlqueue: ping: %w", err)
 	}
-	if err := s.Migrate(ctx); err != nil {
+	if err := migrate.Check(ctx, db); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("sqlqueue: %w", err)
 	}
 	return s, nil
+}
+
+func validateDSN(dsn string) error {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		return nil
+	}
+	return fmt.Errorf("sqlqueue: unsupported DSN scheme in %q (want postgres:// or postgresql://)", redactDSN(dsn))
+}
+
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return dsn
+	}
+	u.User = url.User("redacted")
+	return u.String()
 }
 
 func (s *Store) span(ctx context.Context, op string) (context.Context, trace.Span) {

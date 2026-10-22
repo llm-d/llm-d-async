@@ -544,3 +544,51 @@ tests:
                 name: RELEASE-NAME-llm-d-async-sql
                 key: url
           any: true
+
+  # --- Schema migration initContainer ---
+
+  - it: should run migrate as an initContainer for the sql transport
+    set:
+      ap.redis.secretName: ""
+      ap.transport: sql
+      ap.transportConfig.urlSecret.name: batch-gateway-secrets
+      ap.transportConfig.urlSecret.key: postgresql-url
+      ap.image.tag: v9.9.9
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: migrate
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value: ["migrate"]
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/llm-d/llm-d-async:v9.9.9
+      - equal:
+          path: spec.template.spec.initContainers[0].env
+          value:
+            - name: SQL_URL
+              valueFrom:
+                secretKeyRef:
+                  name: batch-gateway-secrets
+                  key: postgresql-url
+
+  - it: should pass an inline sql url to the migrate initContainer
+    set:
+      ap.redis.secretName: ""
+      ap.transport: sql
+      ap.transportConfig.url: postgres://u@db:5432/async
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value: ["migrate", "--postgresql-url=postgres://u@db:5432/async"]
+      - notExists:
+          path: spec.template.spec.initContainers[0].env
+
+  - it: should not render a migrate initContainer for other transports
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers

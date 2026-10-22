@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -469,6 +470,7 @@ func proxiedStore(t *testing.T) (*replyDropper, *sqlqueue.Store) {
 	if pgURL == "" {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
+	require.NoError(t, migrate.RunCommand(context.Background(), []string{"--postgresql-url", pgURL}))
 	u, err := url.Parse(pgURL)
 	require.NoError(t, err)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

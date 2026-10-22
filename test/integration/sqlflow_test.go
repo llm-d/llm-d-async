@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-async/pkg/sqlflow"
 	producersql "github.com/llm-d/llm-d-async/producer-sql"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +37,7 @@ func sqlDSN(t *testing.T) string {
 	if dsn == "" {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
+	require.NoError(t, migrate.RunCommand(context.Background(), []string{"--postgresql-url", dsn}))
 	store, err := sqlqueue.Open(context.Background(), dsn)
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()

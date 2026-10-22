@@ -1,39 +1,8 @@
-package sqlqueue
+DROP TABLE IF EXISTS async_schema;
 
-import (
-	"context"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/hex"
-	"fmt"
-	"net/url"
-	"strings"
-)
-
-func validateDSN(dsn string) error {
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		return nil
-	}
-	return fmt.Errorf("sqlqueue: unsupported DSN scheme in %q (want postgres:// or postgresql://)", redactDSN(dsn))
-}
-
-func redactDSN(dsn string) string {
-	u, err := url.Parse(dsn)
-	if err != nil || u.User == nil {
-		return dsn
-	}
-	u.User = url.User("redacted")
-	return u.String()
-}
-
-// Queue tables churn their whole contents, so autovacuum runs on a fixed row count without
-// cost throttling; percentage thresholds let dead tuples pile up at the head of the pending
-// index until every dispatch scans them.
-const postgresDDL = `
-CREATE TABLE IF NOT EXISTS async_schema (
-	version TEXT NOT NULL
-);
-
+-- Queue tables churn their whole contents, so autovacuum runs on a fixed row count without
+-- cost throttling; percentage thresholds let dead tuples pile up at the head of the pending
+-- index until every dispatch scans them.
 CREATE TABLE IF NOT EXISTS async_requests (
 	id             TEXT     NOT NULL,
 	request_token  TEXT     NOT NULL,
@@ -128,13 +97,10 @@ CREATE TABLE IF NOT EXISTS async_quota_admits (
 	n         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS async_quota_admits_key ON async_quota_admits (key, window_ms, at_ms);
-`
 
-// The dispatch and result picks walk an index in order and stop at the limit. Queue
-// statistics swing between empty and full within seconds, and a planner that believes the
-// table is empty prefers a seq or bitmap scan that sorts every row, so these run with both off.
-func postgresFunctions() []string {
-	return []string{`
+-- The dispatch and result picks walk an index in order and stop at the limit. Queue
+-- statistics swing between empty and full within seconds, and a planner that believes the
+-- table is empty prefers a seq or bitmap scan that sorts every row, so these run with both off.
 CREATE OR REPLACE FUNCTION async_dispatch(p_owner TEXT, p_queue TEXT, p_now BIGINT, p_limit INTEGER)
 RETURNS SETOF async_requests LANGUAGE sql SET enable_seqscan = off SET enable_bitmapscan = off AS $$
 	WITH picked AS MATERIALIZED (
@@ -152,14 +118,16 @@ RETURNS SETOF async_requests LANGUAGE sql SET enable_seqscan = off SET enable_bi
 	WHERE r.ctid = ANY(ARRAY(SELECT ctid FROM picked))
 		AND p.queue = r.queue AND p.partition_id = r.partition_id AND p.owner = p_owner AND p.draining = 0
 	RETURNING r.*
-$$`, `
+$$;
+
 CREATE OR REPLACE FUNCTION async_pop_results(p_route TEXT, p_limit INTEGER)
 RETURNS SETOF async_results LANGUAGE sql SET enable_seqscan = off SET enable_bitmapscan = off AS $$
 	DELETE FROM async_results
 	WHERE route = p_route AND seq = ANY(ARRAY(
 		SELECT seq FROM async_results WHERE route = p_route ORDER BY seq LIMIT p_limit FOR UPDATE SKIP LOCKED))
 	RETURNING *
-$$`, `
+$$;
+
 CREATE OR REPLACE FUNCTION async_quota_acquire(p_key TEXT, p_holder TEXT, p_n INTEGER, p_limit INTEGER)
 RETURNS INTEGER LANGUAGE plpgsql AS $$
 DECLARE
@@ -186,7 +154,8 @@ BEGIN
 		ON CONFLICT (key, holder) DO UPDATE SET used = async_quota_slots.used + EXCLUDED.used;
 	END IF;
 	RETURN v_grant;
-END $$`, `
+END $$;
+
 CREATE OR REPLACE FUNCTION async_quota_admit(p_key TEXT, p_n INTEGER, p_limit INTEGER, p_window_ms BIGINT)
 RETURNS INTEGER LANGUAGE plpgsql AS $$
 DECLARE
@@ -216,7 +185,8 @@ BEGIN
 		UPDATE async_quota_windows SET used = v_used + v_grant WHERE key = p_key AND window_ms = p_window_ms;
 	END IF;
 	RETURN v_grant;
-END $$`, `
+END $$;
+
 CREATE OR REPLACE FUNCTION async_quota_reap(p_limit INTEGER)
 RETURNS INTEGER LANGUAGE plpgsql AS $$
 DECLARE
@@ -265,106 +235,4 @@ BEGIN
 		FOR UPDATE SKIP LOCKED));
 	GET DIAGNOSTICS v_rows = ROW_COUNT;
 	RETURN v_total + v_rows;
-END $$`}
-}
-
-const migrateLockID = 0x6173796e6371 // "asyncq"
-
-// schemaVersion identifies the DDL and functions this build creates.
-func schemaVersion() string {
-	h := sha256.New()
-	h.Write([]byte(postgresDDL))
-	for _, fn := range postgresFunctions() {
-		h.Write([]byte(fn))
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
-}
-
-// Migrate creates the schema in a database that has none and refuses one that another
-// build created. It is safe to run concurrently; a current schema takes no DDL locks.
-func (s *Store) Migrate(ctx context.Context) error {
-	want := schemaVersion()
-	have, err := readSchemaVersion(ctx, s.db)
-	if err != nil {
-		return err
-	}
-	if have == want {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlqueue: migrate: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, migrateLockID); err != nil {
-		return fmt.Errorf("sqlqueue: migrate: lock: %w", err)
-	}
-	if have, err = readSchemaVersion(ctx, tx); err != nil {
-		return err
-	}
-	switch {
-	case have == want:
-		return nil
-	case have != "":
-		return fmt.Errorf("sqlqueue: migrate: the database holds schema %s but this build uses %s, and the sql transport does not migrate: drop the async_* tables to recreate them", have, want)
-	}
-	var tables int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'async\_%'`).Scan(&tables); err != nil {
-		return fmt.Errorf("sqlqueue: migrate: list tables: %w", err)
-	}
-	if tables > 0 {
-		return fmt.Errorf("sqlqueue: migrate: the database holds async_* tables with no schema version, and the sql transport does not migrate: drop them to recreate them")
-	}
-	if err := execDDL(ctx, tx, postgresDDL); err != nil {
-		return err
-	}
-	for _, fn := range postgresFunctions() {
-		if _, err := tx.ExecContext(ctx, fn); err != nil {
-			return fmt.Errorf("sqlqueue: migrate: %w", err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO async_schema (version) VALUES ($1)`, want); err != nil {
-		return fmt.Errorf("sqlqueue: migrate: record schema version: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sqlqueue: migrate: commit: %w", err)
-	}
-	return nil
-}
-
-type queryer interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-// readSchemaVersion returns "" when the database has no schema version.
-func readSchemaVersion(ctx context.Context, db queryer) (string, error) {
-	var present bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = current_schema() AND tablename = 'async_schema')`).Scan(&present); err != nil {
-		return "", fmt.Errorf("sqlqueue: migrate: check schema: %w", err)
-	}
-	if !present {
-		return "", nil
-	}
-	var version string
-	if err := db.QueryRowContext(ctx, `SELECT coalesce(max(version), '') FROM async_schema`).Scan(&version); err != nil {
-		return "", fmt.Errorf("sqlqueue: migrate: read schema version: %w", err)
-	}
-	return version, nil
-}
-
-type execer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-func execDDL(ctx context.Context, db execer, ddl string) error {
-	for _, stmt := range strings.Split(ddl, ";") {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("sqlqueue: migrate: %w", err)
-		}
-	}
-	return nil
-}
+END $$;

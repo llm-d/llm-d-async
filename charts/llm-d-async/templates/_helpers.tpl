@@ -219,3 +219,40 @@ url
 {{- .Values.ap.redis.secretKey -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+initContainer that runs the `migrate` subcommand before the processor starts.
+Only rendered for the sql transport. Concurrent runs across pods serialize
+inside Postgres, so every replica can carry it.
+*/}}
+{{- define "llm-d-async.migrateInitContainer" -}}
+{{- if eq (include "llm-d-async.transport" .) "sql" -}}
+initContainers:
+- name: migrate
+  command:
+  - /llm-d-async
+  args:
+  - migrate
+  {{- if hasKey (.Values.ap.transportConfig | default dict) "url" }}
+  - --postgresql-url={{ .Values.ap.transportConfig.url }}
+  {{- end }}
+  image: "{{ .Values.ap.image.repository }}:{{ .Values.ap.image.tag | default .Chart.AppVersion }}"
+  imagePullPolicy: "{{ .Values.ap.imagePullPolicy }}"
+  {{- if include "llm-d-async.redisSecretName" . }}
+  env:
+  - name: SQL_URL
+    valueFrom:
+      secretKeyRef:
+        name: {{ include "llm-d-async.redisSecretName" . }}
+        key: {{ include "llm-d-async.redisSecretKey" . }}
+  {{- end }}
+  {{- with .Values.ap.securityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.ap.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}
