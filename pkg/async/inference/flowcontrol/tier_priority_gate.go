@@ -56,6 +56,9 @@ func (g *TierPriorityAdmissionGate) Apply(ctx context.Context, msg *api.Internal
 			ID:      msg.PublicRequest.ReqID(),
 			Payload: `{"error": "Too Many Requests", "code": 429}`,
 			Routing: msg.InternalRouting,
+			// Alias the request map, same as api.NewErrorResult.
+			// The Pub/Sub drop path copies before it fills result_route.
+			Metadata: msg.PublicRequest.ReqMetadata(),
 		}
 		return pipeline.Drop(result), nil
 	}

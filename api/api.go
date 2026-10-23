@@ -110,6 +110,9 @@ const (
 	ErrCodeInferenceError     = "INFERENCE_ERROR"
 	ErrCodeInvalidRequest     = "INVALID_REQUEST"
 	ErrCodePayloadUnavailable = "PAYLOAD_UNAVAILABLE"
+	// ErrCodeDeadLettered is returned by the GCP producer when Pub/Sub moves
+	// the request to the dead-letter topic. No inference result was published.
+	ErrCodeDeadLettered = "DEAD_LETTERED"
 )
 
 // CancellationChecker reports whether a specific request generation has been cancelled.
