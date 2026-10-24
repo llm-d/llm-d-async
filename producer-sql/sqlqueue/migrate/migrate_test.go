@@ -158,6 +158,32 @@ func TestRun(t *testing.T) {
 		assert.Equal(t, 1, kept, "adopting the schema keeps its rows")
 	})
 
+	t.Run("result claims keep results written before the upgrade", func(t *testing.T) {
+		db := newTestDB(t)
+		migrations, err := Load()
+		require.NoError(t, err)
+		require.Greater(t, len(migrations), 1)
+		_, err = db.Exec(migrations[0].SQL)
+		require.NoError(t, err)
+		_, err = db.Exec(createVersionTable)
+		require.NoError(t, err)
+		_, err = db.Exec(insertVersion, migrations[0].Version, migrations[0].Name)
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO async_results (route, id, request_token, payload, created_at) VALUES ('route', 'old', 't', '{}', 0)`)
+		require.NoError(t, err)
+
+		applied, err := Run(ctx, db)
+		require.NoError(t, err)
+		require.NotEmpty(t, applied)
+		assert.Equal(t, 2, applied[0].Version)
+		var id string
+		require.NoError(t, db.QueryRow(`SELECT id FROM async_claim_results('route', 'owner', 60000, 10)`).Scan(&id))
+		assert.Equal(t, "old", id, "a result written under version 1 is claimable after the upgrade")
+		var popped int
+		require.NoError(t, db.QueryRow(`SELECT count(*) FROM async_pop_results('route', 10)`).Scan(&popped))
+		assert.Zero(t, popped, "the destructive pop skips the leased result")
+	})
+
 	t.Run("concurrent runs apply each migration once", func(t *testing.T) {
 		db := newTestDB(t)
 		const runners = 8

@@ -17,13 +17,21 @@ import (
 const (
 	defaultRequestQueueName = "request-sql"
 	defaultPollInterval     = time.Second
+	defaultResultLeaseTTL   = 5 * time.Minute
 )
+
+// ErrResultDeliveryOwnershipLost means another receiver claimed a result after this
+// delivery's lease lapsed, so this receiver can no longer acknowledge it.
+var ErrResultDeliveryOwnershipLost = errors.New("result delivery ownership lost")
 
 type Config struct {
 	URL              string
 	RequestQueueName string
 	ResultQueueName  string
 	PollInterval     time.Duration
+	// ResultLeaseTTL is how long a ReceiveResults delivery stays leased before another
+	// receiver may claim it. Zero means five minutes.
+	ResultLeaseTTL time.Duration
 }
 
 type Option func(*Producer) error
@@ -44,6 +52,16 @@ type Producer struct {
 	requestQueueName string
 	resultQueueName  string
 	pollInterval     time.Duration
+	resultLeaseTTL   time.Duration
+}
+
+// ResultDelivery is a result leased to one receiver. The result stays in the database until
+// AckResult.
+type ResultDelivery struct {
+	Result *api.ResultMessage
+
+	seq   int64
+	owner string
 }
 
 func New(ctx context.Context, config Config, opts ...Option) (*Producer, error) {
@@ -54,12 +72,16 @@ func New(ctx context.Context, config Config, opts ...Option) (*Producer, error) 
 		requestQueueName: config.RequestQueueName,
 		resultQueueName:  config.ResultQueueName,
 		pollInterval:     config.PollInterval,
+		resultLeaseTTL:   config.ResultLeaseTTL,
 	}
 	if p.requestQueueName == "" {
 		p.requestQueueName = defaultRequestQueueName
 	}
 	if p.pollInterval <= 0 {
 		p.pollInterval = defaultPollInterval
+	}
+	if p.resultLeaseTTL <= 0 {
+		p.resultLeaseTTL = defaultResultLeaseTTL
 	}
 	for _, opt := range opts {
 		if err := opt(p); err != nil {
@@ -165,30 +187,85 @@ func (p *Producer) GetResult(ctx context.Context) (*api.ResultMessage, error) {
 }
 
 // GetResults deletes the results it returns. An unparsable result comes back as an error result.
+// It never takes a result that a ReceiveResults delivery holds under an unexpired lease.
 func (p *Producer) GetResults(ctx context.Context, limit int) ([]*api.ResultMessage, error) {
 	if limit <= 0 {
 		return nil, errors.New("limit must be positive")
 	}
+	rows, err := p.pollResults(ctx, func() ([]sqlqueue.Result, error) {
+		return p.store.PopResults(ctx, p.resultQueueName, time.Now().Unix(), limit)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*api.ResultMessage, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toResult(row))
+	}
+	return out, nil
+}
+
+func (p *Producer) ReceiveResult(ctx context.Context) (*ResultDelivery, error) {
+	deliveries, err := p.ReceiveResults(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(deliveries) == 0 {
+		return nil, errors.New("failed to receive result: empty result batch")
+	}
+	return deliveries[0], nil
+}
+
+// ReceiveResults leases up to limit results to this caller without deleting them. Each
+// delivery must be acknowledged with AckResult once the caller has durably recorded it;
+// one that is not acknowledged within ResultLeaseTTL is delivered again, to this or another
+// receiver, so receivers must deduplicate by (Result.ID, Result.Routing.RequestToken). An
+// unparsable result comes back as an error result.
+func (p *Producer) ReceiveResults(ctx context.Context, limit int) ([]*ResultDelivery, error) {
+	if limit <= 0 {
+		return nil, errors.New("limit must be positive")
+	}
+	owner, err := newToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create result claim owner: %w", err)
+	}
+	rows, err := p.pollResults(ctx, func() ([]sqlqueue.Result, error) {
+		return p.store.ClaimResults(ctx, p.resultQueueName, owner, p.resultLeaseTTL, limit)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*ResultDelivery, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &ResultDelivery{Result: toResult(row), seq: row.Seq, owner: owner})
+	}
+	return out, nil
+}
+
+// AckResult deletes a delivered result. Acknowledging a result twice is safe. It returns
+// ErrResultDeliveryOwnershipLost when the lease lapsed and another receiver claimed the result.
+func (p *Producer) AckResult(ctx context.Context, delivery *ResultDelivery) error {
+	if delivery == nil || delivery.owner == "" {
+		return errors.New("result delivery is required")
+	}
+	ok, err := p.store.AckResult(ctx, delivery.seq, delivery.owner)
+	if err != nil {
+		return fmt.Errorf("failed to acknowledge result: %w", err)
+	}
+	if !ok {
+		return ErrResultDeliveryOwnershipLost
+	}
+	return nil
+}
+
+func (p *Producer) pollResults(ctx context.Context, fetch func() ([]sqlqueue.Result, error)) ([]sqlqueue.Result, error) {
 	for {
-		rows, err := p.store.PopResults(ctx, p.resultQueueName, time.Now().Unix(), limit)
+		rows, err := fetch()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get results: %w", err)
 		}
 		if len(rows) > 0 {
-			out := make([]*api.ResultMessage, 0, len(rows))
-			for _, row := range rows {
-				res, err := parseResult(row.Payload)
-				if err != nil {
-					res = &api.ResultMessage{
-						ID:           row.ID,
-						ErrorCode:    api.ErrCodeInferenceError,
-						ErrorMessage: fmt.Sprintf("unparsable result payload: %v", err),
-					}
-					res.Routing.RequestToken = row.Token
-				}
-				out = append(out, res)
-			}
-			return out, nil
+			return rows, nil
 		}
 		timer := time.NewTimer(p.pollInterval)
 		select {
@@ -198,6 +275,19 @@ func (p *Producer) GetResults(ctx context.Context, limit int) ([]*api.ResultMess
 		case <-timer.C:
 		}
 	}
+}
+
+func toResult(row sqlqueue.Result) *api.ResultMessage {
+	res, err := parseResult(row.Payload)
+	if err != nil {
+		res = &api.ResultMessage{
+			ID:           row.ID,
+			ErrorCode:    api.ErrCodeInferenceError,
+			ErrorMessage: fmt.Sprintf("unparsable result payload: %v", err),
+		}
+		res.Routing.RequestToken = row.Token
+	}
+	return res
 }
 
 func (p *Producer) Close() error {

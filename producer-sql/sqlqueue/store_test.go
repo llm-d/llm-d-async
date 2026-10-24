@@ -761,6 +761,193 @@ func TestPopResultsDrainsInOrder(t *testing.T) {
 	})
 }
 
+func publishResults(t *testing.T, s *Store, now time.Time, route string, ids ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, id := range ids {
+		require.NoError(t, s.Enqueue(ctx, req(id, now.Unix()+100)))
+		require.Len(t, dispatchIDs(t, s, "a", now, 10), 1)
+		acked, err := s.Ack(ctx, "a", []Completion{completion(stampOf(t, s, id), route)})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true}, acked)
+	}
+}
+
+func resultIDs(rs []Result) []string {
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.ID)
+	}
+	return out
+}
+
+func TestClaimResultsLeasesWithoutDeleting(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		publishResults(t, s, now, "route", "a", "b", "c", "d")
+
+		got, err := s.ClaimResults(ctx, "route", "x", time.Minute, 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a", "b"}, resultIDs(got), "claims take the oldest results first")
+		got, err = s.ClaimResults(ctx, "route", "y", time.Minute, 1)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"c"}, resultIDs(got), "a leased result is not claimed again")
+		depth, err := s.ResultDepth(ctx, "route")
+		require.NoError(t, err)
+		assert.EqualValues(t, 4, depth, "claimed results stay in the table until acknowledged")
+
+		popped, err := s.PopResults(ctx, "route", now.Unix(), 10)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"d"}, resultIDs(popped), "a destructive pop leaves leased results alone")
+
+		_, err = s.ClaimResults(ctx, "route", "", time.Minute, 1)
+		require.Error(t, err, "an empty owner could never be fenced")
+	})
+}
+
+func TestAckResultIsFencedAndIdempotent(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		publishResults(t, s, now, "route", "a", "b")
+
+		got, err := s.ClaimResults(ctx, "route", "x", time.Minute, 10)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		ok, err := s.AckResult(ctx, got[0].Seq, "y")
+		require.NoError(t, err)
+		assert.False(t, ok, "another owner cannot acknowledge a live claim")
+		ok, err = s.AckResult(ctx, got[0].Seq, "x")
+		require.NoError(t, err)
+		assert.True(t, ok)
+		ok, err = s.AckResult(ctx, got[0].Seq, "x")
+		require.NoError(t, err)
+		assert.True(t, ok, "a retried acknowledgement succeeds")
+		_, err = s.AckResult(ctx, got[1].Seq, "")
+		require.Error(t, err, "an empty owner would match unclaimed results")
+		depth, err := s.ResultDepth(ctx, "route")
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, depth, "only the acknowledged result is deleted")
+	})
+}
+
+func TestLapsedClaimIsRedeliveredAndFencesTheOldOwner(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		publishResults(t, s, now, "route", "a")
+
+		first, err := s.ClaimResults(ctx, "route", "x", 50*time.Millisecond, 10)
+		require.NoError(t, err)
+		require.Len(t, first, 1)
+		none, err := s.ClaimResults(ctx, "route", "y", time.Minute, 10)
+		require.NoError(t, err)
+		assert.Empty(t, none, "the lease holds until it lapses")
+
+		time.Sleep(100 * time.Millisecond)
+		again, err := s.ClaimResults(ctx, "route", "y", time.Minute, 10)
+		require.NoError(t, err)
+		require.Len(t, again, 1, "a lapsed claim is redelivered")
+		assert.Equal(t, first[0], again[0], "the redelivery is the same result")
+
+		ok, err := s.AckResult(ctx, first[0].Seq, "x")
+		require.NoError(t, err)
+		assert.False(t, ok, "the old owner is fenced once another owner claims the result")
+		depth, err := s.ResultDepth(ctx, "route")
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, depth, "a fenced acknowledgement deletes nothing")
+		ok, err = s.AckResult(ctx, again[0].Seq, "y")
+		require.NoError(t, err)
+		assert.True(t, ok)
+		ok, err = s.AckResult(ctx, first[0].Seq, "x")
+		require.NoError(t, err)
+		assert.True(t, ok, "once the result is gone it was accounted for, whoever acknowledged it")
+	})
+}
+
+func TestLapsedClaimCanStillBeAcknowledgedByItsOwner(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		publishResults(t, s, now, "route", "a", "b")
+
+		got, err := s.ClaimResults(ctx, "route", "x", time.Millisecond, 10)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		time.Sleep(20 * time.Millisecond)
+		ok, err := s.AckResult(ctx, got[0].Seq, "x")
+		require.NoError(t, err)
+		assert.True(t, ok, "nobody else holds the result, so its owner may still delete it")
+
+		popped, err := s.PopResults(ctx, "route", now.Unix(), 10)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"b"}, resultIDs(popped), "a destructive pop takes a lapsed claim")
+	})
+}
+
+func TestClaimResultsSkipsExpiredResults(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		ownAll(t, s, "a", now)
+		require.NoError(t, s.Enqueue(ctx, req("old", now.Unix()+100), req("live", now.Unix()+100)))
+		require.Len(t, dispatchIDs(t, s, "a", now, 10), 2)
+		old, live := stampOf(t, s, "old"), stampOf(t, s, "live")
+		acked, err := s.Ack(ctx, "a", []Completion{
+			{Key: old.Key, Attempt: old.Attempt, Route: "route", Payload: "{}", ExpiresAt: now.Unix() - 1},
+			{Key: live.Key, Attempt: live.Attempt, Route: "route", Payload: "{}", ExpiresAt: now.Unix() + 100},
+		})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true}, acked)
+		got, err := s.ClaimResults(ctx, "route", "x", time.Minute, 10)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"live"}, resultIDs(got))
+	})
+}
+
+func TestConcurrentClaimsDeliverEachResultOnce(t *testing.T) {
+	withStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		const n, claimers = 400, 8
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO async_results (route, id, request_token, payload, created_at)
+			SELECT 'route', 'r' || g, 't', '{}', 0 FROM generate_series(1, $1) g`, n)
+		require.NoError(t, err)
+
+		var mu sync.Mutex
+		seen := map[int64]string{}
+		var wg sync.WaitGroup
+		for c := range claimers {
+			owner := "owner-" + strconv.Itoa(c)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range n {
+					got, err := s.ClaimResults(ctx, "route", owner, time.Minute, 7)
+					if !assert.NoError(t, err) || len(got) == 0 {
+						return
+					}
+					mu.Lock()
+					for _, r := range got {
+						if prev, dup := seen[r.Seq]; dup {
+							t.Errorf("result %d claimed by %s and %s", r.Seq, prev, owner)
+						}
+						seen[r.Seq] = owner
+					}
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+		assert.Len(t, seen, n, "every result is claimed")
+	})
+}
+
 func TestQueueTablesVacuumOnFixedThresholds(t *testing.T) {
 	s := openStore(t)
 	for _, table := range []string{"async_requests", "async_results"} {

@@ -190,4 +190,16 @@ func TestQueueStatementsStayKeyedUnderEmptyStatistics(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, popped, batch)
 	})
+	var claimed []Result
+	check("ClaimResults", func() {
+		var err error
+		claimed, err = s.ClaimResults(ctx, "route", "x", time.Minute, batch)
+		require.NoError(t, err)
+		require.Len(t, claimed, batch)
+	})
+	check("AckResult", func() {
+		ok, err := s.AckResult(ctx, claimed[0].Seq, "x")
+		require.NoError(t, err)
+		require.True(t, ok)
+	})
 }
