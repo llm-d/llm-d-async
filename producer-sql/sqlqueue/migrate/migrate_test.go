@@ -11,13 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestLoad(t *testing.T) {
-	migrations, err := Load()
+	migrations, err := load()
 	require.NoError(t, err)
 	require.NotEmpty(t, migrations, "no migrations embedded")
 	for i, m := range migrations {
@@ -96,6 +98,12 @@ func appliedVersions(t *testing.T, db *sql.DB) []int {
 	return versions
 }
 
+func captureLogs(ctx context.Context) (context.Context, *[]string) {
+	var lines []string
+	logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+	return logr.NewContext(ctx, logger), &lines
+}
+
 func tableExists(t *testing.T, db *sql.DB, table string) bool {
 	t.Helper()
 	var exists bool
@@ -110,11 +118,14 @@ func TestRun(t *testing.T) {
 		db := newTestDB(t)
 		require.ErrorIs(t, Check(ctx, db), ErrSchemaMissing)
 
-		applied, err := Run(ctx, db)
+		logCtx, logs := captureLogs(ctx)
+		applied, err := Run(logCtx, db)
 		require.NoError(t, err)
 		latest, err := LatestVersion()
 		require.NoError(t, err)
 		assert.Len(t, applied, latest)
+		require.Len(t, *logs, latest)
+		assert.Contains(t, (*logs)[0], `"msg"="applied sql transport schema migration" "version"=1 "name"="initial_schema"`)
 		for _, table := range []string{
 			"async_requests", "async_partitions", "async_dispatchers", "async_results",
 			"async_quota_keys", "async_quota_holders", "async_quota_slots", "async_quota_windows", "async_quota_admits",
@@ -136,9 +147,38 @@ func TestRun(t *testing.T) {
 		assert.Equal(t, before, appliedVersions(t, db))
 	})
 
+	t.Run("a newer database is left alone", func(t *testing.T) {
+		db := newTestDB(t)
+		_, err := Run(ctx, db)
+		require.NoError(t, err)
+		_, err = db.Exec(insertVersion, 9999, "from_the_future")
+		require.NoError(t, err)
+		before := appliedVersions(t, db)
+
+		logCtx, logs := captureLogs(ctx)
+		applied, err := Run(logCtx, db)
+		require.NoError(t, err)
+		assert.Empty(t, applied)
+		assert.Equal(t, before, appliedVersions(t, db))
+		require.Len(t, *logs, 1)
+		assert.Contains(t, (*logs)[0], `"databaseVersion"=9999`)
+	})
+
+	t.Run("a failed migration rolls back completely", func(t *testing.T) {
+		db := newTestDB(t)
+		_, err := db.Exec(`CREATE TABLE async_schema (version TEXT NOT NULL); CREATE TABLE async_quota_admits (key TEXT NOT NULL)`)
+		require.NoError(t, err)
+
+		_, err = Run(ctx, db)
+		require.ErrorContains(t, err, "apply migration 0001_initial_schema")
+		require.ErrorIs(t, Check(ctx, db), ErrSchemaMissing)
+		assert.True(t, tableExists(t, db, "async_schema"), "the legacy version table survives")
+		assert.False(t, tableExists(t, db, "async_requests"), "tables created before the failure are rolled back")
+	})
+
 	t.Run("adopts a schema created before migrations existed", func(t *testing.T) {
 		db := newTestDB(t)
-		migrations, err := Load()
+		migrations, err := load()
 		require.NoError(t, err)
 		_, err = db.Exec(`CREATE TABLE async_schema (version TEXT NOT NULL); INSERT INTO async_schema VALUES ('legacy')`)
 		require.NoError(t, err)

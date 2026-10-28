@@ -54,9 +54,9 @@ type Migration struct {
 	SQL     string
 }
 
-// Load parses the embedded migrations in version order. Versions must start
+// load parses the embedded migrations in version order. Versions must start
 // at 1 and be contiguous.
-func Load() ([]Migration, error) {
+func load() ([]Migration, error) {
 	entries, err := fs.ReadDir(migrationFiles, "migrations")
 	if err != nil {
 		return nil, fmt.Errorf("read migrations: %w", err)
@@ -89,7 +89,7 @@ func Load() ([]Migration, error) {
 
 // LatestVersion is the version a binary built from this tree expects.
 func LatestVersion() (int, error) {
-	migrations, err := Load()
+	migrations, err := load()
 	if err != nil {
 		return 0, err
 	}
@@ -100,7 +100,7 @@ func LatestVersion() (int, error) {
 // advisory lock, so concurrent callers serialize and at most one of them
 // executes DDL. It returns the migrations it applied.
 func Run(ctx context.Context, db *sql.DB) ([]Migration, error) {
-	migrations, err := Load()
+	migrations, err := load()
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +139,15 @@ func Run(ctx context.Context, db *sql.DB) ([]Migration, error) {
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	logger := logr.FromContextOrDiscard(ctx)
+	for _, m := range applied {
+		logger.Info("applied sql transport schema migration", "version", m.Version, "name", m.Name)
+	}
+	if current > len(migrations) {
+		logger.Info("sql transport schema is newer than this binary expects",
+			"databaseVersion", current, "expectedVersion", len(migrations))
 	}
 	return applied, nil
 }
