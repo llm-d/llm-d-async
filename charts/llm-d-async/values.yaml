@@ -154,6 +154,13 @@ ap:
   #     result_queue_name: result-list
   #     poll_interval_ms: 1000
   #     batch_size: 10
+  #     resume:
+  #       enabled: true
+  #       max_resumes: 3
+  #       checkpoint_interval_tokens: 64
+  #       checkpoint_interval_ms: 2000
+  #       max_checkpoint_tokens: 4096
+  #       token_exact: false
   #     queues:
   #       - queue_name: request-sortedset
   #         request_path_url: /v1/completions

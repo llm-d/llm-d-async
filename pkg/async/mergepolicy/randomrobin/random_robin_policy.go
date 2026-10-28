@@ -168,6 +168,7 @@ func (f *poolFanIn) run(stamp func(headers map[string]string, msg pipeline.Reque
 			HttpHeaders:     headers,
 			RequestURL:      requestURL(chMeta, ir),
 			WorkerPoolID:    workerPoolID,
+			Resume:          chMeta.Resume,
 		}
 		metrics.IncQueueDepth(ir.QueueID, ir.RequestQueueName, workerPoolID)
 		f.merged <- erm

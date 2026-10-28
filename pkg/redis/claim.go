@@ -41,21 +41,47 @@ const (
 // other three are private to the dispatcher and, in cluster mode, are
 // hash-tagged into the pending key's slot (see slotKey).
 type claimKeys struct {
-	pending string // zset: reqID-scored members awaiting dispatch
-	claimed string // hash: claimKey -> original member JSON
-	owners  string // hash: claimKey -> ownership token
-	idx     string // zset: claimKey -> lease expiry unix seconds
+	pending          string // zset: reqID-scored members awaiting dispatch
+	claimed          string // hash: claimKey -> original member JSON
+	owners           string // hash: claimKey -> ownership token
+	idx              string // zset: claimKey -> lease expiry unix seconds
+	checkpointPrefix string // string key prefix: checkpointPrefix + claimID
 }
 
 func newClaimKeys(queueName string, cluster bool) claimKeys {
 	base := slotKey(queueName, cluster)
 	return claimKeys{
-		pending: queueName,
-		claimed: base + ":claimed",
-		owners:  base + ":claim-owners",
-		idx:     base + ":claims-idx",
+		pending:          queueName,
+		claimed:          base + ":claimed",
+		owners:           base + ":claim-owners",
+		idx:              base + ":claims-idx",
+		checkpointPrefix: base + ":checkpoint:",
 	}
 }
+
+func (k claimKeys) checkpoint(claimID string) string {
+	return k.checkpointPrefix + claimID
+}
+
+// SAVECHECKPOINT writes a continuation checkpoint only while the caller still
+// holds the active claim lease token. Stale owners whose lease was reclaimed
+// are fenced (returns 0) so they cannot overwrite a newer worker's state.
+//
+// KEYS: owners, checkpoint
+// ARGV: claimID, token, checkpointJSON, ttlMillis
+var saveCheckpointScript = redis.NewScript(`
+local owner = redis.call('HGET', KEYS[1], ARGV[1])
+if not owner or owner ~= ARGV[2] or ARGV[2] == "" then
+  return 0
+end
+local px = tonumber(ARGV[4])
+if px and px > 0 then
+  redis.call('SET', KEYS[2], ARGV[3], 'PX', px)
+else
+  redis.call('SET', KEYS[2], ARGV[3])
+end
+return 1
+`)
 
 // CLAIM moves one member from pending to claimed. Returns 0 when another
 // consumer won. Overwrites an existing self-claim (retried requests re-enter
@@ -83,13 +109,13 @@ redis.call('ZREM', KEYS[4], ARGV[1])
 return 1
 `)
 
-// ACKRESULT records a terminal result and drops the claim atomically.
-// Only the current owner may publish; stale owners are fenced. Missing
-// owners or token mismatches return 0, preventing duplicate pushes.
+// ACKRESULT records a terminal result and drops the claim and any checkpoint
+// atomically. Only the current owner may publish; stale owners are fenced.
+// Missing owners or token mismatches return 0, preventing duplicate pushes.
 // Requires the result list to share a slot with the claim keys; see
 // ackResultCrossSlot for the cluster-mode alternative.
 //
-// KEYS: claimed, owners, idx, resultList, [payload]
+// KEYS: claimed, owners, idx, resultList, checkpoint, [payload]
 // ARGV: id, resultJSON, token, listTTLSeconds
 // Returns 1 when the result was recorded, 0 when fenced as stale.
 var ackResultScript = redis.NewScript(`
@@ -108,6 +134,9 @@ redis.call('ZREM', KEYS[3], ARGV[1])
 if KEYS[5] then
   redis.call('DEL', KEYS[5])
 end
+if KEYS[6] then
+  redis.call('DEL', KEYS[6])
+end
 return 1
 `)
 
@@ -122,9 +151,9 @@ end
 return 1
 `)
 
-// DROPCLAIM removes a claim whose result has already been pushed. Token-
-// guarded like RELEASE so a stale owner cannot drop a redelivered claim.
-// Third step of the cross-slot ack.
+// DROPCLAIM removes a claim (and any checkpoint) whose result has already been
+// pushed. Token-guarded like RELEASE so a stale owner cannot drop a redelivered
+// claim. Third step of the cross-slot ack.
 var dropClaimScript = redis.NewScript(`
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then
   return 0
@@ -132,6 +161,9 @@ end
 redis.call('HDEL', KEYS[1], ARGV[1])
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[3], ARGV[1])
+if KEYS[4] then
+  redis.call('DEL', KEYS[4])
+end
 return 1
 `)
 
@@ -294,7 +326,7 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 		}
 		return pushed, err
 	}
-	scriptKeys := []string{keys.claimed, keys.owners, keys.idx, resultList}
+	scriptKeys := []string{keys.claimed, keys.owners, keys.idx, resultList, keys.checkpoint(claimID)}
 	if payloadRef != "" {
 		scriptKeys = append(scriptKeys, payloadRef)
 	}
@@ -317,8 +349,9 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 // can see the record twice; that is the at-least-once contract the transport
 // already documents, and durable result delivery de-duplicates by generation.
 func (r *RedisSortedSetFlow) ackResultCluster(ctx context.Context, keys claimKeys, resultList, claimID, requestID string, deadline float64, token, resultJSON string, listTTLSec int64) (bool, error) {
+	checkpointKey := keys.checkpoint(claimID)
 	if sameHashSlot(keys.owners, resultList) {
-		res, err := ackResultScript.Run(ctx, r.rdb, []string{keys.claimed, keys.owners, keys.idx, resultList},
+		res, err := ackResultScript.Run(ctx, r.rdb, []string{keys.claimed, keys.owners, keys.idx, resultList, checkpointKey},
 			claimID, resultJSON, token, listTTLSec).Int()
 		if err != nil {
 			return false, fmt.Errorf("ack result for %q: %w", requestID, err)
@@ -339,7 +372,7 @@ func (r *RedisSortedSetFlow) ackResultCluster(ctx context.Context, keys claimKey
 		return false, fmt.Errorf("push result for %q: %w", requestID, err)
 	}
 	r.claimTokens.Delete(claimID)
-	if err := dropClaimScript.Run(ctx, r.rdb, []string{keys.claimed, keys.owners, keys.idx}, claimID, token).Err(); err != nil {
+	if err := dropClaimScript.Run(ctx, r.rdb, []string{keys.claimed, keys.owners, keys.idx, checkpointKey}, claimID, token).Err(); err != nil {
 		// The record is delivered. Without its handle the claim lapses and
 		// the reclaimer redelivers it, so the consumer de-duplicates rather
 		// than the caller retrying a push that already succeeded.
