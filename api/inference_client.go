@@ -1,6 +1,9 @@
 package api
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // InferenceResponse holds the HTTP response from an upstream inference request.
 // StatusCode is non-zero whenever an HTTP response was received (including 4xx/5xx).
@@ -30,4 +33,22 @@ type InferenceClient interface {
 	//   - ErrCategoryParse:      not retryable
 	//   - ErrCategoryUnknown:    not retryable
 	SendRequest(ctx context.Context, url string, headers map[string]string, payload []byte) (*InferenceResponse, error)
+}
+
+// StreamConsumer consumes a 2xx streaming HTTP response body and returns the
+// assembled response body bytes to store in InferenceResponse.Body.
+type StreamConsumer func(statusCode int, respHeaders map[string]string, body io.Reader) ([]byte, error)
+
+// StreamingInferenceClient is an optional extension of InferenceClient for
+// streaming SSE inference requests. Workers fall back to SendRequest when an
+// InferenceClient implementation does not implement StreamingInferenceClient.
+type StreamingInferenceClient interface {
+	InferenceClient
+	SendStreamRequest(
+		ctx context.Context,
+		url string,
+		headers map[string]string,
+		payload []byte,
+		consume StreamConsumer,
+	) (*InferenceResponse, error)
 }

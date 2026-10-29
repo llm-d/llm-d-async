@@ -37,7 +37,8 @@ type SortedSetQueueConfig struct {
 	RequestPathURL     string `json:"request_path_url"`
 	IGWBaseURL         string `json:"igw_base_url"`
 	pipeline.GateConfig
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string      `json:"labels,omitempty"`
+	Resume *pipeline.ResumeConfig `json:"resume,omitempty"`
 }
 
 type requestChannelData struct {
@@ -84,6 +85,7 @@ var (
 	_ pipeline.Flow                        = (*RedisSortedSetFlow)(nil)
 	_ pipeline.HealthChecker               = (*RedisSortedSetFlow)(nil)
 	_ pipeline.CancellationCheckerProvider = (*RedisSortedSetFlow)(nil)
+	_ pipeline.CheckpointStoreProvider     = (*RedisSortedSetFlow)(nil)
 	_ SortedSetQueueReconfigurer           = (*RedisSortedSetFlow)(nil)
 )
 
@@ -113,6 +115,7 @@ type RedisSortedSetFlow struct {
 	activeReleases      sync.Map
 	gate                pipeline.Gate
 	gateFactory         pipeline.GateFactory
+	defaultResume       *pipeline.ResumeConfig
 
 	// queueMu guards the complete live queue state: queues, queueOrder,
 	// configMap, defaultRequestQueueName and stopped. consumeWg.Add for a
@@ -171,7 +174,7 @@ func (c *redisCancellationChecker) IsCancelled(ctx context.Context, requestID, r
 // pool → "default", empty request path → "/v1/completions", and empty ID →
 // the queue name. ReconfigureQueues applies these too so hot-loaded configs
 // behave exactly like startup configs.
-func normalizeSortedSetQueue(cfg *SortedSetQueueConfig) {
+func normalizeSortedSetQueueWithResume(cfg *SortedSetQueueConfig, defaultResume *pipeline.ResumeConfig) {
 	// Normalize before anything reads it: configMap is the source of the
 	// pool_name label on this queue's metrics, and an unset WorkerPoolID
 	// there would label them "" while the request channel below — and every
@@ -185,6 +188,10 @@ func normalizeSortedSetQueue(cfg *SortedSetQueueConfig) {
 	if cfg.ID == "" {
 		cfg.ID = cfg.QueueName
 	}
+	if defaultResume != nil || cfg.Resume != nil {
+		merged := pipeline.MergeResumeConfig(defaultResume, cfg.Resume)
+		cfg.Resume = &merged
+	}
 }
 
 // validateSortedSetQueues enforces the cross-entry constraints of a queue
@@ -196,6 +203,9 @@ func (r *RedisSortedSetFlow) validateSortedSetQueues(queues []SortedSetQueueConf
 	for _, q := range queues {
 		if q.QueueName == "" {
 			return fmt.Errorf("queue_name is required for each queue")
+		}
+		if err := q.Resume.Validate(); err != nil {
+			return fmt.Errorf("queue config for queue %q: %w", q.QueueName, err)
 		}
 		if seenID[q.ID] {
 			return fmt.Errorf("duplicate queue id %q in queue configuration", q.ID)
@@ -253,6 +263,7 @@ func (r *RedisSortedSetFlow) newRequestChannel(cfg SortedSetQueueConfig) (reques
 		IGWBaseURL:         cfg.IGWBaseURL,
 		Gate:               gate,
 		WorkerPoolID:       workerPoolID,
+		Resume:             pipeline.MergeResumeConfig(r.defaultResume, cfg.Resume),
 	}
 	return requestChannelData{
 		channel:   ch,
@@ -280,6 +291,7 @@ func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoo
 		defaultResultQueueName: cfg.ResultQueueName,
 		workerPools:            workerPools,
 		gateFactory:            gateFactory,
+		defaultResume:          cfg.Resume,
 		enableTracing:          cfg.EnableTracing,
 		claimLeaseTTL:          time.Duration(cfg.ClaimLeaseTTLSeconds) * time.Second,
 		claimReclaimInterval:   time.Duration(cfg.ClaimReclaimIntervalMs) * time.Millisecond,
@@ -301,7 +313,7 @@ func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoo
 	queues := make([]SortedSetQueueConfig, len(cfg.Queues))
 	for i := range queues {
 		queues[i] = cfg.Queues[i]
-		normalizeSortedSetQueue(&queues[i])
+		normalizeSortedSetQueueWithResume(&queues[i], r.defaultResume)
 	}
 	if err := r.validateSortedSetQueues(queues); err != nil {
 		_ = r.rdb.Close()
@@ -439,7 +451,7 @@ func (r *RedisSortedSetFlow) ReconfigureQueues(queues []SortedSetQueueConfig, be
 	normalized := make([]SortedSetQueueConfig, len(queues))
 	for i := range normalized {
 		normalized[i] = queues[i]
-		normalizeSortedSetQueue(&normalized[i])
+		normalizeSortedSetQueueWithResume(&normalized[i], r.defaultResume)
 	}
 	if err := r.validateSortedSetQueues(normalized); err != nil {
 		return QueueReconfigureResult{}, err
@@ -1219,6 +1231,27 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 			continue
 		}
 
+		if msg.ImmediateRequeue && msg.PublicRequest != nil {
+			reqID := msg.PublicRequest.ReqID()
+			reqToken := msg.RequestToken
+			var token string
+			if v, ok := r.claimTokens.Load(claimKey(reqID, reqToken)); ok {
+				if h, ok := v.(*claimHandle); ok && h != nil {
+					token = h.token
+				}
+			}
+			if token != "" {
+				score := msg.QueueScore()
+				if rerr := retryRedisOp(ctx, func(ctx context.Context) error {
+					return r.releaseClaim(ctx, queueName, reqID, reqToken, string(bytes), score, token)
+				}); rerr == nil {
+					continue
+				} else {
+					logger.V(logutil.DEFAULT).Error(rerr, "Failed to release claim on immediate requeue, falling back to retry queue", "id", reqID)
+				}
+			}
+		}
+
 		// Score is the retry-due time. The retry queue is drained by the
 		// retry mover strictly at or after this time, so the backoff is
 		// enforced. Retries must NOT be ZADDed into the request queue
@@ -1237,6 +1270,10 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 			entry.requestDeadline = float64(msg.PublicRequest.ReqDeadline())
 		}
 		entries = append(entries, entry)
+	}
+
+	if len(entries) == 0 {
+		return
 	}
 
 	if err := retryRedisOp(ctx, func(ctx context.Context) error {

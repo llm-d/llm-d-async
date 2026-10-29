@@ -44,3 +44,26 @@ func TestClientError_Error(t *testing.T) {
 		})
 	}
 }
+
+func TestClientError_IsEvicted(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *ClientError
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "exact evicted 429", err: &ClientError{StatusCode: 429, DroppedReason: "evicted"}, want: true},
+		{name: "evicted-queue-pressure 429", err: &ClientError{StatusCode: 429, DroppedReason: "evicted-queue-pressure"}, want: true},
+		{name: "evicted-priority uppercase 429", err: &ClientError{StatusCode: 429, DroppedReason: "EVICTED-PRIORITY"}, want: true},
+		{name: "rejected-saturated 429", err: &ClientError{StatusCode: 429, DroppedReason: "rejected-saturated"}, want: false},
+		{name: "plain 429 without reason", err: &ClientError{StatusCode: 429}, want: false},
+		{name: "503 even with evicted reason", err: &ClientError{StatusCode: 503, DroppedReason: "evicted"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.IsEvicted(); got != tt.want {
+				t.Errorf("IsEvicted() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,14 @@ var _ InferenceError = (*ClientError)(nil)
 // disconnected, shutting down) responses.
 const DroppedReasonHeader = "x-llm-d-request-dropped-reason"
 
+// DroppedReasonEvicted is the DroppedReasonHeader value emitted by llm-d-router
+// when an already-dispatched request is evicted by flow control. Sub-reasons
+// use DroppedReasonEvictedPrefix (e.g., "evicted-queue-pressure", "evicted-priority").
+const (
+	DroppedReasonEvicted       = "evicted"
+	DroppedReasonEvictedPrefix = "evicted-"
+)
+
 // ClientError represents an inference client error with category and context.
 type ClientError struct {
 	ErrorCategory ErrorCategory
@@ -51,6 +60,17 @@ type ClientError struct {
 	RetryAfter    time.Duration // server-specified retry delay from Retry-After header (0 means not set)
 	StatusCode    int           // HTTP status code; 0 means no HTTP response was received
 	DroppedReason string        // machine-readable drop reason from DroppedReasonHeader (empty means not set)
+}
+
+// IsEvicted reports whether e represents an HTTP 429 flow-control eviction of
+// an already-dispatched request (as opposed to pre-dispatch saturation/TTL
+// rejection or generic rate limiting).
+func (e *ClientError) IsEvicted() bool {
+	if e == nil || e.StatusCode != 429 {
+		return false
+	}
+	reason := strings.ToLower(strings.TrimSpace(e.DroppedReason))
+	return reason == DroppedReasonEvicted || strings.HasPrefix(reason, DroppedReasonEvictedPrefix)
 }
 
 func (e *ClientError) Error() string {

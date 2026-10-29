@@ -323,6 +323,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 					// fatal/non-retryable.
 					sendPayload := payloadBytes
 					sendHeaders := msg.HttpHeaders
+					transformHandled := false
 					if body, contentType, handled, terr := transforms.Apply(payloadBytes, msg.PublicRequest.ReqMetadata()); terr != nil {
 						span.RecordError(terr)
 						span.SetStatus(codes.Error, "request transform failed")
@@ -337,11 +338,17 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						}
 						return
 					} else if handled {
+						transformHandled = true
 						sendPayload = body
 						sendHeaders = headersWithContentType(msg.HttpHeaders, contentType)
 					}
 
 					if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
+						return
+					}
+
+					if streamClient, endpoint, ok := shouldUseStreamingResume(msg, client, sendPayload, transformHandled); ok {
+						executeStreamingInference(requestCtx, reqCtx, logger, span, streamClient, endpoint, msg, sendHeaders, sendPayload, retryChannel, resultChannel)
 						return
 					}
 
@@ -380,6 +387,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						retryChannel <- pipeline.RetryMessage{
 							EmbelishedRequestMessage: msg,
 							BackoffDurationSeconds:   0,
+							ImmediateRequeue:         true,
 						}
 						return
 					}
@@ -449,6 +457,10 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 					var lastResp asyncapi.InferenceResponse
 					if resp != nil {
 						lastResp = *resp
+					}
+					if clientErr != nil && clientErr.IsEvicted() {
+						requeueEvictedMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, lastResp)
+						return
 					}
 					retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, lastResp)
 				}

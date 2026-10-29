@@ -91,6 +91,7 @@ type RequestChannel struct {
 	RequestPathURL     string
 	Gate               Gate
 	WorkerPoolID       string
+	Resume             ResumeConfig
 }
 
 // PoolDispatch is the merge policy's output: one buffered channel per
@@ -115,10 +116,16 @@ type EmbelishedRequestMessage struct {
 	HttpHeaders  map[string]string
 	RequestURL   string
 	WorkerPoolID string
+	Resume       ResumeConfig
 }
 
 // RetryMessage carries an embellished request and backoff for re-queueing.
+// When ImmediateRequeue is true, transports that support lease-guarded release
+// (such as RedisSortedSetFlow) return the request directly to its origin queue
+// and drop this worker's claim lease immediately rather than parking it in the
+// backoff retry queue.
 type RetryMessage struct {
 	EmbelishedRequestMessage
 	BackoffDurationSeconds float64
+	ImmediateRequeue       bool
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/spf13/pflag"
 )
 
@@ -109,8 +110,11 @@ type SortedSetConfig struct {
 	ClaimLeaseTTLSeconds int64 `json:"claim_lease_ttl_seconds,omitempty"`
 	// ClaimReclaimIntervalMs is how often expired claims are scanned for
 	// redelivery.
-	ClaimReclaimIntervalMs int64                  `json:"claim_reclaim_interval_ms,omitempty"`
-	Queues                 []SortedSetQueueConfig `json:"queues"`
+	ClaimReclaimIntervalMs int64 `json:"claim_reclaim_interval_ms,omitempty"`
+	// Resume configures opt-in streaming SSE dispatch, checkpointing, and
+	// partial-generation continuation across all queues unless overridden per queue.
+	Resume *pipeline.ResumeConfig `json:"resume,omitempty"`
+	Queues []SortedSetQueueConfig `json:"queues"`
 }
 
 // LoadSortedSetConfig parses, applies env overrides/defaults, and validates a SortedSetConfig.
@@ -178,6 +182,10 @@ func (c *SortedSetConfig) ApplyDefaults() {
 		if c.Queues[i].ID == "" {
 			c.Queues[i].ID = c.Queues[i].QueueName
 		}
+		if c.Resume != nil || c.Queues[i].Resume != nil {
+			merged := pipeline.MergeResumeConfig(c.Resume, c.Queues[i].Resume)
+			c.Queues[i].Resume = &merged
+		}
 	}
 }
 
@@ -204,6 +212,9 @@ func (c *SortedSetConfig) validate(allowEmptyQueues bool) error {
 	if c.ClaimReclaimIntervalMs < 0 {
 		return fmt.Errorf("claim_reclaim_interval_ms must be non-negative")
 	}
+	if err := c.Resume.Validate(); err != nil {
+		return fmt.Errorf("resume: %w", err)
+	}
 	if !allowEmptyQueues && len(c.Queues) == 0 {
 		return fmt.Errorf("at least one queue must be configured")
 	}
@@ -215,6 +226,9 @@ func (c *SortedSetConfig) validate(allowEmptyQueues bool) error {
 		}
 		if q.IGWBaseURL == "" {
 			return fmt.Errorf("queue %q: igw_base_url must be specified", q.QueueName)
+		}
+		if err := q.Resume.Validate(); err != nil {
+			return fmt.Errorf("queue %q: %w", q.QueueName, err)
 		}
 		if seenID[q.ID] {
 			return fmt.Errorf("duplicate queue id %q", q.ID)
