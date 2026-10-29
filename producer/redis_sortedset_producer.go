@@ -43,24 +43,33 @@ const (
 // submitRequestScript assigns the enqueue sequence and enqueues the request
 // as ARGV[4] .. seq .. ARGV[5], scored as api.InternalRequest.QueueScore.
 // Standalone only: its keys span several cluster slots.
+// KEYS[5] is the enqueue guard (see enqueueGuardKey).
 var submitRequestScript = redis.NewScript(`
+if not redis.call("SET", KEYS[5], "1", "NX") then
+  return 0
+end
+redis.call("EXPIREAT", KEYS[5], ARGV[6])
 local seq = redis.call("INCR", KEYS[1])
 redis.call("EXPIREAT", KEYS[1], ARGV[3])
 redis.call("DEL", KEYS[2])
 redis.call("SET", KEYS[3], ARGV[1], "PX", ARGV[2])
 local score = tonumber(ARGV[6]) + math.min(seq, 2097151) / 2097152
 redis.call("ZADD", KEYS[4], string.format("%.17g", score), ARGV[4] .. seq .. ARGV[5])
-if KEYS[5] then
-  redis.call("SET", KEYS[5], ARGV[7], "PX", ARGV[8])
+if KEYS[6] then
+  redis.call("SET", KEYS[6], ARGV[7], "PX", ARGV[8])
 end
 return seq
 `)
 
 // enqueueRequestScript is the cluster-mode half of submitRequestScript: the
-// sequence counter and the queue share a slot, while the per-request markers
-// are written beforehand with single-key commands.
-// KEYS: seq, queue. ARGV: seqExpireAt, jsonBefore, jsonAfter, deadline.
+// sequence counter, the enqueue guard and the queue share a slot, while the
+// per-request markers are written beforehand with single-key commands.
+// KEYS: seq, queue, guard. ARGV: seqExpireAt, jsonBefore, jsonAfter, deadline.
 var enqueueRequestScript = redis.NewScript(`
+if not redis.call("SET", KEYS[3], "1", "NX") then
+  return 0
+end
+redis.call("EXPIREAT", KEYS[3], ARGV[4])
 local seq = redis.call("INCR", KEYS[1])
 redis.call("EXPIREAT", KEYS[1], ARGV[1])
 local score = tonumber(ARGV[4]) + math.min(seq, 2097151) / 2097152
@@ -80,6 +89,14 @@ const (
 // queue's slot and the enqueue stays atomic.
 func enqueueSeqKey(queueName string, deadline int64, cluster bool) string {
 	return fmt.Sprintf("request-seq:%s:%d", slotKey(queueName, cluster), deadline)
+}
+
+// enqueueGuardKey marks that the submit holding token has enqueued. go-redis
+// retries a command whose reply was lost, so the enqueue script can run twice
+// for one SubmitRequest; the guard keeps the retry from adding a second queue
+// member. It shares the queue's slot like the sequence counter.
+func enqueueGuardKey(queueName, token string, cluster bool) string {
+	return fmt.Sprintf("request-enqueued:%s:%s", slotKey(queueName, cluster), token)
 }
 
 // ProducerOption is a functional option for NewRedisSortedSetProducer.
@@ -334,6 +351,7 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 			api.RequestCancellationKey(r.ReqID()),
 			api.RequestActiveTokenKey(r.ReqID()),
 			targetQueue,
+			enqueueGuardKey(targetQueue, ir.RequestToken, false),
 		}
 		args := []any{
 			ir.RequestToken,
@@ -372,7 +390,7 @@ func (p *RedisSortedSetProducer) enqueueCluster(ctx context.Context, reqID, toke
 		return err
 	}
 	return enqueueRequestScript.Run(ctx, p.client,
-		[]string{enqueueSeqKey(queue, deadline, true), queue},
+		[]string{enqueueSeqKey(queue, deadline, true), queue, enqueueGuardKey(queue, token, true)},
 		seqExpireAt, jsonBefore, jsonAfter, deadline,
 	).Err()
 }

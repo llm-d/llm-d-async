@@ -1,9 +1,13 @@
 package producer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -498,6 +502,70 @@ func TestSubmitRequest_ClearsStaleCancellationMarker(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, mr.Exists(api.RequestCancellationKey(requestID)))
 	assert.True(t, mr.Exists(api.RequestActiveTokenKey(requestID)))
+}
+
+// dropReplyConn fails the reply read of the first EVAL written on it with
+// io.EOF after the server has answered, as a connection reset after the
+// script ran would. go-redis then retries the EVAL.
+type dropReplyConn struct {
+	net.Conn
+	armed *atomic.Bool
+	drop  bool
+}
+
+func (c *dropReplyConn) Write(b []byte) (int, error) {
+	if bytes.Contains(bytes.ToLower(b), []byte("\r\neval\r\n")) && c.armed.CompareAndSwap(true, false) {
+		c.drop = true
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *dropReplyConn) Read(b []byte) (int, error) {
+	if c.drop {
+		_, _ = c.Conn.Read(b) // the reply arrived, so the script ran
+		_ = c.Close()
+		return 0, io.EOF
+	}
+	return c.Conn.Read(b)
+}
+
+func TestSubmitRequest_RetryAfterLostReplyEnqueuesOnce(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			var armed atomic.Bool
+			armed.Store(true)
+			dialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return &dropReplyConn{Conn: conn, armed: &armed}, nil
+			}
+			var client redis.UniversalClient = redis.NewClient(&redis.Options{Addr: mr.Addr(), Dialer: dialer})
+			if cluster {
+				client = redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{mr.Addr()}, Dialer: dialer})
+			}
+			t.Cleanup(func() { _ = client.Close() })
+			producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+				RequestQueueName: "requests",
+				ResultQueueName:  "results",
+			}, WithRedisClient(client))
+			require.NoError(t, err)
+
+			err = producer.SubmitRequest(context.Background(), &api.RequestMessage{
+				ID:       "r1",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(time.Hour).Unix(),
+				Payload:  testPayload(map[string]any{"model": "test"}),
+			})
+			require.NoError(t, err)
+			require.False(t, armed.Load(), "the enqueue reply was dropped")
+			members, err := mr.ZMembers("requests")
+			require.NoError(t, err)
+			assert.Len(t, members, 1)
+		})
+	}
 }
 
 func TestGetResult(t *testing.T) {
