@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -40,6 +42,7 @@ type Store struct {
 type openOptions struct {
 	tracerProvider trace.TracerProvider
 	maxConns       int
+	migrate        bool
 }
 
 // OpenOption configures Open.
@@ -54,6 +57,12 @@ func WithMaxConns(n int) OpenOption {
 // WithTracerProvider records a span per database statement.
 func WithTracerProvider(tp trace.TracerProvider) OpenOption {
 	return func(o *openOptions) { o.tracerProvider = tp }
+}
+
+// WithMigrate applies pending schema migrations instead of only checking that
+// the schema is current.
+func WithMigrate() OpenOption {
+	return func(o *openOptions) { o.migrate = true }
 }
 
 func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
@@ -86,11 +95,32 @@ func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlqueue: ping: %w", err)
 	}
-	if err := s.Migrate(ctx); err != nil {
+	if o.migrate {
+		_, err = migrate.Run(ctx, db)
+	} else {
+		err = migrate.Check(ctx, db)
+	}
+	if err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("sqlqueue: %w", err)
 	}
 	return s, nil
+}
+
+func validateDSN(dsn string) error {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		return nil
+	}
+	return fmt.Errorf("sqlqueue: unsupported DSN scheme in %q (want postgres:// or postgresql://)", redactDSN(dsn))
+}
+
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return dsn
+	}
+	u.User = url.User("redacted")
+	return u.String()
 }
 
 func (s *Store) span(ctx context.Context, op string) (context.Context, trace.Span) {
@@ -488,7 +518,7 @@ type Result struct {
 	Payload string
 }
 
-// PopResults deletes the results it returns.
+// PopResults deletes the results it returns. It skips results whose claim is still leased.
 func (s *Store) PopResults(ctx context.Context, route string, now int64, limit int) ([]Result, error) {
 	ctx, span := s.span(ctx, "PopResults")
 	defer span.End()
@@ -496,22 +526,62 @@ func (s *Store) PopResults(ctx context.Context, route string, now int64, limit i
 		DELETE FROM async_results WHERE route = $1 AND expires_at > 0 AND expires_at < $2`, route, now); err != nil {
 		return nil, fmt.Errorf("sqlqueue: expire results on %q: %w", route, err)
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	out, err := s.queryResults(ctx, `
 		SELECT seq, route, id, request_token, payload FROM async_pop_results($1, $2)`, route, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlqueue: pop results %q: %w", route, err)
+	}
+	return out, nil
+}
+
+// ClaimResults leases up to limit of the oldest results on route that are unclaimed or whose
+// claim lapsed, without deleting them. Leases run on the database clock.
+func (s *Store) ClaimResults(ctx context.Context, route, owner string, lease time.Duration, limit int) ([]Result, error) {
+	ctx, span := s.span(ctx, "ClaimResults")
+	defer span.End()
+	if owner == "" {
+		return nil, errors.New("sqlqueue: claim results: owner is required")
+	}
+	out, err := s.queryResults(ctx, `
+		SELECT seq, route, id, request_token, payload FROM async_claim_results($1, $2, $3, $4)`,
+		route, owner, max(int64(1), lease.Milliseconds()), limit)
+	if err != nil {
+		return nil, fmt.Errorf("sqlqueue: claim results %q: %w", route, err)
+	}
+	return out, nil
+}
+
+// AckResult deletes a result owner claimed. It reports false when another owner has claimed
+// the result since; a result that is already gone was acknowledged or expired and reports true.
+func (s *Store) AckResult(ctx context.Context, seq int64, owner string) (bool, error) {
+	ctx, span := s.span(ctx, "AckResult")
+	defer span.End()
+	if owner == "" {
+		return false, errors.New("sqlqueue: ack result: owner is required")
+	}
+	var ok bool
+	if err := s.db.QueryRowContext(ctx, `SELECT async_ack_result($1, $2)`, seq, owner).Scan(&ok); err != nil {
+		return false, fmt.Errorf("sqlqueue: ack result %d: %w", seq, err)
+	}
+	return ok, nil
+}
+
+func (s *Store) queryResults(ctx context.Context, query string, args ...any) ([]Result, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []Result
 	for rows.Next() {
 		var r Result
 		if err := rows.Scan(&r.Seq, &r.Route, &r.ID, &r.Token, &r.Payload); err != nil {
-			return nil, fmt.Errorf("sqlqueue: pop results scan: %w", err)
+			return nil, fmt.Errorf("scan: %w", err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlqueue: pop results rows: %w", err)
+		return nil, fmt.Errorf("rows: %w", err)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out, nil

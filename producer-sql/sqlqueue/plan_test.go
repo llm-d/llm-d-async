@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -90,7 +91,8 @@ func openExplainedStore(t *testing.T) (*Store, *planRecorder) {
 	t.Cleanup(func() { _ = db.Close() })
 	s := &Store{db: db, tracer: noop.NewTracerProvider().Tracer("")}
 	ctx := context.Background()
-	require.NoError(t, s.Migrate(ctx))
+	_, err = migrate.Run(ctx, db)
+	require.NoError(t, err)
 	require.NoError(t, s.TruncateForTest(ctx))
 	return s, rec
 }
@@ -187,5 +189,17 @@ func TestQueueStatementsStayKeyedUnderEmptyStatistics(t *testing.T) {
 		popped, err := s.PopResults(ctx, "route", now.Unix(), batch)
 		require.NoError(t, err)
 		require.Len(t, popped, batch)
+	})
+	var claimed []Result
+	check("ClaimResults", func() {
+		var err error
+		claimed, err = s.ClaimResults(ctx, "route", "x", time.Minute, batch)
+		require.NoError(t, err)
+		require.Len(t, claimed, batch)
+	})
+	check("AckResult", func() {
+		ok, err := s.AckResult(ctx, claimed[0].Seq, "x")
+		require.NoError(t, err)
+		require.True(t, ok)
 	})
 }

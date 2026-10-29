@@ -36,7 +36,7 @@ func sqlDSN(t *testing.T) string {
 	if dsn == "" {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
-	store, err := sqlqueue.Open(context.Background(), dsn)
+	store, err := sqlqueue.Open(context.Background(), dsn, sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	require.NoError(t, store.TruncateForTest(context.Background()))
@@ -330,6 +330,44 @@ func TestSQLFlow_PeerTakesOverLapsedLease(t *testing.T) {
 		defer cancel()
 		_, err := survivor.producer.GetResult(ctx)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+}
+
+func TestSQLFlow_ResultSurvivesAConsumerThatFailsBeforeAck(t *testing.T) {
+	withSQLDSN(t, func(t *testing.T, dsn string) {
+		srv, seen := recordingServer(t)
+		startSQLFlow(t, dsn, srv.URL, 30, 50*time.Millisecond)
+		consumer := func(lease time.Duration) *producersql.Producer {
+			p, err := producersql.New(context.Background(), producersql.Config{
+				URL: dsn, RequestQueueName: sqlRequestQueue, ResultQueueName: sqlResultQueue,
+				PollInterval: 50 * time.Millisecond, ResultLeaseTTL: lease,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = p.Close() })
+			return p
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		crashed := consumer(300 * time.Millisecond)
+		require.NoError(t, crashed.SubmitRequest(ctx, newRequest("durable", time.Now().Add(time.Hour))))
+		lost, err := crashed.ReceiveResult(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "durable", lost.Result.ID)
+		require.NoError(t, crashed.Close())
+
+		replacement := consumer(time.Minute)
+		recovered, err := replacement.ReceiveResult(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, lost.Result, recovered.Result)
+		require.NoError(t, replacement.AckResult(ctx, recovered))
+		assert.Equal(t, []string{"durable"}, seen(), "recovery reuses the inference instead of running it again")
+
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+		defer waitCancel()
+		_, err = replacement.ReceiveResult(waitCtx)
+		require.ErrorIs(t, err, context.DeadlineExceeded, "an acknowledged result is not delivered again")
+		assert.Equal(t, []string{"durable"}, seen())
 	})
 }
 
