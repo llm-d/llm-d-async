@@ -3298,6 +3298,53 @@ func gateDecisionCountForPool(poolID, reason string) float64 {
 	return testutil.ToFloat64(c)
 }
 
+func TestWorker_PoolGateDropBackfillsResultRoute(t *testing.T) {
+	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	inferenceClient := NewHTTPInferenceClient(httpclient)
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	custom := &asyncapi.ResultMessage{
+		ID:       "req-dropped",
+		Metadata: map[string]string{"userid": "alice"},
+	}
+	gate := &mockDecisionPoolGate{verdict: pipeline.Drop(custom)}
+	go WorkerWithGate(ctx, ctx, pipeline.Characteristics{}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil, gate)
+
+	msg := newEmb(asyncapi.RequestMessage{
+		ID:       "req-dropped",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(30 * time.Second).Unix(),
+		Payload:  testPayload(map[string]any{"model": "test"}),
+		Metadata: map[string]string{
+			asyncapi.ResultRouteAttribute: "route-1",
+			"userid":                      "carol",
+		},
+	}, "http://localhost:30800/v1/completions", nil)
+	requestChannel <- msg
+
+	select {
+	case got := <-resultChannel:
+		if got.Metadata[asyncapi.ResultRouteAttribute] != "route-1" {
+			t.Fatalf("metadata = %v, want result_route filled from the request", got.Metadata)
+		}
+		if got.Metadata["userid"] != "alice" {
+			t.Fatalf("metadata = %v, want the gate userid", got.Metadata)
+		}
+		if custom.Metadata[asyncapi.ResultRouteAttribute] != "" {
+			t.Fatalf("backfill mutated the gate result: %v", custom.Metadata)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for dropped result")
+	}
+}
+
 func TestWorker_PoolGateDecisionsMetrics(t *testing.T) {
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil

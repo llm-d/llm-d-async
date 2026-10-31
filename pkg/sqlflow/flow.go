@@ -525,11 +525,7 @@ func (f *Flow) dispatchPolled(ctx context.Context, q *queueRuntime, e polled, ba
 		return true
 	case pipeline.ActionDrop:
 		metrics.RecordGateDecision(metrics.ReasonDropped, cfg.ID, cfg.QueueName, cfg.WorkerPoolID)
-		result := api.NewGateDroppedResult(ir.PublicRequest, ir.InternalRouting)
-		if out.verdict.Result != nil {
-			result = *out.verdict.Result
-			result.Routing = ir.InternalRouting
-		}
+		result := api.NewDroppedResult(ir.PublicRequest, ir.InternalRouting, out.verdict.Result)
 		pipeline.ReleaseGateReleases(out.releases)
 		return emit(result)
 	}

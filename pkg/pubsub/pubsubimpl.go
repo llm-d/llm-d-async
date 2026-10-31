@@ -29,6 +29,9 @@ var pubSubClient *pubsub.Client
 
 var resultChannels sync.Map
 
+// quotaExceededNackDelay is how long a refused request waits before Nack.
+// The callback returns immediately, so the message does not occupy an
+// outstanding-message slot. Nack returns it to the backlog.
 const quotaExceededNackDelay = 10 * time.Second
 
 type TopicConfig struct {
@@ -69,6 +72,11 @@ type PubSubMQFlow struct {
 	// reads in HealthCheck race-free against per-entry updates guarded by
 	// subHealth's own mutex.
 	consumeHealth map[string]*subHealth
+	// admittedDelivery records message IDs handed to the worker. A later
+	// delivery of the same ID is a processing retry. A refusal Nack is not
+	// recorded, so Pub/Sub's DeliveryAttempt does not hide the admission from
+	// RecordAsyncReq.
+	admittedDelivery sync.Map
 }
 
 // subHealth records the most recent broker interaction observed by the consume
@@ -483,7 +491,7 @@ func resultWorker(ctx context.Context, client *pubsub.Client, defaultTopicID str
 			} else {
 				msgBytes = bytes
 			}
-			res := publishPubSub(ctx, publisher, msgBytes, map[string]string{})
+			res := publishPubSub(ctx, publisher, msgBytes, resultPublishAttributes(msg))
 
 			// Wait for the server's answer off the loop so publishes keep
 			// batching. The wait is detached from ctx: on shutdown Stop flushes
@@ -500,6 +508,16 @@ func resultWorker(ctx context.Context, client *pubsub.Client, defaultTopicID str
 			}(msg.ID)
 		}
 	}
+}
+
+// resultPublishAttributes returns the Pub/Sub attributes stamped on a result
+// publication. Only result_route is copied; caller metadata is not echoed.
+func resultPublishAttributes(msg api.ResultMessage) map[string]string {
+	route := msg.Metadata[api.ResultRouteAttribute]
+	if route == "" {
+		return map[string]string{}
+	}
+	return map[string]string{api.ResultRouteAttribute: route}
 }
 
 // signalPublished tells the receive callback waiting on correlationID whether
@@ -646,7 +664,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		if resultTopicID != "" {
 			irout.ResultQueueName = resultTopicID
 		}
-		if msg.DeliveryAttempt != nil {
+		// DeliveryAttempt counts every Nack, including a gate refusal that never
+		// reached the worker. Only a message this process already admitted is
+		// a retry, so the admission after saturation is still counted.
+		if _, seen := r.admittedDelivery.Load(msg.ID); seen && msg.DeliveryAttempt != nil && *msg.DeliveryAttempt > 1 {
 			irout.RetryCount = *msg.DeliveryAttempt - 1
 		}
 		if len(labels) > 0 {
@@ -701,13 +722,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 
 		if verdict.Action == pipeline.ActionDrop {
 			metrics.RecordGateDecision(metrics.ReasonDropped, "", subscriberID, poolID)
-			var resultMsg api.ResultMessage
-			if verdict.Result != nil {
-				resultMsg = *verdict.Result
-				resultMsg.Routing = ir.InternalRouting
-			} else {
-				resultMsg = api.NewGateDroppedResult(&body, ir.InternalRouting)
-			}
+			resultMsg := api.NewDroppedResult(&body, ir.InternalRouting, verdict.Result)
 			r.resultChannel <- resultMsg
 
 			// Wait for the result worker to finish publishing and signal true
@@ -724,12 +739,14 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		// worker can record queue residence time when it pulls the message.
 		ir.IngestionTime = time.Now()
 
+		r.admittedDelivery.Store(msg.ID, struct{}{})
 		ch <- ir
 
 		result := <-resultsChannel
 		if !result {
 			msg.Nack()
 		} else {
+			r.admittedDelivery.Delete(msg.ID)
 			metrics.RecordMessageLatency(float64(time.Since(msg.PublishTime).Milliseconds()), ir.QueueID, ir.RequestQueueName, poolID)
 			msg.Ack()
 		}

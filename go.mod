@@ -8,9 +8,10 @@ require (
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/go-logr/logr v1.4.4
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/llm-d/llm-d-async/api v1.0.0
+	github.com/llm-d/llm-d-async/api v1.0.1-0.20261027063923-75f85ab81c04
 	github.com/llm-d/llm-d-async/pipeline v1.0.0
 	github.com/llm-d/llm-d-async/producer v1.0.0
+	github.com/llm-d/llm-d-async/producer-gcp v1.0.0
 	github.com/llm-d/llm-d-async/producer-sql v1.0.0
 	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
@@ -158,5 +159,7 @@ replace github.com/llm-d/llm-d-async/api => ./api
 replace github.com/llm-d/llm-d-async/pipeline => ./pipeline
 
 replace github.com/llm-d/llm-d-async/producer => ./producer
+
+replace github.com/llm-d/llm-d-async/producer-gcp => ./producer-gcp
 
 replace github.com/llm-d/llm-d-async/producer-sql => ./producer-sql

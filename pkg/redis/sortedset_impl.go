@@ -942,13 +942,7 @@ func (r *RedisSortedSetFlow) processMessagesWithConfig(ctx context.Context, msgC
 
 		if verdict.Action == pipeline.ActionDrop {
 			metrics.RecordGateDecision(metrics.ReasonDropped, queueID, queueName, poolName)
-			var resultMsg api.ResultMessage
-			if verdict.Result != nil {
-				resultMsg = *verdict.Result
-				resultMsg.Routing = ir.InternalRouting
-			} else {
-				resultMsg = api.NewGateDroppedResult(rview, ir.InternalRouting)
-			}
+			resultMsg := api.NewDroppedResult(rview, ir.InternalRouting, verdict.Result)
 			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
 			if claimErr != nil {
 				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim dropped request", "id", reqID)

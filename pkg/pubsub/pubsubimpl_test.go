@@ -478,3 +478,239 @@ func TestQueueBacklogMarksSourceUnavailableWithoutMetricClient(t *testing.T) {
 		t.Fatalf("backlog without metric client = %+v, want unavailable zero sentinel", stats[0])
 	}
 }
+
+func TestResultPublishAttributes(t *testing.T) {
+	t.Parallel()
+
+	if got := resultPublishAttributes(api.ResultMessage{}); len(got) != 0 {
+		t.Errorf("empty metadata: got %v, want empty", got)
+	}
+
+	got := resultPublishAttributes(api.ResultMessage{
+		Metadata: map[string]string{
+			"userid":                 "alice",
+			api.ResultRouteAttribute: "producer-a",
+		},
+	})
+	if len(got) != 1 || got[api.ResultRouteAttribute] != "producer-a" {
+		t.Errorf("stamped attributes = %v, want only result_route=producer-a", got)
+	}
+}
+
+// mockDropGate returns ActionDrop with a caller-supplied result.
+type mockDropGate struct {
+	result *api.ResultMessage
+}
+
+func (m *mockDropGate) Budget(ctx context.Context) float64 { return 1.0 }
+func (m *mockDropGate) Apply(ctx context.Context, msg *api.InternalRequest, releases *[]pipeline.GateReleaseFunc) (pipeline.Verdict, error) {
+	return pipeline.Drop(m.result), nil
+}
+
+// TestProcessMessages_DropForwardsGateMetadata checks that a drop result keeps
+// the gate's metadata and gains result_route from the request when the gate
+// left it out. Gate keys win over the request.
+func TestProcessMessages_DropForwardsGateMetadata(t *testing.T) {
+	flow := &PubSubMQFlow{resultChannel: make(chan api.ResultMessage, 1)}
+	ch := make(chan *api.InternalRequest, 1)
+
+	gate := &mockDropGate{result: &api.ResultMessage{
+		ID:       "test-msg",
+		Payload:  `{"code":429}`,
+		Metadata: map[string]string{"userid": "alice"},
+	}}
+
+	msgData, _ := json.Marshal(api.RequestMessage{
+		ID:       "test-msg",
+		Metadata: map[string]string{"userid": "carol"},
+	})
+	receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
+		f(ctx, &pubsub.Message{
+			ID:         "msg-drop-1",
+			Data:       msgData,
+			Attributes: map[string]string{api.ResultRouteAttribute: "producer-a"},
+		})
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var got api.ResultMessage
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case got = <-flow.resultChannel:
+			// Simulate the result worker signalling a successful publish.
+			if val, ok := resultChannels.Load("msg-drop-1"); ok {
+				val.(chan bool) <- true
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	_ = flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, gate, nil, "")
+	<-done
+	if got.Metadata["userid"] != "alice" {
+		t.Fatalf("drop result metadata = %v, want userid=alice", got.Metadata)
+	}
+	if got.Metadata[api.ResultRouteAttribute] != "producer-a" {
+		t.Fatalf("drop result metadata = %v, want result_route filled from the request", got.Metadata)
+	}
+	if _, ok := gate.result.Metadata[api.ResultRouteAttribute]; ok {
+		t.Fatalf("backfill mutated the gate result: %v", gate.result.Metadata)
+	}
+}
+
+func TestProcessMessages_DeliveryAttemptAfterRefusalIsNotARetry(t *testing.T) {
+	flow := &PubSubMQFlow{}
+	ch := make(chan *api.InternalRequest, 1)
+	attempt := 2
+	msgData, _ := json.Marshal(api.RequestMessage{ID: "req-1"})
+	receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
+		f(ctx, &pubsub.Message{
+			ID:              "msg-admit",
+			Data:            msgData,
+			DeliveryAttempt: &attempt,
+		})
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var got *api.InternalRequest
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case got = <-ch:
+			if val, ok := resultChannels.Load(got.TransportCorrelationID); ok {
+				val.(chan bool) <- true
+			}
+		case <-ctx.Done():
+		}
+	}()
+	if err := flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, &mockAttributeGate{allowed: true}, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if got == nil {
+		t.Fatal("expected the request to be admitted")
+	}
+	if got.RetryCount != 0 {
+		t.Fatalf("RetryCount = %d, want 0 when this delivery is the first admission", got.RetryCount)
+	}
+}
+
+func TestProcessMessages_RedeliveryAfterAdmissionKeepsRetryCount(t *testing.T) {
+	flow := &PubSubMQFlow{}
+	msgData, _ := json.Marshal(api.RequestMessage{ID: "req-1"})
+	deliver := func(attempt int, ack bool) *api.InternalRequest {
+		t.Helper()
+		ch := make(chan *api.InternalRequest, 1)
+		receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
+			f(ctx, &pubsub.Message{
+				ID:              "msg-admit",
+				Data:            msgData,
+				DeliveryAttempt: &attempt,
+			})
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		var got *api.InternalRequest
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			select {
+			case got = <-ch:
+				if val, ok := resultChannels.Load(got.TransportCorrelationID); ok {
+					val.(chan bool) <- ack
+				}
+			case <-ctx.Done():
+			}
+		}()
+		if err := flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, &mockAttributeGate{allowed: true}, nil, ""); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+		if got == nil {
+			t.Fatal("expected the request to be admitted")
+		}
+		return got
+	}
+
+	first := deliver(1, false)
+	if first.RetryCount != 0 {
+		t.Fatalf("first RetryCount = %d, want 0", first.RetryCount)
+	}
+	second := deliver(2, true)
+	if second.RetryCount != 1 {
+		t.Fatalf("redelivery RetryCount = %d, want 1", second.RetryCount)
+	}
+}
+
+func TestResultWorkerStampsResultRouteAttribute(t *testing.T) {
+	client, _ := newFakePubSub(t)
+	ctx := context.Background()
+	topicName := "projects/" + testProject + "/topics/results"
+	if _, err := client.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{Name: topicName}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	subName := "projects/" + testProject + "/subscriptions/results-sub"
+	if _, err := client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  subName,
+		Topic: topicName,
+	}); err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+
+	sig := make(chan bool, 1)
+	resultChannels.Store("pub-1", sig)
+	t.Cleanup(func() { resultChannels.Delete("pub-1") })
+
+	resultCh := make(chan api.ResultMessage, 1)
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go resultWorker(wctx, client, "results", resultCh)
+
+	resultCh <- api.ResultMessage{
+		ID:      "req-1",
+		Payload: `{"ok":true}`,
+		Routing: api.InternalRouting{TransportCorrelationID: "pub-1"},
+		Metadata: map[string]string{
+			api.ResultRouteAttribute: "producer-a",
+			"userid":                 "alice",
+		},
+	}
+
+	sub := client.Subscriber("results-sub")
+	sub.ReceiveSettings.MaxOutstandingMessages = 1
+	sub.ReceiveSettings.NumGoroutines = 1
+	recvCtx, recvCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer recvCancel()
+
+	var got *pubsub.Message
+	err := sub.Receive(recvCtx, func(ctx context.Context, msg *pubsub.Message) {
+		got = msg
+		msg.Ack()
+		recvCancel()
+	})
+	if got == nil {
+		t.Fatalf("did not receive result: %v", err)
+	}
+	if got.Attributes[api.ResultRouteAttribute] != "producer-a" {
+		t.Errorf("result attributes = %v, want result_route=producer-a", got.Attributes)
+	}
+	if _, ok := got.Attributes["userid"]; ok {
+		t.Errorf("result attributes leaked caller metadata: %v", got.Attributes)
+	}
+	var decoded api.ResultMessage
+	if err := json.Unmarshal(got.Data, &decoded); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if decoded.ID != "req-1" {
+		t.Errorf("result id = %q, want req-1", decoded.ID)
+	}
+}

@@ -80,11 +80,11 @@ func TestGating_EndToEnd(t *testing.T) {
 		deniedChan := make(chan bool, 1)
 		go func() {
 			receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
-				// This should return immediately because Acquire fails
+				// This should return immediately because Acquire fails.
 				f(ctx, msg2)
 				return nil
 			}
-			// We expect this to return without putting anything in 'ch'
+			// We expect this to return without putting anything in 'ch'.
 			_ = flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, gate, nil, "")
 			deniedChan <- true
 		}()
@@ -93,7 +93,7 @@ func TestGating_EndToEnd(t *testing.T) {
 		case <-ch:
 			t.Fatal("Request 2 should have been gated and not reached the channel")
 		case <-deniedChan:
-			// Success: processMessages returned (due to Nack) without sending to 'ch'
+			// Success: processMessages returned (due to Nack) without sending to 'ch'.
 		case <-time.After(1 * time.Second):
 			t.Fatal("Timeout waiting for req-2 to be denied")
 		}

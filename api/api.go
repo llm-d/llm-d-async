@@ -110,6 +110,9 @@ const (
 	ErrCodeInferenceError     = "INFERENCE_ERROR"
 	ErrCodeInvalidRequest     = "INVALID_REQUEST"
 	ErrCodePayloadUnavailable = "PAYLOAD_UNAVAILABLE"
+	// ErrCodeDeadLettered is returned by the GCP producer when Pub/Sub moves
+	// the request to the dead-letter topic. No inference result was published.
+	ErrCodeDeadLettered = "DEAD_LETTERED"
 )
 
 // CancellationChecker reports whether a specific request generation has been cancelled.
@@ -167,6 +170,40 @@ func NewHTTPResult(req Request, routing InternalRouting, statusCode int, respons
 // NewGateDroppedResult builds a ResultMessage for a gate-dropped request.
 func NewGateDroppedResult(req Request, routing InternalRouting) ResultMessage {
 	return NewErrorResult(req, routing, ErrCodeGateDropped, "Pool gating dropped request")
+}
+
+// NewDroppedResult builds the result a transport publishes when a gate drops
+// a request. A nil gate result is the standard GATE_DROPPED error. Otherwise
+// the gate result is copied, Routing comes from the request, and Metadata is
+// request metadata with the gate result's keys overlaid. The copy leaves the
+// gate's map alone and keeps result_route when the gate built its own result.
+func NewDroppedResult(req Request, routing InternalRouting, gateResult *ResultMessage) ResultMessage {
+	if gateResult == nil {
+		return NewGateDroppedResult(req, routing)
+	}
+	out := *gateResult
+	out.Routing = routing
+	out.Metadata = BackfillResultMetadata(req.ReqMetadata(), gateResult.Metadata)
+	return out
+}
+
+// BackfillResultMetadata returns a new map containing request metadata, then
+// result metadata. A key the result left out is filled from the request.
+// A key the result set wins. Both empty returns nil.
+// Drop paths use this so a gate that built its own result still carries
+// result_route and the rest of the request metadata.
+func BackfillResultMetadata(request, result map[string]string) map[string]string {
+	if len(request) == 0 && len(result) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(request)+len(result))
+	for k, v := range request {
+		merged[k] = v
+	}
+	for k, v := range result {
+		merged[k] = v
+	}
+	return merged
 }
 
 // NewDeadlineExceededResult builds a ResultMessage for deadline expiry.
