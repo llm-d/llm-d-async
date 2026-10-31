@@ -33,7 +33,8 @@ func (p *Producer) ensureResources(ctx context.Context) error {
 	}
 	// An existing request subscription is checked before the DLQ topic and
 	// per-route subscription are created. A mismatch must not leave those behind.
-	if err := p.validateExistingSubscription(ctx, requestSub); err != nil {
+	existingRequest, err := p.validateExistingSubscription(ctx, requestSub)
+	if err != nil {
 		return err
 	}
 
@@ -50,10 +51,10 @@ func (p *Producer) ensureResources(ctx context.Context) error {
 		ackDeadlineSeconds: resultAckDeadlineSeconds,
 		neverExpire:        true,
 	}
-	if err := p.ensureSubscription(ctx, dlqSub); err != nil {
+	if err := p.ensureSubscription(ctx, dlqSub, nil); err != nil {
 		return err
 	}
-	if err := p.ensureSubscription(ctx, requestSub); err != nil {
+	if err := p.ensureSubscription(ctx, requestSub, existingRequest); err != nil {
 		return err
 	}
 
@@ -64,7 +65,7 @@ func (p *Producer) ensureResources(ctx context.Context) error {
 		ackDeadlineSeconds: resultAckDeadlineSeconds,
 		neverExpire:        true,
 	}
-	return p.ensureSubscription(ctx, resultSub)
+	return p.ensureSubscription(ctx, resultSub, nil)
 }
 
 func (p *Producer) ensureTopic(ctx context.Context, topicID string) error {
@@ -76,7 +77,12 @@ func (p *Producer) ensureTopic(ctx context.Context, topicID string) error {
 	return fmt.Errorf("create topic %q: %w", topicID, err)
 }
 
-func (p *Producer) ensureSubscription(ctx context.Context, spec subscriptionSpec) error {
+func (p *Producer) ensureSubscription(ctx context.Context, spec subscriptionSpec, existing *pubsubpb.Subscription) error {
+	if existing != nil {
+		p.noteMissingDeadLetter(spec, existing)
+		return nil
+	}
+
 	name := subscriptionResource(p.cfg.ProjectID, spec.id)
 	wantTopic := topicResource(p.cfg.ProjectID, spec.topicID)
 	_, err := p.client.SubscriptionAdminClient.CreateSubscription(ctx, spec.toProto(p.cfg.ProjectID, name, wantTopic, p.cfg.MaxDeliveryAttempts))
@@ -87,36 +93,45 @@ func (p *Producer) ensureSubscription(ctx context.Context, spec subscriptionSpec
 		return fmt.Errorf("create subscription %q: %w", spec.id, err)
 	}
 
-	existing, getErr := p.client.SubscriptionAdminClient.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{
+	got, getErr := p.client.SubscriptionAdminClient.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{
 		Subscription: name,
 	})
 	if getErr != nil {
 		return fmt.Errorf("get existing subscription %q: %w", spec.id, getErr)
 	}
-	if err := p.subscriptionMismatch(existing, spec); err != nil {
+	if err := p.subscriptionMismatch(got, spec); err != nil {
 		return err
 	}
+	p.noteMissingDeadLetter(spec, got)
+	return nil
+}
+
+func (p *Producer) noteMissingDeadLetter(spec subscriptionSpec, existing *pubsubpb.Subscription) {
 	if spec.deadLetterTopicID != "" && existing.GetDeadLetterPolicy().GetDeadLetterTopic() == "" {
 		p.logger.Info("subscription has no dead-letter policy; leaving it unchanged",
 			"subscription", spec.id,
 			"wantDeadLetterTopic", topicResource(p.cfg.ProjectID, spec.deadLetterTopicID))
 	}
-	return nil
 }
 
 // validateExistingSubscription checks a subscription that is already present.
 // NotFound is success: ensureSubscription creates it after DLQ resources exist.
-func (p *Producer) validateExistingSubscription(ctx context.Context, spec subscriptionSpec) error {
+// The returned proto is passed into ensureSubscription so an existing
+// subscription is not fetched again.
+func (p *Producer) validateExistingSubscription(ctx context.Context, spec subscriptionSpec) (*pubsubpb.Subscription, error) {
 	existing, err := p.client.SubscriptionAdminClient.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{
 		Subscription: subscriptionResource(p.cfg.ProjectID, spec.id),
 	})
 	if status.Code(err) == codes.NotFound {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("get existing subscription %q: %w", spec.id, err)
+		return nil, fmt.Errorf("get existing subscription %q: %w", spec.id, err)
 	}
-	return p.subscriptionMismatch(existing, spec)
+	if err := p.subscriptionMismatch(existing, spec); err != nil {
+		return nil, err
+	}
+	return existing, nil
 }
 
 func (p *Producer) subscriptionMismatch(existing *pubsubpb.Subscription, spec subscriptionSpec) error {

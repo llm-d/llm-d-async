@@ -140,6 +140,9 @@ git push origin v0.8.0
 `producer` and `producer-gcp` require `api` at pseudo-version `v1.0.1-0.20261027063923-75f85ab81c04`, the commit that added `Producer`, `ResultRouteAttribute`, `ErrCodeDeadLettered`, and `BackfillResultMetadata`.
 The published `api/v1.0.0` tag does not contain those symbols, and a consumer does not see the `replace` directives in this repo.
 On release, tag `api` first, then point `producer` and `producer-gcp` at that tag.
+That pseudo-version is a branch commit.
+It will not exist after the squash merge, and its api tree does not contain `NewDroppedResult`.
+Re-point the requires at the merge commit or the api tag before tagging `producer` or `producer-gcp`.
 `make set-version` rewrites the requires before those tags are pushed.
 
 Go requires sub-module tags to carry the directory prefix.

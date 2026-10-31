@@ -888,6 +888,91 @@ func TestPoisonResultIsAcked(t *testing.T) {
 	}
 }
 
+func TestGetResultKeepsResultWhenDeadLetterReceiveFails(t *testing.T) {
+	client, _ := newFake(t)
+	cfg := testConfig()
+	cfg.ResultSubscriptionID = "producer-a-results"
+	ctx := context.Background()
+	if _, err := client.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name: topicResource(testProject, cfg.ResultTopicID),
+	}); err != nil {
+		t.Fatalf("create result topic: %v", err)
+	}
+	if _, err := client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:   subscriptionResource(testProject, cfg.ResultSubscriptionID),
+		Topic:  topicResource(testProject, cfg.ResultTopicID),
+		Filter: resultRouteFilter(cfg.ResultRoute),
+	}); err != nil {
+		t.Fatalf("create result subscription: %v", err)
+	}
+
+	sink := &countLogSink{}
+	p := newTestProducer(t, client, cfg, WithoutCreateResources(), WithLogger(logr.New(sink)))
+	publishResult(t, client, cfg.ResultTopicID, "alive", cfg.ResultRoute)
+
+	getCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := p.GetResult(getCtx)
+	if err != nil {
+		t.Fatalf("GetResult: %v", err)
+	}
+	if got.ID != "alive" {
+		t.Fatalf("result id = %q, want alive", got.ID)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for sink.count() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("dead-letter receive failure was not logged")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestWaitResultFollowsReplacedStream(t *testing.T) {
+	p := &Producer{
+		results: make(chan receivedResult, 1),
+		closed:  make(chan struct{}),
+	}
+	old := &resultStream{done: make(chan struct{})}
+	fresh := &resultStream{done: make(chan struct{})}
+	p.stream = fresh
+	p.receiving = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	type gotResult struct {
+		msg *api.ResultMessage
+		err error
+	}
+	gotCh := make(chan gotResult, 1)
+	go func() {
+		msg, err := p.waitResult(ctx, old)
+		gotCh <- gotResult{msg, err}
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	old.err = errors.New("replaced stream")
+	close(old.done)
+	select {
+	case got := <-gotCh:
+		t.Fatalf("GetResult returned the replaced stream's error: %v", got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	p.results <- receivedResult{result: &api.ResultMessage{ID: "kept"}, ack: func() {}}
+	select {
+	case got := <-gotCh:
+		if got.err != nil {
+			t.Fatalf("GetResult: %v", got.err)
+		}
+		if got.msg == nil || got.msg.ID != "kept" {
+			t.Fatalf("result = %+v, want id kept", got.msg)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the result on the new stream")
+	}
+}
+
 func TestReceiveRestartBacksOff(t *testing.T) {
 	client := newFakeClient(t)
 	p := newTestProducer(t, client, testConfig(), WithoutCreateResources())

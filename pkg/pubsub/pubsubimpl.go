@@ -72,6 +72,11 @@ type PubSubMQFlow struct {
 	// reads in HealthCheck race-free against per-entry updates guarded by
 	// subHealth's own mutex.
 	consumeHealth map[string]*subHealth
+	// admittedDelivery records message IDs handed to the worker. A later
+	// delivery of the same ID is a processing retry. A refusal Nack is not
+	// recorded, so Pub/Sub's DeliveryAttempt does not hide the admission from
+	// RecordAsyncReq.
+	admittedDelivery sync.Map
 }
 
 // subHealth records the most recent broker interaction observed by the consume
@@ -659,7 +664,10 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		if resultTopicID != "" {
 			irout.ResultQueueName = resultTopicID
 		}
-		if msg.DeliveryAttempt != nil {
+		// DeliveryAttempt counts every Nack, including a gate refusal that never
+		// reached the worker. Only a message this process already admitted is
+		// a retry, so the admission after saturation is still counted.
+		if _, seen := r.admittedDelivery.Load(msg.ID); seen && msg.DeliveryAttempt != nil && *msg.DeliveryAttempt > 1 {
 			irout.RetryCount = *msg.DeliveryAttempt - 1
 		}
 		if len(labels) > 0 {
@@ -731,12 +739,14 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		// worker can record queue residence time when it pulls the message.
 		ir.IngestionTime = time.Now()
 
+		r.admittedDelivery.Store(msg.ID, struct{}{})
 		ch <- ir
 
 		result := <-resultsChannel
 		if !result {
 			msg.Nack()
 		} else {
+			r.admittedDelivery.Delete(msg.ID)
 			metrics.RecordMessageLatency(float64(time.Since(msg.PublishTime).Milliseconds()), ir.QueueID, ir.RequestQueueName, poolID)
 			msg.Ack()
 		}

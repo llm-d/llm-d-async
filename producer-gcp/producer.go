@@ -22,10 +22,11 @@ const (
 	// Pub/Sub rejects a dead-letter policy outside this range.
 	minDeliveryAttempts int32 = 5
 	maxDeliveryAttempts int32 = 100
-	// defaultDeliveryAttempts is the Pub/Sub maximum. A retry Nacks, and each
-	// Nack counts. A refusal keeps the message leased and does not. Five
-	// attempts, the minimum Pub/Sub allows, still dead-letters a live request
-	// that is retried while a pool stays saturated, and no result is published.
+	// defaultDeliveryAttempts is the Pub/Sub maximum. The processor Nacks a
+	// retry and a gate refusal, and each Nack counts. A refusal waits 10
+	// seconds, then Nacks. Five attempts, the minimum Pub/Sub allows, still
+	// dead-letters a live request while a pool stays saturated, and no result
+	// is published.
 	defaultDeliveryAttempts  = maxDeliveryAttempts
 	minRetryBackoff          = 10 * time.Second
 	maxRetryBackoff          = 600 * time.Second
@@ -85,8 +86,8 @@ type Config struct {
 	// MaxDeliveryAttempts is how many times Pub/Sub delivers a request before
 	// dead-lettering it. Zero uses defaultDeliveryAttempts (100).
 	// Values outside 5-100 are rejected.
-	// The processor Nacks a retry, and each Nack counts. A refusal keeps the
-	// message leased on the same delivery and does not.
+	// The processor Nacks a retry and a gate refusal, and each Nack counts.
+	// A refusal waits 10 seconds, then Nacks.
 	// An existing subscription keeps its dead-letter policy, including the
 	// topic. Delete it once so the next NewProducer creates it with this value.
 	MaxDeliveryAttempts int32
@@ -298,9 +299,12 @@ func (p *Producer) CancelRequests(_ context.Context, requestIDs []string) error 
 // subscription. Later calls drain that stream. The message is acknowledged
 // only after this call takes it, and that ack is issued before the receive
 // returns. A message not taken within resultMaxExtension is redelivered.
-// If a receive returns an error, this call returns that error. The error stays
-// on that stream. The next call reuses it for receiveRestartBackoff, then
-// starts a new one.
+// A dead-letter receive failure is logged and does not stop the result
+// receive. If the result receive returns an error, this call returns that
+// error. The error stays on that stream. The next call reuses it for
+// receiveRestartBackoff, then starts a new one. A call still waiting on a
+// stream that has been replaced waits on the new stream instead of returning
+// the old error.
 func (p *Producer) GetResult(ctx context.Context) (*api.ResultMessage, error) {
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
@@ -312,35 +316,55 @@ func (p *Producer) GetResult(ctx context.Context) (*api.ResultMessage, error) {
 	if stream == nil {
 		return nil, errProducerClosed
 	}
+	return p.waitResult(ctx, stream)
+}
 
-	// A result already in the buffer is handed off before a dead stream.
-	select {
-	case item := <-p.results:
-		return takeResult(item)
-	default:
-	}
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
-	case <-p.closed:
-		return nil, errProducerClosed
-	case <-stream.done:
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
-		}
-		if err := p.errIfClosed(); err != nil {
-			return nil, err
-		}
+func (p *Producer) waitResult(ctx context.Context, stream *resultStream) (*api.ResultMessage, error) {
+	for {
+		// A result already in the buffer is handed off before a dead stream.
 		select {
 		case item := <-p.results:
 			return takeResult(item)
 		default:
-			return nil, p.streamErr(stream)
 		}
-	case item := <-p.results:
-		return takeResult(item)
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
+		case <-p.closed:
+			return nil, errProducerClosed
+		case <-stream.done:
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
+			}
+			if err := p.errIfClosed(); err != nil {
+				return nil, err
+			}
+			select {
+			case item := <-p.results:
+				return takeResult(item)
+			default:
+			}
+			if next := p.currentReceive(); next != nil && next != stream {
+				stream = next
+				continue
+			}
+			return nil, p.streamErr(stream)
+		case item := <-p.results:
+			return takeResult(item)
+		}
 	}
+}
+
+// currentReceive is the receive in flight. A stream kept only for backoff is
+// not current, so a waiter on it still returns that stream's error.
+func (p *Producer) currentReceive() *resultStream {
+	p.recvMu.Lock()
+	defer p.recvMu.Unlock()
+	if !p.receiving {
+		return nil
+	}
+	return p.stream
 }
 
 func takeResult(item receivedResult) (*api.ResultMessage, error) {
@@ -398,31 +422,32 @@ func (p *Producer) receiveSubscriptions(ctx context.Context) error {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
-	subs := []struct {
-		id string
-		fn func(context.Context, *pubsub.Message)
-	}{
-		{p.cfg.ResultSubscriptionID, p.enqueueResult},
-		{p.cfg.DeadLetterSubscriptionID, p.enqueueDeadLetter},
-	}
-	for _, sub := range subs {
-		wg.Add(1)
-		go func(id string, fn func(context.Context, *pubsub.Message)) {
-			defer wg.Done()
-			err := p.receiveSubscription(ctx, id, fn)
-			if err != nil && ctx.Err() == nil {
-				errCh <- err
-				cancel()
-			}
-		}(sub.id, sub.fn)
-	}
+	resultErr := make(chan error, 1)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err := p.receiveSubscription(ctx, p.cfg.ResultSubscriptionID, p.enqueueResult)
+		if err != nil && ctx.Err() == nil {
+			resultErr <- err
+			cancel()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		err := p.receiveSubscription(ctx, p.cfg.DeadLetterSubscriptionID, p.enqueueDeadLetter)
+		// The dead-letter subscription is optional. A missing subscription or
+		// a subscriber that cannot read it must not take down the result stream.
+		if err != nil && ctx.Err() == nil {
+			p.logger.Error(err, "dead-letter receive failed", "subscription", p.cfg.DeadLetterSubscriptionID)
+		}
+	}()
 	wg.Wait()
-	close(errCh)
-	for err := range errCh {
+	select {
+	case err := <-resultErr:
 		return err
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (p *Producer) receiveSubscription(ctx context.Context, subID string, fn func(context.Context, *pubsub.Message)) error {
