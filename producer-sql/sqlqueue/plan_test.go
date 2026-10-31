@@ -91,8 +91,7 @@ func openExplainedStore(t *testing.T) (*Store, *planRecorder) {
 	t.Cleanup(func() { _ = db.Close() })
 	s := &Store{db: db, tracer: noop.NewTracerProvider().Tracer("")}
 	ctx := context.Background()
-	_, err = migrate.Run(ctx, db)
-	require.NoError(t, err)
+	require.NoError(t, migrate.Run(ctx, db))
 	require.NoError(t, s.TruncateForTest(ctx))
 	return s, rec
 }

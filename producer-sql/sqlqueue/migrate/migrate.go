@@ -24,7 +24,7 @@ var migrationFiles embed.FS
 const (
 	versionTable = "async_schema_migrations"
 
-	// lockKey is the pg_advisory_xact_lock key that serializes concurrent runs.
+	// lockKey is the advisory lock key that serializes concurrent runs.
 	lockKey int64 = 0x6173796e6371 // "asyncq"
 
 	createVersionTable = `CREATE TABLE IF NOT EXISTS ` + versionTable + ` (
@@ -47,22 +47,21 @@ var (
 
 var fileNamePattern = regexp.MustCompile(`^(\d{4})_([a-z0-9_]+)\.sql$`)
 
-// Migration is one embedded SQL file.
-type Migration struct {
-	Version int
-	Name    string
-	SQL     string
+type migration struct {
+	version int
+	name    string
+	sql     string
 }
 
 // load parses the embedded migrations in version order. Versions must start
 // at 1 and be contiguous.
-func load() ([]Migration, error) {
+func load() ([]migration, error) {
 	entries, err := fs.ReadDir(migrationFiles, "migrations")
 	if err != nil {
 		return nil, fmt.Errorf("read migrations: %w", err)
 	}
 
-	migrations := make([]Migration, 0, len(entries))
+	migrations := make([]migration, 0, len(entries))
 	for _, entry := range entries {
 		m := fileNamePattern.FindStringSubmatch(entry.Name())
 		if m == nil {
@@ -76,107 +75,136 @@ func load() ([]Migration, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read migration %q: %w", entry.Name(), err)
 		}
-		migrations = append(migrations, Migration{Version: version, Name: m[2], SQL: string(body)})
+		migrations = append(migrations, migration{version: version, name: m[2], sql: string(body)})
 	}
 
 	for i, m := range migrations {
-		if m.Version != i+1 {
-			return nil, fmt.Errorf("migration versions must be contiguous from 1, got %04d_%s at position %d", m.Version, m.Name, i+1)
+		if m.version != i+1 {
+			return nil, fmt.Errorf("migration versions must be contiguous from 1, got %04d_%s at position %d", m.version, m.name, i+1)
 		}
 	}
 	return migrations, nil
 }
 
-// LatestVersion is the version a binary built from this tree expects.
-func LatestVersion() (int, error) {
-	migrations, err := load()
-	if err != nil {
-		return 0, err
+type queryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// readVersion returns ErrSchemaMissing when the version table does not exist.
+func readVersion(ctx context.Context, q queryer) (int, error) {
+	var current int
+	if err := q.QueryRowContext(ctx, selectCurrentVersion).Scan(&current); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == sqlstateUndefinedTable {
+			return 0, ErrSchemaMissing
+		}
+		return 0, fmt.Errorf("read schema version: %w", err)
 	}
-	return len(migrations), nil
+	return current, nil
+}
+
+func logIfNewer(ctx context.Context, current, expected int) {
+	if current > expected {
+		logr.FromContextOrDiscard(ctx).Info("sql transport schema is newer than this binary expects",
+			"databaseVersion", current, "expectedVersion", expected)
+	}
 }
 
 // Run applies all pending migrations in a single transaction under an
 // advisory lock, so concurrent callers serialize and at most one of them
-// executes DDL. It returns the migrations it applied.
-func Run(ctx context.Context, db *sql.DB) ([]Migration, error) {
+// executes DDL. A schema that is already current takes no lock.
+func Run(ctx context.Context, db *sql.DB) error {
 	migrations, err := load()
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	current, err := readVersion(ctx, db)
+	if err != nil && !errors.Is(err, ErrSchemaMissing) {
+		return err
+	}
+	if err == nil && current >= len(migrations) {
+		logIfNewer(ctx, current, len(migrations))
+		return nil
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
+		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", lockKey); err != nil {
-		return nil, fmt.Errorf("acquire migration lock: %w", err)
+		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, createVersionTable); err != nil {
-		return nil, fmt.Errorf("create %s: %w", versionTable, err)
+		return fmt.Errorf("create %s: %w", versionTable, err)
+	}
+	if current, err = readVersion(ctx, tx); err != nil {
+		return err
 	}
 
-	var current int
-	if err := tx.QueryRowContext(ctx, selectCurrentVersion).Scan(&current); err != nil {
-		return nil, fmt.Errorf("read schema version: %w", err)
-	}
-
-	var applied []Migration
+	var applied []migration
 	for _, m := range migrations {
-		if m.Version <= current {
+		if m.version <= current {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
-			return nil, fmt.Errorf("apply migration %04d_%s: %w", m.Version, m.Name, err)
+		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+			return fmt.Errorf("apply migration %04d_%s: %w", m.version, m.name, err)
 		}
-		if _, err := tx.ExecContext(ctx, insertVersion, m.Version, m.Name); err != nil {
-			return nil, fmt.Errorf("record migration %04d_%s: %w", m.Version, m.Name, err)
+		if _, err := tx.ExecContext(ctx, insertVersion, m.version, m.name); err != nil {
+			return fmt.Errorf("record migration %04d_%s: %w", m.version, m.name, err)
 		}
 		applied = append(applied, m)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
+		return fmt.Errorf("commit: %w", err)
 	}
 
 	logger := logr.FromContextOrDiscard(ctx)
 	for _, m := range applied {
-		logger.Info("applied sql transport schema migration", "version", m.Version, "name", m.Name)
+		logger.Info("applied sql transport schema migration", "version", m.version, "name", m.name)
 	}
-	if current > len(migrations) {
-		logger.Info("sql transport schema is newer than this binary expects",
-			"databaseVersion", current, "expectedVersion", len(migrations))
-	}
-	return applied, nil
+	logIfNewer(ctx, current, len(migrations))
+	return nil
 }
 
 // Check verifies the database schema is at least the version this binary
 // expects. A missing version table returns ErrSchemaMissing and an older
-// version returns ErrSchemaBehind. A newer version is logged and accepted so
-// that binaries can be rolled back after a migration.
+// version returns ErrSchemaBehind; before returning either, Check waits for a
+// migration in progress to commit and reads again. A newer version is logged
+// and accepted so that binaries can be rolled back after a migration.
 func Check(ctx context.Context, db *sql.DB) error {
-	expected, err := LatestVersion()
+	migrations, err := load()
 	if err != nil {
 		return err
 	}
+	expected := len(migrations)
 
-	var current int
-	if err := db.QueryRowContext(ctx, selectCurrentVersion).Scan(&current); err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == sqlstateUndefinedTable {
-			return ErrSchemaMissing
-		}
-		return fmt.Errorf("read schema version: %w", err)
+	current, err := readVersion(ctx, db)
+	if err != nil && !errors.Is(err, ErrSchemaMissing) {
+		return err
+	}
+	if err == nil && current >= expected {
+		logIfNewer(ctx, current, expected)
+		return nil
 	}
 
-	switch {
-	case current < expected:
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock_shared($1)", lockKey); err != nil {
+		return fmt.Errorf("wait for migration lock: %w", err)
+	}
+	if current, err = readVersion(ctx, tx); err != nil {
+		return err
+	}
+	if current < expected {
 		return fmt.Errorf("%w: database at version %d, binary expects %d", ErrSchemaBehind, current, expected)
-	case current > expected:
-		logr.FromContextOrDiscard(ctx).Info("sql transport schema is newer than this binary expects",
-			"databaseVersion", current, "expectedVersion", expected)
 	}
+	logIfNewer(ctx, current, expected)
 	return nil
 }
