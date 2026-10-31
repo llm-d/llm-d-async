@@ -8,12 +8,12 @@ import (
 	"os"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +27,7 @@ func openStore(t *testing.T) *Store {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
 	ctx := context.Background()
-	s, err := Open(ctx, pgURL)
+	s, err := Open(ctx, pgURL, WithMigrate())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	require.NoError(t, s.TruncateForTest(ctx))
@@ -124,52 +124,6 @@ func TestValidateDSN(t *testing.T) {
 	err := validateDSN("mysql://u:secret@h/db")
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "secret")
-}
-
-func TestMigrateIsIdempotent(t *testing.T) {
-	withStore(t, func(t *testing.T, s *Store) {
-		require.NoError(t, s.Migrate(context.Background()))
-		require.NoError(t, s.Migrate(context.Background()))
-	})
-}
-
-func TestMigrateRecordsTheSchemaVersion(t *testing.T) {
-	ctx := context.Background()
-	s, err := Open(ctx, isolatedDSN(t))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-	var version string
-	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT version FROM async_schema`).Scan(&version))
-	assert.Equal(t, schemaVersion(), version)
-}
-
-func TestMigrateRefusesASchemaFromAnotherBuild(t *testing.T) {
-	ctx := context.Background()
-	dsn := isolatedDSN(t)
-	s, err := Open(ctx, dsn)
-	require.NoError(t, err)
-	_, err = s.db.ExecContext(ctx, `UPDATE async_schema SET version = 'older-build'`)
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	_, err = Open(ctx, dsn)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "older-build")
-	assert.Contains(t, err.Error(), "drop the async_* tables")
-}
-
-func TestMigrateRefusesUnversionedTables(t *testing.T) {
-	ctx := context.Background()
-	dsn := isolatedDSN(t)
-	s, err := Open(ctx, dsn)
-	require.NoError(t, err)
-	_, err = s.db.ExecContext(ctx, `DROP TABLE async_schema`)
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	_, err = Open(ctx, dsn)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no schema version")
 }
 
 func TestPartitionOfIsStableAndCoversEveryPartition(t *testing.T) {
@@ -324,51 +278,49 @@ func TestInFlightListsCurrentEpochStampsOfOwnedPartitions(t *testing.T) {
 	})
 }
 
-func TestConcurrentOpenCreatesSchemaOnce(t *testing.T) {
-	pgURL := os.Getenv("TEST_POSTGRES_URL")
-	if pgURL == "" {
-		t.Skip("TEST_POSTGRES_URL not set")
-	}
+func TestOpenMigratesOnlyWhenAsked(t *testing.T) {
 	ctx := context.Background()
-	admin, err := Open(ctx, pgURL)
-	require.NoError(t, err)
-	defer func() { _ = admin.Close() }()
-	schema := fmt.Sprintf("migrate_%d", time.Now().UnixNano())
-	_, err = admin.db.ExecContext(ctx, "CREATE SCHEMA "+schema)
-	require.NoError(t, err)
-	defer func() { _, _ = admin.db.ExecContext(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	dsn := isolatedDSN(t)
+	_, err := Open(ctx, dsn)
+	require.ErrorIs(t, err, migrate.ErrSchemaMissing)
 
-	sep := "?"
-	if strings.Contains(pgURL, "?") {
-		sep = "&"
-	}
-	dsn := pgURL + sep + "search_path=" + schema
-	const openers = 8
-	errs := make(chan error, openers)
-	var wg sync.WaitGroup
-	for range openers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			st, err := Open(ctx, dsn)
-			if err == nil {
-				err = st.Close()
-			}
-			errs <- err
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		require.NoError(t, err)
-	}
-	var tables int
-	require.NoError(t, admin.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1`, schema).Scan(&tables))
-	assert.Equal(t, 10, tables)
-	var versions int
-	require.NoError(t, admin.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+schema+`.async_schema`).Scan(&versions))
-	assert.Equal(t, 1, versions, "one opener created the schema")
+	s, err := Open(ctx, dsn, WithMigrate())
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	s, err = Open(ctx, dsn)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+}
+
+func TestOpenRunsAgainstANewerAdditiveSchema(t *testing.T) {
+	ctx := context.Background()
+	dsn := isolatedDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.NoError(t, migrate.Run(ctx, db))
+	_, err = db.ExecContext(ctx, `
+		ALTER TABLE async_requests ADD COLUMN note TEXT NOT NULL DEFAULT '';
+		ALTER TABLE async_results ADD COLUMN note TEXT NOT NULL DEFAULT ''`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO async_schema_migrations (version, name) SELECT max(version) + 1, 'add_note' FROM async_schema_migrations`)
+	require.NoError(t, err)
+
+	s, err := Open(ctx, dsn)
+	require.NoError(t, err, "a build one release behind runs against an expanded schema")
+	t.Cleanup(func() { _ = s.Close() })
+	now := time.Now()
+	ownAll(t, s, "a", now)
+	require.NoError(t, s.Enqueue(ctx, req("older-build", now.Unix()+60)))
+	rows, err := s.Dispatch(ctx, "q", "a", now, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	acked, err := s.Ack(ctx, "a", []Completion{completion(rows[0].Stamp(), "r")})
+	require.NoError(t, err)
+	assert.Equal(t, []bool{true}, acked)
+	results, err := s.PopResults(ctx, "r", now.Unix(), 10)
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
 }
 
 func TestResetStaleIsScopedAndSkipsLockedRows(t *testing.T) {

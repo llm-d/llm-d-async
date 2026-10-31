@@ -36,7 +36,7 @@ func sqlDSN(t *testing.T) string {
 	if dsn == "" {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
-	store, err := sqlqueue.Open(context.Background(), dsn)
+	store, err := sqlqueue.Open(context.Background(), dsn, sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	require.NoError(t, store.TruncateForTest(context.Background()))

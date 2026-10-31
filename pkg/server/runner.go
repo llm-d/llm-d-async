@@ -104,7 +104,7 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	flow, sortedSetConfig, err := loadFlow(opts, gateFactory, poolsMap)
+	flow, sortedSetConfig, err := loadFlow(baseCtx, opts, gateFactory, poolsMap)
 	if err != nil {
 		return err
 	}
@@ -287,7 +287,7 @@ func loadRequestMergePolicy(configPath string, ctx context.Context) (pipeline.Re
 	return policy, nil
 }
 
-func loadFlow(opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[string]pipeline.WorkerPoolConfig) (pipeline.Flow, *redis.SortedSetConfig, error) {
+func loadFlow(ctx context.Context, opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[string]pipeline.WorkerPoolConfig) (pipeline.Flow, *redis.SortedSetConfig, error) {
 	workerPools := make([]pipeline.WorkerPoolConfig, 0, len(poolsMap))
 	for _, p := range poolsMap {
 		workerPools = append(workerPools, p)
@@ -318,7 +318,7 @@ func loadFlow(opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[
 		if err != nil {
 			return nil, nil, err
 		}
-		flow, err := sqlflow.New(context.Background(), *cfg, workerPools, gateFactory)
+		flow, err := sqlflow.New(ctx, *cfg, workerPools, gateFactory)
 		return flow, nil, err
 	case "gcp-pubsub":
 		cfg, err := pubsub.LoadConfig(configBytes)
