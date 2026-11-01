@@ -59,8 +59,9 @@ func (sr *SSEReader) WithMaxEventBytes(maxBytes int) *SSEReader {
 	return sr
 }
 
-// Next reads and returns the next SSEEvent. It returns io.EOF when the stream
-// closes cleanly with no remaining buffered event data.
+// Next reads and returns the next complete SSEEvent. Per the WHATWG SSE
+// specification, any partial event not terminated by a blank line before EOF is
+// discarded and io.EOF is returned.
 func (sr *SSEReader) Next() (SSEEvent, error) {
 	if sr.eof {
 		return SSEEvent{}, io.EOF
@@ -73,16 +74,8 @@ func (sr *SSEReader) Next() (SSEEvent, error) {
 	for {
 		line, err := sr.readLine()
 		if err != nil {
+			sr.eof = true
 			if errors.Is(err, io.EOF) {
-				sr.eof = true
-				if len(line) > 0 {
-					if perr := sr.processLine(line, &eventType, &dataBuf, &hasDataField); perr != nil {
-						return SSEEvent{}, perr
-					}
-				}
-				if hasDataField || eventType != "" {
-					return buildSSEEvent(eventType, dataBuf.Bytes()), nil
-				}
 				return SSEEvent{}, io.EOF
 			}
 			return SSEEvent{}, fmt.Errorf("read sse line: %w", err)

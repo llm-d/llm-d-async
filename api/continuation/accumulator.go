@@ -31,7 +31,8 @@ import (
 // attempt finishes normally) and a token-capped checkpoint snapshot (used when
 // persisting mid-stream checkpoints or resuming after an interruption).
 type Accumulator struct {
-	opts EndpointOptions
+	endpoint Endpoint
+	opts     Options
 
 	priorGenTokens        int
 	priorRecomputedTokens int
@@ -41,29 +42,175 @@ type Accumulator struct {
 	thinkSplitResolved    bool
 	attemptSawReasoning   bool
 
-	attemptDeltaTokens     int
-	attemptReasonDeltaToks int
-	attemptUsageSeen       bool
-	attemptPromptToks      int
-	attemptCompToks        int
-	attemptReasonToks      int
+	attemptDeltaTokens       int
+	deltasSinceUsage         int
+	attemptReasonDeltaToks   int
+	attemptUsageSeen         bool
+	attemptReasonDetailsSeen bool
+	attemptPromptToks        int
+	attemptCompToks          int
+	attemptReasonToks        int
 
+	streamDone bool
 	live       *State
 	cappedSnap *State
 
-	// Per-attempt tool call map (index -> ChatToolCall) for chat completions.
-	chatToolCalls map[int]*ChatToolCall
+	// Amortized O(1) byte buffers for growing text/reasoning across chunks.
+	textBuf      []byte
+	reasoningBuf []byte
+
+	// Per-attempt tool call map (index -> openToolCall) for chat completions.
+	chatToolCalls map[int]*openToolCall
 
 	// Per-attempt open items by output_index for /v1/responses.
-	openRespItems    map[int]*ResponseItem
+	openRespItems    map[int]*openRespItem
 	mergedPriorItem  bool
-	respThinkPending string
+	respThinkPending []byte
 }
 
-// EndpointOptions pairs an Endpoint with continuation Options.
-type EndpointOptions struct {
-	Endpoint Endpoint
-	Options  Options
+type openToolCall struct {
+	index   int
+	id      string
+	typ     string
+	nameBuf []byte
+	argsBuf []byte
+}
+
+func (tc *openToolCall) toChatToolCall() ChatToolCall {
+	return ChatToolCall{
+		Index: tc.index,
+		ID:    tc.id,
+		Type:  tc.typ,
+		Function: ChatToolCallFunction{
+			Name:      string(tc.nameBuf),
+			Arguments: string(tc.argsBuf),
+		},
+	}
+}
+
+type openRespPart struct {
+	partType    string
+	textBuf     []byte
+	refusal     string
+	annotations json.RawMessage
+}
+
+type openRespItem struct {
+	id      string
+	typ     string
+	role    string
+	status  string
+	summary []openRespPart
+	content []openRespPart
+	callID  string
+	name    string
+	argsBuf []byte
+	raw     json.RawMessage
+}
+
+func newOpenRespItem(it *ResponseItem) *openRespItem {
+	if it == nil {
+		return &openRespItem{}
+	}
+	open := &openRespItem{
+		id:     it.ID,
+		typ:    it.Type,
+		role:   it.Role,
+		status: it.Status,
+		callID: it.CallID,
+		name:   it.Name,
+	}
+	if it.Arguments != "" {
+		open.argsBuf = []byte(it.Arguments)
+	}
+	if len(it.Raw) > 0 {
+		open.raw = append(json.RawMessage(nil), it.Raw...)
+	}
+	if len(it.Summary) > 0 {
+		open.summary = make([]openRespPart, len(it.Summary))
+		for i, p := range it.Summary {
+			open.summary[i] = openRespPart{
+				partType:    p.Type,
+				textBuf:     []byte(p.Text),
+				refusal:     p.Refusal,
+				annotations: append(json.RawMessage(nil), p.Annotations...),
+			}
+		}
+	}
+	if len(it.Content) > 0 {
+		open.content = make([]openRespPart, len(it.Content))
+		for i, p := range it.Content {
+			open.content[i] = openRespPart{
+				partType:    p.Type,
+				textBuf:     []byte(p.Text),
+				refusal:     p.Refusal,
+				annotations: append(json.RawMessage(nil), p.Annotations...),
+			}
+		}
+	}
+	return open
+}
+
+func (o *openRespItem) appendSummary(partType, delta string) {
+	appendOpenPart(&o.summary, partType, delta)
+}
+
+func (o *openRespItem) appendContent(partType, delta string) {
+	appendOpenPart(&o.content, partType, delta)
+}
+
+func appendOpenPart(parts *[]openRespPart, partType, delta string) {
+	for i := range *parts {
+		if (*parts)[i].partType == partType {
+			(*parts)[i].textBuf = append((*parts)[i].textBuf, delta...)
+			return
+		}
+	}
+	*parts = append(*parts, openRespPart{
+		partType: partType,
+		textBuf:  []byte(delta),
+	})
+}
+
+func (o *openRespItem) toResponseItem() *ResponseItem {
+	if o == nil {
+		return nil
+	}
+	it := &ResponseItem{
+		ID:        o.id,
+		Type:      o.typ,
+		Role:      o.role,
+		Status:    o.status,
+		CallID:    o.callID,
+		Name:      o.name,
+		Arguments: string(o.argsBuf),
+	}
+	if len(o.raw) > 0 {
+		it.Raw = append(json.RawMessage(nil), o.raw...)
+	}
+	if len(o.summary) > 0 {
+		it.Summary = make([]ResponseContentPart, len(o.summary))
+		for i, p := range o.summary {
+			it.Summary[i] = ResponseContentPart{
+				Type:        p.partType,
+				Text:        string(p.textBuf),
+				Refusal:     p.refusal,
+				Annotations: append(json.RawMessage(nil), p.annotations...),
+			}
+		}
+	}
+	if len(o.content) > 0 {
+		it.Content = make([]ResponseContentPart, len(o.content))
+		for i, p := range o.content {
+			it.Content[i] = ResponseContentPart{
+				Type:        p.partType,
+				Text:        string(p.textBuf),
+				Refusal:     p.refusal,
+				Annotations: append(json.RawMessage(nil), p.annotations...),
+			}
+		}
+	}
+	return it
 }
 
 // NewAccumulator creates an Accumulator for starting a new streaming attempt.
@@ -81,42 +228,51 @@ func NewAccumulator(endpoint Endpoint, prior *State, opts Options) *Accumulator 
 
 	priorInReasoning := base.InReasoning
 	thinkOffset := len(base.Text)
+	var textBuf, reasoningBuf []byte
+	if base.Text != "" {
+		textBuf = []byte(base.Text)
+	}
+	if base.Reasoning != "" {
+		reasoningBuf = []byte(base.Reasoning)
+	}
 
-	// Clear transient completion/interruption markers from prior attempt.
+	// Clear transient completion/interruption/cap markers from prior attempt so
+	// the new attempt can advance checkpoints by up to MaxCheckpointTokens.
 	base.Attempt++
 	base.Completed = false
+	base.Capped = false
 	base.FinishReason = ""
 	base.Status = ""
 	base.IncompleteReason = ""
 	base.ToolCalls = nil
 	base.DroppedPartialToolCall = false
 
-	acc := &Accumulator{
-		opts:                  EndpointOptions{Endpoint: base.Endpoint, Options: opts},
+	return &Accumulator{
+		endpoint:              base.Endpoint,
+		opts:                  opts,
 		priorGenTokens:        base.Usage.GeneratedTokens,
 		priorRecomputedTokens: base.Usage.RecomputedPromptTokens,
 		priorReasoningTokens:  base.Usage.ReasoningTokens,
 		priorInReasoning:      priorInReasoning,
 		thinkSplitOffset:      thinkOffset,
 		live:                  base,
-		chatToolCalls:         make(map[int]*ChatToolCall),
-		openRespItems:         make(map[int]*ResponseItem),
+		textBuf:               textBuf,
+		reasoningBuf:          reasoningBuf,
+		chatToolCalls:         make(map[int]*openToolCall),
+		openRespItems:         make(map[int]*openRespItem),
 	}
-	if base.Capped {
-		acc.cappedSnap = acc.buildInterruptedState(base)
-	}
-	return acc
 }
 
-// ConsumeStream reads all SSE events from r until EOF, invoking onEvent (if
-// non-nil) after each non-comment frame is processed. It returns
-// ErrIncompleteStream if the stream closes before a terminal protocol marker.
+// ConsumeStream reads all SSE events from r until a terminal protocol frame or
+// EOF, invoking onEvent (if non-nil) after each non-comment frame is processed.
+// It returns ErrIncompleteStream if the stream closes before generation
+// completed.
 func (a *Accumulator) ConsumeStream(r io.Reader, onEvent func(ev SSEEvent) error) error {
 	sr := NewSSEReader(r)
 	for {
 		ev, err := sr.Next()
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				break
 			}
 			return err
@@ -129,7 +285,7 @@ func (a *Accumulator) ConsumeStream(r io.Reader, onEvent func(ev SSEEvent) error
 				return err
 			}
 		}
-		if a.live.Completed {
+		if a.streamDone {
 			return nil
 		}
 	}
@@ -140,11 +296,11 @@ func (a *Accumulator) ConsumeStream(r io.Reader, onEvent func(ev SSEEvent) error
 }
 
 // AttemptDeltaTokens returns the number of generated tokens observed so far in
-// the current attempt (exact when usage or token_ids were reported, otherwise
-// delta count).
+// the current attempt (exact when usage with completion_tokens > 0 or token_ids
+// were reported, plus any subsequent chunks lacking usage).
 func (a *Accumulator) AttemptDeltaTokens() int {
 	if a.attemptUsageSeen {
-		return a.attemptCompToks
+		return a.attemptCompToks + a.deltasSinceUsage
 	}
 	return a.attemptDeltaTokens
 }
@@ -152,10 +308,25 @@ func (a *Accumulator) AttemptDeltaTokens() int {
 // FinalState returns the full accumulated state. Callers should inspect
 // FinalState().Completed to verify the attempt reached a terminal marker.
 func (a *Accumulator) FinalState() *State {
-	st := a.live.Clone()
-	if !st.Completed {
-		return a.buildInterruptedState(st)
+	if !a.live.Completed {
+		return a.buildInterruptedState()
 	}
+	st := a.live.Clone()
+	st.Text = string(a.textBuf)
+	st.Reasoning = string(a.reasoningBuf)
+
+	// If a chat continuation stopped naturally (e.g. finish_reason="length")
+	// while still inside an unclosed thinking block emitted in delta.content,
+	// keep those tokens in Reasoning rather than leaking them into Text.
+	if st.Endpoint == EndpointChatCompletions &&
+		a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved &&
+		len(a.textBuf) > a.thinkSplitOffset {
+		unclosed := trimPartialTagSuffix(string(a.textBuf[a.thinkSplitOffset:]), a.opts.thinkEndTag())
+		st.Reasoning = string(a.reasoningBuf) + unclosed
+		st.Text = string(a.textBuf[:a.thinkSplitOffset])
+		st.InReasoning = true
+	}
+
 	if len(a.chatToolCalls) > 0 {
 		indices := make([]int, 0, len(a.chatToolCalls))
 		for idx := range a.chatToolCalls {
@@ -164,7 +335,7 @@ func (a *Accumulator) FinalState() *State {
 		sort.Ints(indices)
 		st.ToolCalls = make([]ChatToolCall, 0, len(indices))
 		for _, idx := range indices {
-			st.ToolCalls = append(st.ToolCalls, *a.chatToolCalls[idx])
+			st.ToolCalls = append(st.ToolCalls, a.chatToolCalls[idx].toChatToolCall())
 		}
 	}
 	return st
@@ -173,23 +344,50 @@ func (a *Accumulator) FinalState() *State {
 // CheckpointSnapshot returns a safe, interruption-clean snapshot of partial
 // progress suitable for persisting to a checkpoint store or passing to
 // BuildContinuationRequest after a stream failure. Partial tool calls are
-// stripped and MaxCheckpointTokens is respected.
+// stripped and MaxCheckpointTokens is respected per attempt.
 func (a *Accumulator) CheckpointSnapshot() *State {
 	if a.cappedSnap != nil {
 		return a.cappedSnap.Clone()
 	}
-	return a.buildInterruptedState(a.live)
+	return a.buildInterruptedState()
 }
 
-func (a *Accumulator) buildInterruptedState(src *State) *State {
-	snap := src.Clone()
+func (a *Accumulator) buildInterruptedState() *State {
+	snap := a.live.Clone()
+	snap.Text = string(a.textBuf)
+	snap.Reasoning = string(a.reasoningBuf)
 	snap.Completed = false
 	snap.ToolCalls = nil
 	if len(a.chatToolCalls) > 0 {
 		snap.DroppedPartialToolCall = true
 	}
 
+	// If a chat continuation resumed mid-reasoning and emitted remaining
+	// reasoning tokens inside delta.content without yet reaching </think>, fold
+	// those unclosed tokens back into Reasoning so a subsequent attempt keeps
+	// continuing inside the thinking block instead of leaking reasoning into
+	// assistant content.
+	if snap.Endpoint == EndpointChatCompletions &&
+		a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved &&
+		len(a.textBuf) > a.thinkSplitOffset {
+		unclosed := trimPartialTagSuffix(string(a.textBuf[a.thinkSplitOffset:]), a.opts.thinkEndTag())
+		snap.Reasoning = string(a.reasoningBuf) + unclosed
+		snap.Text = string(a.textBuf[:a.thinkSplitOffset])
+		snap.InReasoning = true
+	}
+
 	if snap.Endpoint == EndpointResponses {
+		unclosedThinkInMsg := a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved &&
+			snap.PartialItem != nil && snap.PartialItem.Type == "reasoning"
+		if unclosedThinkInMsg && len(a.respThinkPending) > 0 {
+			extra := trimPartialTagSuffix(string(a.respThinkPending), a.opts.thinkEndTag())
+			if extra != "" {
+				appendRespPart(&snap.PartialItem.Content, "reasoning_text", extra)
+			}
+			snap.PartialItem.Status = "incomplete"
+			snap.InReasoning = true
+		}
+
 		// Promote any in-progress continuable item to PartialItem; discard
 		// incomplete function_call/tool items per #518 guard.
 		if len(a.openRespItems) > 0 {
@@ -199,21 +397,26 @@ func (a *Accumulator) buildInterruptedState(src *State) *State {
 			}
 			sort.Ints(indices)
 			for _, idx := range indices {
-				it := a.openRespItems[idx]
-				if it == nil {
+				open := a.openRespItems[idx]
+				if open == nil {
 					continue
 				}
-				switch it.Type {
+				switch open.typ {
 				case "reasoning", "message":
+					if unclosedThinkInMsg && open.typ == "message" {
+						// Synthetic message item only buffered unclosed reasoning
+						// tokens already folded into snap.PartialItem above.
+						continue
+					}
+					it := open.toResponseItem()
 					if it.HasProgress() {
 						if snap.PartialItem != nil && snap.PartialItem.HasProgress() && snap.PartialItem.Type != it.Type {
 							prev := snap.PartialItem.Clone()
 							prev.Status = "completed"
 							snap.CompletedItems = append(snap.CompletedItems, *prev)
 						}
-						cp := it.Clone()
-						cp.Status = "incomplete"
-						snap.PartialItem = cp
+						it.Status = "incomplete"
+						snap.PartialItem = it
 					}
 				case "function_call":
 					if snap.PartialItem != nil && snap.PartialItem.HasProgress() && snap.PartialItem.Type != "function_call" {
@@ -233,12 +436,29 @@ func (a *Accumulator) buildInterruptedState(src *State) *State {
 	return snap
 }
 
+// trimPartialTagSuffix strips any trailing proper prefix of tag (such as "</th"
+// when tag is "</think>") so an interruption mid-delimiter does not split the
+// closing tag across attempts.
+func trimPartialTagSuffix(s, tag string) string {
+	maxCheck := len(tag) - 1
+	if maxCheck > len(s) {
+		maxCheck = len(s)
+	}
+	for k := maxCheck; k >= 1; k-- {
+		if strings.HasSuffix(s, tag[:k]) {
+			return s[:len(s)-k]
+		}
+	}
+	return s
+}
+
 func (a *Accumulator) updateUsageAndCap() {
-	gen := a.priorGenTokens + a.AttemptDeltaTokens()
+	attemptDelta := a.AttemptDeltaTokens()
+	gen := a.priorGenTokens + attemptDelta
 	a.live.Usage.GeneratedTokens = gen
 
 	reasonDelta := a.attemptReasonDeltaToks
-	if a.attemptUsageSeen {
+	if a.attemptReasonDetailsSeen {
 		if a.live.Attempt == 1 || a.attemptSawReasoning || (a.priorInReasoning && a.thinkSplitResolved) {
 			reasonDelta = a.attemptReasonToks
 		} else {
@@ -262,16 +482,16 @@ func (a *Accumulator) updateUsageAndCap() {
 		}
 	}
 
-	maxTok := a.opts.Options.MaxCheckpointTokens
-	if maxTok > 0 && a.cappedSnap == nil && gen >= maxTok {
+	maxTok := a.opts.MaxCheckpointTokens
+	if maxTok > 0 && a.cappedSnap == nil && attemptDelta >= maxTok {
 		a.live.Capped = true
-		a.cappedSnap = a.buildInterruptedState(a.live)
+		a.cappedSnap = a.buildInterruptedState()
 	}
 }
 
 // FeedEvent ingests one parsed SSEEvent into the accumulator.
 func (a *Accumulator) FeedEvent(ev SSEEvent) error {
-	switch a.opts.Endpoint {
+	switch a.endpoint {
 	case EndpointCompletions:
 		return a.feedCompletions(ev)
 	case EndpointChatCompletions:
@@ -279,31 +499,26 @@ func (a *Accumulator) FeedEvent(ev SSEEvent) error {
 	case EndpointResponses:
 		return a.feedResponses(ev)
 	default:
-		return fmt.Errorf("%w: %q", ErrUnsupportedEndpoint, a.opts.Endpoint)
+		return fmt.Errorf("%w: %q", ErrUnsupportedEndpoint, a.endpoint)
 	}
+}
+
+type sseErrorDetail struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
 }
 
 type sseErrorEnvelope struct {
-	Error *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-	} `json:"error"`
+	Error *sseErrorDetail `json:"error"`
 }
 
-func checkStreamErrorPayload(event string, data []byte) error {
-	if event == "error" {
-		msg := strings.TrimSpace(string(data))
-		var env sseErrorEnvelope
-		if json.Unmarshal(data, &env) == nil && env.Error != nil && env.Error.Message != "" {
-			msg = env.Error.Message
-		}
-		return fmt.Errorf("%w: %s", ErrStreamError, msg)
-	}
+func formatStreamErrorEvent(data []byte) error {
+	msg := strings.TrimSpace(string(data))
 	var env sseErrorEnvelope
-	if err := json.Unmarshal(data, &env); err == nil && env.Error != nil && (env.Error.Message != "" || env.Error.Type != "") {
-		return fmt.Errorf("%w: %s", ErrStreamError, env.Error.Message)
+	if json.Unmarshal(data, &env) == nil && env.Error != nil && env.Error.Message != "" {
+		msg = env.Error.Message
 	}
-	return nil
+	return fmt.Errorf("%w: %s", ErrStreamError, msg)
 }
 
 type streamUsage struct {
@@ -319,8 +534,9 @@ type streamUsage struct {
 	} `json:"output_tokens_details"`
 }
 
-func (a *Accumulator) applyUsage(u *streamUsage) {
+func (a *Accumulator) applyUsage(u *streamUsage, chunkDeltas int) {
 	if u == nil {
+		a.deltasSinceUsage += chunkDeltas
 		return
 	}
 	promptTok := u.PromptTokens
@@ -334,25 +550,31 @@ func (a *Accumulator) applyUsage(u *streamUsage) {
 	if promptTok > 0 {
 		a.attemptPromptToks = promptTok
 	}
-	if compTok > 0 || promptTok > 0 {
+	if compTok > 0 {
 		a.attemptUsageSeen = true
 		a.attemptCompToks = compTok
+		a.deltasSinceUsage = 0
+	} else {
+		a.deltasSinceUsage += chunkDeltas
 	}
-	if u.CompletionTokensDetails != nil && u.CompletionTokensDetails.ReasoningTokens > 0 {
+	if u.CompletionTokensDetails != nil {
+		a.attemptReasonDetailsSeen = true
 		a.attemptReasonToks = u.CompletionTokensDetails.ReasoningTokens
-	} else if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens > 0 {
+	} else if u.OutputTokensDetails != nil {
+		a.attemptReasonDetailsSeen = true
 		a.attemptReasonToks = u.OutputTokensDetails.ReasoningTokens
 	}
 }
 
 type completionsChunk struct {
-	ID                string       `json:"id"`
-	Model             string       `json:"model"`
-	Created           int64        `json:"created"`
-	SystemFingerprint string       `json:"system_fingerprint"`
-	ServiceTier       string       `json:"service_tier"`
-	PromptTokenIDs    []int        `json:"prompt_token_ids"`
-	Usage             *streamUsage `json:"usage"`
+	ID                string          `json:"id"`
+	Model             string          `json:"model"`
+	Created           int64           `json:"created"`
+	SystemFingerprint string          `json:"system_fingerprint"`
+	ServiceTier       string          `json:"service_tier"`
+	PromptTokenIDs    []int           `json:"prompt_token_ids"`
+	Usage             *streamUsage    `json:"usage"`
+	Error             *sseErrorDetail `json:"error"`
 	Choices           []struct {
 		Index          int     `json:"index"`
 		Text           string  `json:"text"`
@@ -365,24 +587,29 @@ type completionsChunk struct {
 func (a *Accumulator) feedCompletions(ev SSEEvent) error {
 	if ev.Done {
 		a.live.Completed = true
+		a.streamDone = true
 		if a.live.FinishReason == "" {
 			a.live.FinishReason = "stop"
 		}
 		return nil
 	}
+	if ev.Event == "error" {
+		return formatStreamErrorEvent(ev.Data)
+	}
 	if len(bytes.TrimSpace(ev.Data)) == 0 {
 		return nil
-	}
-	if err := checkStreamErrorPayload(ev.Event, ev.Data); err != nil {
-		return err
 	}
 
 	var ch completionsChunk
 	if err := json.Unmarshal(ev.Data, &ch); err != nil {
 		return fmt.Errorf("parse completions sse chunk: %w", err)
 	}
+	if ch.Error != nil && (ch.Error.Message != "" || ch.Error.Type != "") {
+		return fmt.Errorf("%w: %s", ErrStreamError, ch.Error.Message)
+	}
 
 	a.recordEnvelopeMeta(ch.ID, ch.Model, ch.Created, ch.SystemFingerprint, ch.ServiceTier, ch.PromptTokenIDs)
+	chunkDeltas := 0
 	for _, c := range ch.Choices {
 		if c.Index != 0 {
 			continue
@@ -391,31 +618,34 @@ func (a *Accumulator) feedCompletions(ev SSEEvent) error {
 			a.recordEnvelopeMeta("", "", 0, "", "", c.PromptTokenIDs)
 		}
 		if c.Text != "" {
-			a.live.Text += c.Text
+			a.textBuf = append(a.textBuf, c.Text...)
 		}
 		if len(c.TokenIDs) > 0 {
 			a.live.GeneratedTokenIDs = append(a.live.GeneratedTokenIDs, c.TokenIDs...)
-			a.attemptDeltaTokens += len(c.TokenIDs)
+			chunkDeltas += len(c.TokenIDs)
 		} else if c.Text != "" {
-			a.attemptDeltaTokens++
+			chunkDeltas++
 		}
 		if c.FinishReason != nil && *c.FinishReason != "" {
 			a.live.FinishReason = *c.FinishReason
+			a.live.Completed = true
 		}
 	}
-	a.applyUsage(ch.Usage)
+	a.attemptDeltaTokens += chunkDeltas
+	a.applyUsage(ch.Usage, chunkDeltas)
 	a.updateUsageAndCap()
 	return nil
 }
 
 type chatChunk struct {
-	ID                string       `json:"id"`
-	Model             string       `json:"model"`
-	Created           int64        `json:"created"`
-	SystemFingerprint string       `json:"system_fingerprint"`
-	ServiceTier       string       `json:"service_tier"`
-	PromptTokenIDs    []int        `json:"prompt_token_ids"`
-	Usage             *streamUsage `json:"usage"`
+	ID                string          `json:"id"`
+	Model             string          `json:"model"`
+	Created           int64           `json:"created"`
+	SystemFingerprint string          `json:"system_fingerprint"`
+	ServiceTier       string          `json:"service_tier"`
+	PromptTokenIDs    []int           `json:"prompt_token_ids"`
+	Usage             *streamUsage    `json:"usage"`
+	Error             *sseErrorDetail `json:"error"`
 	Choices           []struct {
 		Index int `json:"index"`
 		Delta struct {
@@ -433,6 +663,7 @@ type chatChunk struct {
 func (a *Accumulator) feedChatCompletions(ev SSEEvent) error {
 	if ev.Done {
 		a.live.Completed = true
+		a.streamDone = true
 		if a.live.FinishReason == "" {
 			if len(a.chatToolCalls) > 0 {
 				a.live.FinishReason = "tool_calls"
@@ -442,19 +673,23 @@ func (a *Accumulator) feedChatCompletions(ev SSEEvent) error {
 		}
 		return nil
 	}
+	if ev.Event == "error" {
+		return formatStreamErrorEvent(ev.Data)
+	}
 	if len(bytes.TrimSpace(ev.Data)) == 0 {
 		return nil
-	}
-	if err := checkStreamErrorPayload(ev.Event, ev.Data); err != nil {
-		return err
 	}
 
 	var ch chatChunk
 	if err := json.Unmarshal(ev.Data, &ch); err != nil {
 		return fmt.Errorf("parse chat completions sse chunk: %w", err)
 	}
+	if ch.Error != nil && (ch.Error.Message != "" || ch.Error.Type != "") {
+		return fmt.Errorf("%w: %s", ErrStreamError, ch.Error.Message)
+	}
 
 	a.recordEnvelopeMeta(ch.ID, ch.Model, ch.Created, ch.SystemFingerprint, ch.ServiceTier, ch.PromptTokenIDs)
+	chunkDeltas := 0
 	for _, c := range ch.Choices {
 		if c.Index != 0 {
 			continue
@@ -467,9 +702,9 @@ func (a *Accumulator) feedChatCompletions(ev SSEEvent) error {
 		}
 		emittedAny := false
 		if rDelta != "" {
-			a.live.Reasoning += rDelta
+			a.reasoningBuf = append(a.reasoningBuf, rDelta...)
 			a.attemptSawReasoning = true
-			if a.live.Text == "" {
+			if len(a.textBuf) == a.thinkSplitOffset {
 				a.live.InReasoning = true
 			}
 			if len(c.TokenIDs) > 0 && c.Delta.Content == "" {
@@ -480,59 +715,76 @@ func (a *Accumulator) feedChatCompletions(ev SSEEvent) error {
 			emittedAny = true
 		}
 		if c.Delta.Content != "" {
-			a.appendChatContent(c.Delta.Content)
+			a.appendChatContent(c.Delta.Content, len(c.TokenIDs))
 			emittedAny = true
 		}
 		for _, tc := range c.Delta.ToolCalls {
 			a.live.InReasoning = false
 			existing, ok := a.chatToolCalls[tc.Index]
 			if !ok {
-				cp := tc
-				a.chatToolCalls[tc.Index] = &cp
-			} else {
-				if tc.ID != "" {
-					existing.ID = tc.ID
-				}
-				if tc.Type != "" {
-					existing.Type = tc.Type
+				existing = &openToolCall{
+					index: tc.Index,
+					id:    tc.ID,
+					typ:   tc.Type,
 				}
 				if tc.Function.Name != "" {
-					existing.Function.Name += tc.Function.Name
+					existing.nameBuf = append(existing.nameBuf, tc.Function.Name...)
 				}
 				if tc.Function.Arguments != "" {
-					existing.Function.Arguments += tc.Function.Arguments
+					existing.argsBuf = append(existing.argsBuf, tc.Function.Arguments...)
+				}
+				a.chatToolCalls[tc.Index] = existing
+			} else {
+				if tc.ID != "" {
+					existing.id = tc.ID
+				}
+				if tc.Type != "" {
+					existing.typ = tc.Type
+				}
+				if tc.Function.Name != "" {
+					existing.nameBuf = append(existing.nameBuf, tc.Function.Name...)
+				}
+				if tc.Function.Arguments != "" {
+					existing.argsBuf = append(existing.argsBuf, tc.Function.Arguments...)
 				}
 			}
 			emittedAny = true
 		}
 		if len(c.TokenIDs) > 0 {
 			a.live.GeneratedTokenIDs = append(a.live.GeneratedTokenIDs, c.TokenIDs...)
-			a.attemptDeltaTokens += len(c.TokenIDs)
+			chunkDeltas += len(c.TokenIDs)
 		} else if emittedAny {
-			a.attemptDeltaTokens++
+			chunkDeltas++
 		}
 		if c.FinishReason != nil && *c.FinishReason != "" {
 			a.live.FinishReason = *c.FinishReason
+			a.live.Completed = true
 		}
 	}
-	a.applyUsage(ch.Usage)
+	a.attemptDeltaTokens += chunkDeltas
+	a.applyUsage(ch.Usage, chunkDeltas)
 	a.updateUsageAndCap()
 	return nil
 }
 
-func (a *Accumulator) appendChatContent(delta string) {
-	a.live.Text += delta
+func (a *Accumulator) appendChatContent(delta string, tokenIDCount int) {
+	a.textBuf = append(a.textBuf, delta...)
 	if a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved {
-		tag := a.opts.Options.thinkEndTag()
-		tail := a.live.Text[a.thinkSplitOffset:]
-		if idx := strings.Index(tail, tag); idx >= 0 {
-			extraReasoning := tail[:idx]
-			after := tail[idx+len(tag):]
-			after = strings.TrimPrefix(after, "\n")
-			a.live.Reasoning += extraReasoning
-			a.live.Text = a.live.Text[:a.thinkSplitOffset] + after
+		tag := []byte(a.opts.thinkEndTag())
+		tail := a.textBuf[a.thinkSplitOffset:]
+		if idx := bytes.Index(tail, tag); idx >= 0 {
+			a.reasoningBuf = append(a.reasoningBuf, tail[:idx]...)
+			after := bytes.TrimPrefix(tail[idx+len(tag):], []byte("\n"))
+			a.textBuf = append(a.textBuf[:a.thinkSplitOffset], after...)
 			a.live.InReasoning = false
 			a.thinkSplitResolved = true
+		} else {
+			a.live.InReasoning = true
+			if tokenIDCount > 0 {
+				a.attemptReasonDeltaToks += tokenIDCount
+			} else {
+				a.attemptReasonDeltaToks++
+			}
 		}
 		return
 	}
@@ -568,19 +820,18 @@ type responsesStreamFrame struct {
 	ItemID      string          `json:"item_id"`
 	Delta       string          `json:"delta"`
 	Item        json.RawMessage `json:"item"`
+	Error       *sseErrorDetail `json:"error"`
 	Response    *struct {
-		ID                string       `json:"id"`
-		Model             string       `json:"model"`
-		CreatedAt         int64        `json:"created_at"`
-		Status            string       `json:"status"`
-		ServiceTier       string       `json:"service_tier"`
-		Usage             *streamUsage `json:"usage"`
+		ID                string          `json:"id"`
+		Model             string          `json:"model"`
+		CreatedAt         int64           `json:"created_at"`
+		Status            string          `json:"status"`
+		ServiceTier       string          `json:"service_tier"`
+		Usage             *streamUsage    `json:"usage"`
+		Error             *sseErrorDetail `json:"error"`
 		IncompleteDetails *struct {
 			Reason string `json:"reason"`
 		} `json:"incomplete_details"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
 	} `json:"response"`
 }
 
@@ -588,7 +839,13 @@ func (a *Accumulator) feedResponses(ev SSEEvent) error {
 	if ev.Done {
 		// Some OpenAI-compatible proxies emit a trailing [DONE] after
 		// response.completed; ignore if already completed.
+		if a.live.Completed {
+			a.streamDone = true
+		}
 		return nil
+	}
+	if ev.Event == "error" {
+		return formatStreamErrorEvent(ev.Data)
 	}
 	if len(bytes.TrimSpace(ev.Data)) == 0 {
 		return nil
@@ -606,14 +863,22 @@ func (a *Accumulator) feedResponses(ev SSEEvent) error {
 		if frame.Response != nil && frame.Response.Error != nil && frame.Response.Error.Message != "" {
 			return fmt.Errorf("%w: %s", ErrStreamError, frame.Response.Error.Message)
 		}
-		return checkStreamErrorPayload("error", ev.Data)
+		if frame.Error != nil && frame.Error.Message != "" {
+			return fmt.Errorf("%w: %s", ErrStreamError, frame.Error.Message)
+		}
+		return formatStreamErrorEvent(ev.Data)
+	}
+	if frame.Error != nil && (frame.Error.Message != "" || frame.Error.Type != "") {
+		return fmt.Errorf("%w: %s", ErrStreamError, frame.Error.Message)
 	}
 
+	var frameUsage *streamUsage
 	if frame.Response != nil {
 		a.recordEnvelopeMeta(frame.Response.ID, frame.Response.Model, frame.Response.CreatedAt, "", frame.Response.ServiceTier, nil)
-		a.applyUsage(frame.Response.Usage)
+		frameUsage = frame.Response.Usage
 	}
 
+	chunkDeltas := 0
 	switch evType {
 	case "response.created", "response.in_progress":
 		// Envelope metadata already recorded above.
@@ -630,33 +895,36 @@ func (a *Accumulator) feedResponses(ev SSEEvent) error {
 
 	case "response.reasoning_text.delta":
 		open := a.ensureOpenRespItem(frame.OutputIndex, "reasoning", frame.ItemID)
-		appendRespPart(&open.Content, "reasoning_text", frame.Delta)
+		open.appendContent("reasoning_text", frame.Delta)
 		a.attemptSawReasoning = true
 		a.live.InReasoning = true
 		if frame.Delta != "" {
-			a.attemptDeltaTokens++
+			chunkDeltas++
 			a.attemptReasonDeltaToks++
 		}
 
 	case "response.reasoning_summary_text.delta":
 		open := a.ensureOpenRespItem(frame.OutputIndex, "reasoning", frame.ItemID)
-		appendRespPart(&open.Summary, "summary_text", frame.Delta)
+		open.appendSummary("summary_text", frame.Delta)
 		a.attemptSawReasoning = true
 		a.live.InReasoning = true
 		if frame.Delta != "" {
-			a.attemptDeltaTokens++
+			chunkDeltas++
 			a.attemptReasonDeltaToks++
 		}
 
 	case "response.output_text.delta":
+		if frame.Delta != "" {
+			chunkDeltas++
+		}
 		a.handleRespOutputTextDelta(frame.OutputIndex, frame.ItemID, frame.Delta)
 
 	case "response.function_call_arguments.delta":
 		open := a.ensureOpenRespItem(frame.OutputIndex, "function_call", frame.ItemID)
-		open.Arguments += frame.Delta
+		open.argsBuf = append(open.argsBuf, frame.Delta...)
 		a.live.InReasoning = false
 		if frame.Delta != "" {
-			a.attemptDeltaTokens++
+			chunkDeltas++
 		}
 
 	case "response.output_item.done":
@@ -689,34 +957,37 @@ func (a *Accumulator) feedResponses(ev SSEEvent) error {
 			a.live.Status = "completed"
 		}
 		a.live.Completed = true
+		a.streamDone = true
 	}
 
+	a.attemptDeltaTokens += chunkDeltas
+	a.applyUsage(frameUsage, chunkDeltas)
 	a.updateUsageAndCap()
 	return nil
 }
 
-func (a *Accumulator) adoptOrInitRespItem(added *ResponseItem) *ResponseItem {
+func (a *Accumulator) adoptOrInitRespItem(added *ResponseItem) *openRespItem {
 	// If continuing an incomplete item of the same type from a prior attempt,
 	// merge into PartialItem so the output keeps Attempt 1's item ID and prefix.
 	if !a.mergedPriorItem && a.live.PartialItem != nil && a.live.PartialItem.Type == added.Type {
 		a.mergedPriorItem = true
-		merged := a.live.PartialItem.Clone()
+		merged := newOpenRespItem(a.live.PartialItem)
 		a.live.PartialItem = nil
 		return merged
 	}
-	cp := added.Clone()
-	if cp.Role == "" && cp.Type == "message" {
-		cp.Role = "assistant"
+	open := newOpenRespItem(added)
+	if open.role == "" && open.typ == "message" {
+		open.role = "assistant"
 	}
-	return cp
+	return open
 }
 
-func (a *Accumulator) ensureOpenRespItem(outputIdx int, itemType, itemID string) *ResponseItem {
-	if open, ok := a.openRespItems[outputIdx]; ok && open.Type == itemType {
+func (a *Accumulator) ensureOpenRespItem(outputIdx int, itemType, itemID string) *openRespItem {
+	if open, ok := a.openRespItems[outputIdx]; ok && open.typ == itemType {
 		// vLLM rotates item_id on the first message delta after reasoning; adopt
 		// the updated ID unless we merged Attempt 1's PartialItem ID.
-		if itemID != "" && (open.ID == "" || !a.mergedPriorItem) {
-			open.ID = itemID
+		if itemID != "" && (open.id == "" || !a.mergedPriorItem) {
+			open.id = itemID
 		}
 		return open
 	}
@@ -731,31 +1002,39 @@ func (a *Accumulator) ensureOpenRespItem(outputIdx int, itemType, itemID string)
 
 func (a *Accumulator) handleRespOutputTextDelta(outputIdx int, itemID, delta string) {
 	open := a.ensureOpenRespItem(outputIdx, "message", itemID)
-	appendRespPart(&open.Content, "output_text", delta)
-	if delta != "" {
-		a.attemptDeltaTokens++
-	}
+	open.appendContent("output_text", delta)
 
 	// Recover mid-reasoning split on /v1/responses when prior attempt stopped
 	// inside an incomplete reasoning item and Attempt 2 emitted </think> inside
 	// output_text.delta.
 	if a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved {
-		a.respThinkPending += delta
-		tag := a.opts.Options.thinkEndTag()
-		if idx := strings.Index(a.respThinkPending, tag); idx >= 0 {
-			extraReasoning := a.respThinkPending[:idx]
-			after := strings.TrimPrefix(a.respThinkPending[idx+len(tag):], "\n")
+		a.respThinkPending = append(a.respThinkPending, delta...)
+		tag := []byte(a.opts.thinkEndTag())
+		if idx := bytes.Index(a.respThinkPending, tag); idx >= 0 {
+			extraReasoning := string(a.respThinkPending[:idx])
+			after := bytes.TrimPrefix(a.respThinkPending[idx+len(tag):], []byte("\n"))
 			if a.live.PartialItem != nil && a.live.PartialItem.Type == "reasoning" {
 				rItem := a.live.PartialItem.Clone()
-				appendRespPart(&rItem.Content, "reasoning_text", extraReasoning)
+				if extraReasoning != "" {
+					appendRespPart(&rItem.Content, "reasoning_text", extraReasoning)
+				}
 				rItem.Status = "completed"
 				a.live.CompletedItems = append(a.live.CompletedItems, *rItem)
 				a.live.PartialItem = nil
 				a.mergedPriorItem = true
 			}
-			open.Content = []ResponseContentPart{{Type: "output_text", Text: after}}
+			open.content = []openRespPart{{
+				partType: "output_text",
+				textBuf:  append([]byte(nil), after...),
+			}}
+			a.respThinkPending = nil
 			a.live.InReasoning = false
 			a.thinkSplitResolved = true
+		} else {
+			a.live.InReasoning = true
+			if delta != "" {
+				a.attemptReasonDeltaToks++
+			}
 		}
 		return
 	}
@@ -766,6 +1045,21 @@ func (a *Accumulator) finalizeRespItem(outputIdx int, rawDone json.RawMessage) e
 	open := a.openRespItems[outputIdx]
 	delete(a.openRespItems, outputIdx)
 
+	// If the attempt finished (e.g. max_output_tokens) before </think> was
+	// emitted while continuing an incomplete reasoning item, fold the unclosed
+	// output_text buffer back into the reasoning PartialItem instead of emitting
+	// a message item containing raw thinking text.
+	if open != nil && open.typ == "message" &&
+		a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved &&
+		a.live.PartialItem != nil && a.live.PartialItem.Type == "reasoning" {
+		extra := trimPartialTagSuffix(string(a.respThinkPending), a.opts.thinkEndTag())
+		if extra != "" {
+			appendRespPart(&a.live.PartialItem.Content, "reasoning_text", extra)
+		}
+		a.respThinkPending = nil
+		return nil
+	}
+
 	var doneItem ResponseItem
 	hasDone := false
 	if len(rawDone) > 0 {
@@ -775,45 +1069,52 @@ func (a *Accumulator) finalizeRespItem(outputIdx int, rawDone json.RawMessage) e
 		hasDone = true
 	}
 
+	var finalized *ResponseItem
 	if open == nil {
 		if !hasDone {
 			return nil
 		}
-		open = a.adoptOrInitRespItem(&doneItem)
-		if open.Type == "function_call" || (!open.HasProgress() && doneItem.HasProgress()) {
-			open = &doneItem
-			open.Raw = append(json.RawMessage(nil), rawDone...)
+		adopted := a.adoptOrInitRespItem(&doneItem).toResponseItem()
+		if adopted.Type == "function_call" || (!adopted.HasProgress() && doneItem.HasProgress()) {
+			cp := doneItem
+			cp.Raw = append(json.RawMessage(nil), rawDone...)
+			finalized = &cp
+		} else {
+			finalized = adopted
 		}
-	} else if hasDone {
-		if open.ID == "" && doneItem.ID != "" {
-			open.ID = doneItem.ID
-		}
-		if open.Type == "function_call" {
-			open.CallID = doneItem.CallID
-			open.Name = doneItem.Name
-			if doneItem.Arguments != "" {
-				open.Arguments = doneItem.Arguments
+	} else {
+		finalized = open.toResponseItem()
+		if hasDone {
+			if finalized.ID == "" && doneItem.ID != "" {
+				finalized.ID = doneItem.ID
 			}
-			open.Raw = append(json.RawMessage(nil), rawDone...)
-		} else if !open.HasProgress() && doneItem.HasProgress() {
-			// Fallback when a server sends full text only on output_item.done.
-			open.Content = doneItem.Content
-			open.Summary = doneItem.Summary
+			if finalized.Type == "function_call" {
+				finalized.CallID = doneItem.CallID
+				finalized.Name = doneItem.Name
+				if doneItem.Arguments != "" {
+					finalized.Arguments = doneItem.Arguments
+				}
+				finalized.Raw = append(json.RawMessage(nil), rawDone...)
+			} else if !finalized.HasProgress() && doneItem.HasProgress() {
+				// Fallback when a server sends full text only on output_item.done.
+				finalized.Content = doneItem.Content
+				finalized.Summary = doneItem.Summary
+			}
 		}
 	}
 
-	if a.live.PartialItem != nil && a.live.PartialItem.HasProgress() && a.live.PartialItem.Type != open.Type {
+	if a.live.PartialItem != nil && a.live.PartialItem.HasProgress() && a.live.PartialItem.Type != finalized.Type {
 		prev := a.live.PartialItem.Clone()
 		prev.Status = "completed"
 		a.live.CompletedItems = append(a.live.CompletedItems, *prev)
 		a.live.PartialItem = nil
 	}
-	open.Status = "completed"
-	if open.Type == "reasoning" {
+	finalized.Status = "completed"
+	if finalized.Type == "reasoning" {
 		// Reasoning finished; next item transitions out of reasoning.
 		a.live.InReasoning = false
 	}
-	a.live.CompletedItems = append(a.live.CompletedItems, *open)
+	a.live.CompletedItems = append(a.live.CompletedItems, *finalized)
 	return nil
 }
 

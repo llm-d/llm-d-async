@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package continuation provides endpoint-aware SSE accumulation, continuation
-// request construction, and response/chunk rewriting for resuming interrupted
+// request construction, and final response assembly for resuming interrupted
 // OpenAI-compatible generations across /v1/completions, /v1/chat/completions,
 // and /v1/responses.
 package continuation
@@ -34,23 +34,21 @@ const (
 	// ErrUnsupportedEndpoint indicates the request path is not one of the
 	// supported OpenAI generation endpoints.
 	ErrUnsupportedEndpoint Error = "continuation: unsupported endpoint"
-	// ErrMultipleChoices indicates the request sets n > 1, which cannot be
-	// deterministically continued across independent choices.
-	ErrMultipleChoices Error = "continuation: n > 1 is not supported"
+	// ErrMultipleChoices indicates the request sets n > 1, best_of > 1, or a
+	// multi-prompt batch array, which cannot be streamed and deterministically
+	// continued as a single choice.
+	ErrMultipleChoices Error = "continuation: multiple choices or candidates are not supported"
 	// ErrInvalidRequestJSON indicates the original request body is not a valid
-	// JSON object.
+	// JSON object or lacks required endpoint fields.
 	ErrInvalidRequestJSON Error = "continuation: request body must be a JSON object"
 	// ErrStreamError indicates the upstream SSE stream emitted an error event.
 	ErrStreamError Error = "continuation: upstream stream error"
 	// ErrIncompleteStream indicates the SSE stream ended before a protocol
-	// terminal marker ([DONE] or response.completed/response.incomplete).
+	// terminal marker ([DONE], non-empty finish_reason, or response.completed/incomplete).
 	ErrIncompleteStream Error = "continuation: stream ended before completion marker"
-	// ErrMissingTokenIDs indicates a token-ID array prompt could not be
-	// continued because the server did not return generated token IDs.
+	// ErrMissingTokenIDs indicates a token-ID array prompt cannot be continued
+	// without TokenExact enabled or server-returned token_ids.
 	ErrMissingTokenIDs Error = "continuation: token-id prompt requires generated token_ids"
-	// ErrStateCapped indicates cached partial output hit MaxCheckpointTokens,
-	// making live-stream migration unsafe without duplicating uncached tokens.
-	ErrStateCapped Error = "continuation: partial output exceeded max checkpoint tokens"
 )
 
 // Endpoint identifies a supported OpenAI-compatible inference API route.
@@ -93,8 +91,11 @@ func DetectEndpoint(pathOrURL string) (Endpoint, bool) {
 
 // Options configures accumulation and continuation request construction.
 type Options struct {
-	// MaxCheckpointTokens bounds how many generated tokens are retained in
-	// CheckpointSnapshot(). Zero or negative disables the cap.
+	// MaxCheckpointTokens bounds how many newly generated tokens in a single
+	// attempt are buffered into CheckpointSnapshot() before freezing that
+	// attempt's checkpoint snapshot. Subsequent attempts starting from a capped
+	// checkpoint can advance by another MaxCheckpointTokens tokens. Zero or
+	// negative disables the cap.
 	MaxCheckpointTokens int
 	// TokenExact opts into requesting return_token_ids on attempt 1 and sending
 	// kv_transfer_params.prompt_token_ids on continuation attempts when token
@@ -253,16 +254,6 @@ func (s *State) HasProgress() bool {
 		return true
 	}
 	return s.PartialItem.HasProgress()
-}
-
-// CanMigrateLiveStream reports whether a live-streaming proxy (such as
-// llm-d-router) can safely migrate the stream without duplicating tokens or
-// corrupting a partially-emitted tool call.
-func (s *State) CanMigrateLiveStream() bool {
-	if s == nil {
-		return false
-	}
-	return !s.Capped && !s.DroppedPartialToolCall
 }
 
 // Clone returns a deep copy of s.

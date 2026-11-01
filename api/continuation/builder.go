@@ -23,18 +23,31 @@ import (
 )
 
 // CheckEligibility verifies that endpoint and rawBody support streaming
-// continuation. Requests with n > 1 return ErrMultipleChoices so callers can
-// fall back to non-streaming execution.
-func CheckEligibility(endpoint Endpoint, rawBody []byte) error {
-	switch endpoint {
-	case EndpointCompletions, EndpointChatCompletions, EndpointResponses:
-	default:
-		return fmt.Errorf("%w: %q", ErrUnsupportedEndpoint, endpoint)
+// continuation under opts. Requests with n > 1, best_of > 1, batch prompt
+// arrays, or token-ID array prompts when opts.TokenExact is false are rejected
+// up front so callers can fall back to non-streaming execution before starting
+// an attempt.
+func CheckEligibility(endpoint Endpoint, rawBody []byte, opts Options) error {
+	if err := validateEndpoint(endpoint); err != nil {
+		return err
 	}
 	doc, err := parseJSONObject(rawBody)
 	if err != nil {
 		return err
 	}
+	return checkEligibilityDoc(endpoint, doc, opts)
+}
+
+func validateEndpoint(endpoint Endpoint) error {
+	switch endpoint {
+	case EndpointCompletions, EndpointChatCompletions, EndpointResponses:
+		return nil
+	default:
+		return fmt.Errorf("%w: %q", ErrUnsupportedEndpoint, endpoint)
+	}
+}
+
+func checkEligibilityDoc(endpoint Endpoint, doc map[string]json.RawMessage, opts Options) error {
 	if rawN, ok := doc["n"]; ok && !isJSONNull(rawN) {
 		var n int
 		if err := json.Unmarshal(rawN, &n); err != nil {
@@ -44,19 +57,92 @@ func CheckEligibility(endpoint Endpoint, rawBody []byte) error {
 			return ErrMultipleChoices
 		}
 	}
+	if rawBestOf, ok := doc["best_of"]; ok && !isJSONNull(rawBestOf) {
+		var bestOf int
+		if err := json.Unmarshal(rawBestOf, &bestOf); err != nil {
+			return fmt.Errorf("%w: invalid field \"best_of\": %w", ErrInvalidRequestJSON, err)
+		}
+		if bestOf > 1 {
+			return fmt.Errorf("%w: best_of > 1", ErrMultipleChoices)
+		}
+	}
+
+	switch endpoint {
+	case EndpointCompletions:
+		rawPrompt, ok := doc["prompt"]
+		if !ok || isJSONNull(rawPrompt) {
+			return fmt.Errorf("%w: missing prompt", ErrInvalidRequestJSON)
+		}
+		trimmed := bytes.TrimSpace(rawPrompt)
+		switch {
+		case len(trimmed) > 0 && trimmed[0] == '"':
+			var promptStr string
+			if err := json.Unmarshal(trimmed, &promptStr); err != nil {
+				return fmt.Errorf("%w: invalid string prompt: %w", ErrInvalidRequestJSON, err)
+			}
+		case len(trimmed) > 0 && trimmed[0] == '[':
+			var promptIDs []int
+			if err := json.Unmarshal(trimmed, &promptIDs); err != nil {
+				return fmt.Errorf("%w: batch prompt array is not supported: %w", ErrMultipleChoices, err)
+			}
+			if len(promptIDs) == 0 {
+				return fmt.Errorf("%w: empty prompt token array", ErrInvalidRequestJSON)
+			}
+			if !opts.TokenExact {
+				return fmt.Errorf("%w: TokenExact must be enabled for token-id prompts", ErrMissingTokenIDs)
+			}
+		default:
+			return fmt.Errorf("%w: unsupported prompt format", ErrInvalidRequestJSON)
+		}
+
+	case EndpointChatCompletions:
+		rawMsgs, ok := doc["messages"]
+		if !ok || isJSONNull(rawMsgs) {
+			return fmt.Errorf("%w: missing messages", ErrInvalidRequestJSON)
+		}
+		var msgs []json.RawMessage
+		if err := json.Unmarshal(rawMsgs, &msgs); err != nil {
+			return fmt.Errorf("%w: invalid messages array: %w", ErrInvalidRequestJSON, err)
+		}
+
+	case EndpointResponses:
+		rawInput, ok := doc["input"]
+		if !ok || isJSONNull(rawInput) {
+			return fmt.Errorf("%w: missing input", ErrInvalidRequestJSON)
+		}
+		trimmed := bytes.TrimSpace(rawInput)
+		switch {
+		case len(trimmed) > 0 && trimmed[0] == '"':
+			var inputStr string
+			if err := json.Unmarshal(trimmed, &inputStr); err != nil {
+				return fmt.Errorf("%w: invalid string input: %w", ErrInvalidRequestJSON, err)
+			}
+		case len(trimmed) > 0 && trimmed[0] == '[':
+			var items []json.RawMessage
+			if err := json.Unmarshal(trimmed, &items); err != nil {
+				return fmt.Errorf("%w: invalid input array: %w", ErrInvalidRequestJSON, err)
+			}
+		default:
+			return fmt.Errorf("%w: unsupported input format", ErrInvalidRequestJSON)
+		}
+	}
 	return nil
 }
 
 // PrepareStreamRequest rewrites an eligible request body for streaming SSE
-// dispatch (setting stream: true, stream_options.include_usage: true on
-// completions/chat, and return_token_ids: true when opts.TokenExact is set),
-// preserving all other request fields.
+// dispatch (setting stream: true, stream_options.include_usage: true and
+// stream_options.continuous_usage_stats: true on completions/chat, and
+// return_token_ids: true when opts.TokenExact is set), preserving all other
+// request fields.
 func PrepareStreamRequest(endpoint Endpoint, rawBody []byte, opts Options) ([]byte, error) {
-	if err := CheckEligibility(endpoint, rawBody); err != nil {
+	if err := validateEndpoint(endpoint); err != nil {
 		return nil, err
 	}
 	doc, err := parseJSONObject(rawBody)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkEligibilityDoc(endpoint, doc, opts); err != nil {
 		return nil, err
 	}
 	if err := applyStreamFields(endpoint, doc, opts); err != nil {
@@ -80,17 +166,25 @@ func BuildContinuationRequest(originalBody []byte, state *State, opts Options) (
 	if state == nil {
 		return nil, false, fmt.Errorf("%w: nil state", ErrUnsupportedEndpoint)
 	}
-	if err := CheckEligibility(state.Endpoint, originalBody); err != nil {
+	if err := validateEndpoint(state.Endpoint); err != nil {
 		return nil, false, err
 	}
-	if !state.HasProgress() {
-		req, err := PrepareStreamRequest(state.Endpoint, originalBody, opts)
-		return req, false, err
-	}
-
 	doc, err := parseJSONObject(originalBody)
 	if err != nil {
 		return nil, false, err
+	}
+	if err := checkEligibilityDoc(state.Endpoint, doc, opts); err != nil {
+		return nil, false, err
+	}
+	if !state.HasProgress() {
+		if err := applyStreamFields(state.Endpoint, doc, opts); err != nil {
+			return nil, false, err
+		}
+		out, err := json.Marshal(doc)
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal stream request: %w", err)
+		}
+		return out, false, nil
 	}
 	if err := applyStreamFields(state.Endpoint, doc, opts); err != nil {
 		return nil, false, err
@@ -158,6 +252,7 @@ func applyStreamFields(endpoint Endpoint, doc map[string]json.RawMessage, opts O
 			}
 		}
 		streamOpts["include_usage"] = json.RawMessage("true")
+		streamOpts["continuous_usage_stats"] = json.RawMessage("true")
 		encoded, err := json.Marshal(streamOpts)
 		if err != nil {
 			return fmt.Errorf("marshal stream_options: %w", err)
