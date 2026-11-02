@@ -314,17 +314,13 @@ func (a *Accumulator) FinalState() *State {
 	st := a.live.Clone()
 	st.Text = string(a.textBuf)
 	st.Reasoning = string(a.reasoningBuf)
-
-	// If a chat continuation stopped naturally (e.g. finish_reason="length")
-	// while still inside an unclosed thinking block emitted in delta.content,
-	// keep those tokens in Reasoning rather than leaking them into Text.
 	if st.Endpoint == EndpointChatCompletions &&
-		a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved &&
-		len(a.textBuf) > a.thinkSplitOffset {
-		unclosed := trimPartialTagSuffix(string(a.textBuf[a.thinkSplitOffset:]), a.opts.thinkEndTag())
-		st.Reasoning = string(a.reasoningBuf) + unclosed
-		st.Text = string(a.textBuf[:a.thinkSplitOffset])
-		st.InReasoning = true
+		a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved {
+		// Stream completed without emitting </think> or reasoning deltas, which
+		// occurs when the model's chat template (e.g. Qwen3 with
+		// continue_final_message=true) already closed </think> in the prompt and
+		// generated post-reasoning content directly in delta.content.
+		st.InReasoning = false
 	}
 
 	if len(a.chatToolCalls) > 0 {
@@ -458,6 +454,9 @@ func (a *Accumulator) updateUsageAndCap() {
 	a.live.Usage.GeneratedTokens = gen
 
 	reasonDelta := a.attemptReasonDeltaToks
+	if a.live.Completed && a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved {
+		reasonDelta = 0
+	}
 	if a.attemptReasonDetailsSeen {
 		if a.live.Attempt == 1 || a.attemptSawReasoning || (a.priorInReasoning && a.thinkSplitResolved) {
 			reasonDelta = a.attemptReasonToks
@@ -662,6 +661,7 @@ type chatChunk struct {
 
 func (a *Accumulator) feedChatCompletions(ev SSEEvent) error {
 	if ev.Done {
+		wasCompleted := a.live.Completed
 		a.live.Completed = true
 		a.streamDone = true
 		if a.live.FinishReason == "" {
@@ -670,6 +670,9 @@ func (a *Accumulator) feedChatCompletions(ev SSEEvent) error {
 			} else {
 				a.live.FinishReason = "stop"
 			}
+		}
+		if !wasCompleted {
+			a.updateUsageAndCap()
 		}
 		return nil
 	}
@@ -1045,21 +1048,6 @@ func (a *Accumulator) finalizeRespItem(outputIdx int, rawDone json.RawMessage) e
 	open := a.openRespItems[outputIdx]
 	delete(a.openRespItems, outputIdx)
 
-	// If the attempt finished (e.g. max_output_tokens) before </think> was
-	// emitted while continuing an incomplete reasoning item, fold the unclosed
-	// output_text buffer back into the reasoning PartialItem instead of emitting
-	// a message item containing raw thinking text.
-	if open != nil && open.typ == "message" &&
-		a.priorInReasoning && !a.attemptSawReasoning && !a.thinkSplitResolved &&
-		a.live.PartialItem != nil && a.live.PartialItem.Type == "reasoning" {
-		extra := trimPartialTagSuffix(string(a.respThinkPending), a.opts.thinkEndTag())
-		if extra != "" {
-			appendRespPart(&a.live.PartialItem.Content, "reasoning_text", extra)
-		}
-		a.respThinkPending = nil
-		return nil
-	}
-
 	var doneItem ResponseItem
 	hasDone := false
 	if len(rawDone) > 0 {
@@ -1110,10 +1098,8 @@ func (a *Accumulator) finalizeRespItem(outputIdx int, rawDone json.RawMessage) e
 		a.live.PartialItem = nil
 	}
 	finalized.Status = "completed"
-	if finalized.Type == "reasoning" {
-		// Reasoning finished; next item transitions out of reasoning.
-		a.live.InReasoning = false
-	}
+	a.respThinkPending = nil
+	a.live.InReasoning = false
 	a.live.CompletedItems = append(a.live.CompletedItems, *finalized)
 	return nil
 }

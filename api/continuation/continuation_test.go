@@ -469,6 +469,70 @@ func TestResponsesMultipleInterruptionsMidReasoning(t *testing.T) {
 	}
 }
 
+func TestMidReasoningContinuationWhenTemplateClosesThinkInPrompt(t *testing.T) {
+	// Qwen3's Jinja chat template renders `<|im_start|>assistant\n<think>\n...\n</think>\n\n`
+	// when resuming with `continue_final_message=true` and `content=""` (token_exact=false).
+	// Attempt 2 therefore starts post-</think>, streams the final answer directly in
+	// delta.content / output_text.delta without emitting </think>, and finishes cleanly.
+	acc1 := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	_ = acc1.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-qwen3-1","choices":[{"index":0,"delta":{"reasoning":"Okay, 37 * 43..."}}]}`+"\n\n",
+	), nil)
+	snap1 := acc1.CheckpointSnapshot()
+
+	acc2 := NewAccumulator(EndpointChatCompletions, snap1, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-qwen3-2","choices":[{"index":0,"delta":{"content":"To compute 37 * 43: "}}]}`+"\n\n"+
+			`data: {"id":"chat-qwen3-2","choices":[{"index":0,"delta":{"content":"1591."},"finish_reason":"stop"}]}`+"\n\n"+
+			"data: [DONE]\n\n",
+	), nil); err != nil {
+		t.Fatalf("chat acc2 ConsumeStream: %v", err)
+	}
+	chatFinal := acc2.FinalState()
+	if chatFinal.Reasoning != "Okay, 37 * 43..." {
+		t.Fatalf("expected prior reasoning preserved unchanged, got %q", chatFinal.Reasoning)
+	}
+	if chatFinal.Text != "To compute 37 * 43: 1591." {
+		t.Fatalf("expected completed post-template answer in Text, got %q", chatFinal.Text)
+	}
+	if chatFinal.InReasoning || chatFinal.Usage.ReasoningTokens != 1 {
+		t.Fatalf("expected InReasoning=false and ReasoningTokens=1, got InReasoning=%v Usage=%+v",
+			chatFinal.InReasoning, chatFinal.Usage)
+	}
+
+	// Same scenario on /v1/responses: Attempt 1 interrupted mid-reasoning item,
+	// Attempt 2 emits message item directly without </think> and completes.
+	rAcc1 := NewAccumulator(EndpointResponses, nil, Options{})
+	_ = rAcc1.ConsumeStream(strings.NewReader(
+		"event: response.output_item.added\n"+
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_q1","type":"reasoning","status":"in_progress"}}`+"\n\n"+
+			"event: response.reasoning_text.delta\n"+
+			`data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_q1","delta":"Rayleigh note."}`+"\n\n",
+	), nil)
+	rSnap1 := rAcc1.CheckpointSnapshot()
+
+	rAcc2 := NewAccumulator(EndpointResponses, rSnap1, Options{})
+	if err := rAcc2.ConsumeStream(strings.NewReader(
+		"event: response.output_item.added\n"+
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_q2","type":"message","role":"assistant","status":"in_progress"}}`+"\n\n"+
+			"event: response.output_text.delta\n"+
+			`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_q2","delta":"Hello! Rayleigh scattering explains blue skies."}`+"\n\n"+
+			"event: response.output_item.done\n"+
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_q2","type":"message","role":"assistant","status":"completed"}}`+"\n\n"+
+			"event: response.completed\n"+
+			`data: {"type":"response.completed","response":{"id":"resp_q2","status":"completed"}}`+"\n\n",
+	), nil); err != nil {
+		t.Fatalf("responses rAcc2 ConsumeStream: %v", err)
+	}
+	rFinal := rAcc2.FinalState()
+	if len(rFinal.CompletedItems) != 2 || rFinal.CompletedItems[0].Type != "reasoning" || rFinal.CompletedItems[1].Type != "message" {
+		t.Fatalf("expected [reasoning, message] CompletedItems, got %+v", rFinal.CompletedItems)
+	}
+	if rFinal.CompletedItems[1].Content[0].Text != "Hello! Rayleigh scattering explains blue skies." {
+		t.Fatalf("unexpected message text: %q", rFinal.CompletedItems[1].Content[0].Text)
+	}
+}
+
 func TestSSEReaderDiscardsUnterminatedEventAtEOF(t *testing.T) {
 	// Stream has 1 complete event followed by an event cut mid-JSON at EOF (no \n\n).
 	cutMidJSON := `data: {"id":"cmpl-eof","choices":[{"index":0,"text":"Good "}]}` + "\n\n" +
