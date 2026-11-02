@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/deadlinescaling"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 )
 
@@ -19,7 +20,10 @@ type QueueConfig struct {
 	RequestPathURL     string `json:"request_path_url"`
 	IGWBaseURL         string `json:"igw_base_url"`
 	pipeline.GateConfig
-	Labels map[string]string `json:"labels,omitempty"`
+	// DeadlineScaling, when set, makes the backlog poller publish the replicas
+	// this queue needs to meet its deadlines.
+	DeadlineScaling *deadlinescaling.Config `json:"deadline_scaling,omitempty"`
+	Labels          map[string]string       `json:"labels,omitempty"`
 }
 
 type Config struct {
@@ -141,6 +145,11 @@ func (c *Config) Validate() error {
 		seenName[q.QueueName] = true
 		if q.IGWBaseURL == "" {
 			return fmt.Errorf("queue %q: igw_base_url must be specified", q.QueueName)
+		}
+		if q.DeadlineScaling != nil {
+			if err := q.DeadlineScaling.Validate(); err != nil {
+				return fmt.Errorf("queue %q: %w", q.QueueName, err)
+			}
 		}
 	}
 	return nil
