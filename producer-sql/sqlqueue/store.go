@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -40,6 +42,7 @@ type Store struct {
 type openOptions struct {
 	tracerProvider trace.TracerProvider
 	maxConns       int
+	migrate        bool
 }
 
 // OpenOption configures Open.
@@ -54,6 +57,12 @@ func WithMaxConns(n int) OpenOption {
 // WithTracerProvider records a span per database statement.
 func WithTracerProvider(tp trace.TracerProvider) OpenOption {
 	return func(o *openOptions) { o.tracerProvider = tp }
+}
+
+// WithMigrate applies pending schema migrations instead of only checking that
+// the schema is current.
+func WithMigrate() OpenOption {
+	return func(o *openOptions) { o.migrate = true }
 }
 
 func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
@@ -86,11 +95,32 @@ func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlqueue: ping: %w", err)
 	}
-	if err := s.Migrate(ctx); err != nil {
+	if o.migrate {
+		err = migrate.Run(ctx, db)
+	} else {
+		err = migrate.Check(ctx, db)
+	}
+	if err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("sqlqueue: %w", err)
 	}
 	return s, nil
+}
+
+func validateDSN(dsn string) error {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		return nil
+	}
+	return fmt.Errorf("sqlqueue: unsupported DSN scheme in %q (want postgres:// or postgresql://)", redactDSN(dsn))
+}
+
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return dsn
+	}
+	u.User = url.User("redacted")
+	return u.String()
 }
 
 func (s *Store) span(ctx context.Context, op string) (context.Context, trace.Span) {
