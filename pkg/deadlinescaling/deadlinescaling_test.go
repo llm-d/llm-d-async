@@ -47,6 +47,14 @@ func TestRequiredReplicas(t *testing.T) {
 		{"safety factor", Config{ThroughputRPS: 2, ColdStartSeconds: 60, MaxReplicas: 10, SafetyFactor: 0.5},
 			map[time.Duration]int64{2 * time.Minute: 240}, 4},
 		{"no cold start", Config{ThroughputRPS: 1, MaxReplicas: 10}, map[time.Duration]int64{time.Second: 3}, 3},
+		// 1 / (20000 rps * 86400s) is below the rounding tolerance, but one item still needs a replica.
+		{"one item far out", Config{ThroughputRPS: 20000, MaxReplicas: 10}, map[time.Duration]int64{24 * time.Hour: 1}, 1},
+		// 1 / (1 rps * 1s * 1e-20) is past the int range; the cap applies before the conversion.
+		{"demand past the int range", Config{ThroughputRPS: 1, MaxReplicas: 10, SafetyFactor: 1e-20},
+			map[time.Duration]int64{time.Second: 1}, 10},
+		// 1e-300 rps * 1s * 1e-300 underflows to 0, so the demand is +Inf.
+		{"infinite demand", Config{ThroughputRPS: 1e-300, MaxReplicas: 10, SafetyFactor: 1e-300},
+			map[time.Duration]int64{time.Second: 1}, 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.cfg.RequiredReplicas(buckets, counts(tc.due)); got != tc.want {

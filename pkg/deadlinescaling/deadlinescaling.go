@@ -60,6 +60,14 @@ func (c Config) RequiredReplicas(boundaries []time.Duration, cumulative []int64)
 		budget := (horizon - coldStart).Seconds() * safety
 		need = math.Max(need, float64(cumulative[i])/(c.ThroughputRPS*budget))
 	}
-	// Absorb float error so that exactly n replicas' worth is not rounded to n+1.
-	return min(int(math.Ceil(need-1e-9)), c.MaxReplicas)
+	if need == 0 {
+		return 0
+	}
+	// Cap before converting: need can exceed the int range or be +Inf.
+	if need >= float64(c.MaxReplicas) {
+		return c.MaxReplicas
+	}
+	// Absorb float error so that exactly n replicas' worth is not rounded to
+	// n+1, but keep one replica while there are items to finish.
+	return max(int(math.Ceil(need-1e-9)), 1)
 }
