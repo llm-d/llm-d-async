@@ -32,7 +32,7 @@ require (
 	google.golang.org/api v0.308.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
-	k8s.io/client-go v0.34.12
+	k8s.io/client-go v0.34.13
 	sigs.k8s.io/controller-runtime v0.22.5
 	sigs.k8s.io/gateway-api-inference-extension v1.2.1
 )
@@ -138,9 +138,9 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
-	k8s.io/api v0.34.12 // indirect
+	k8s.io/api v0.34.13 // indirect
 	k8s.io/apiextensions-apiserver v0.34.3 // indirect
-	k8s.io/apimachinery v0.34.12 // indirect
+	k8s.io/apimachinery v0.34.13 // indirect
 	k8s.io/apiserver v0.34.3 // indirect
 	k8s.io/component-base v0.34.3 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
