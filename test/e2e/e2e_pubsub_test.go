@@ -104,7 +104,16 @@ var _ = ginkgo.Describe("GCP PubSub Integration", func() {
 
 	ginkgo.It("processes a message via the producer-gcp library", func() {
 		const route = "producer-gcp-e2e"
+		dlqTopic := pubsubRequestTopic + "-dlq"
+		dlqSub := dlqTopic + "-" + route
 		deletePubSubSubscription(ctx, pubsubClient, pubsubProjectID, route)
+		deletePubSubSubscription(ctx, pubsubClient, pubsubProjectID, dlqSub)
+		deletePubSubTopic(ctx, pubsubClient, pubsubProjectID, dlqTopic)
+		ginkgo.DeferCleanup(func() {
+			deletePubSubSubscription(ctx, pubsubClient, pubsubProjectID, route)
+			deletePubSubSubscription(ctx, pubsubClient, pubsubProjectID, dlqSub)
+			deletePubSubTopic(ctx, pubsubClient, pubsubProjectID, dlqTopic)
+		})
 
 		p, err := producergcp.NewProducer(ctx, producergcp.Config{
 			ProjectID:             pubsubProjectID,

@@ -13,12 +13,15 @@ import (
 	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"cloud.google.com/go/pubsub/v2/pstest"
-	"github.com/llm-d/llm-d-async/api"
-	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
 )
 
 type mockAttributeGate struct {
@@ -563,8 +566,11 @@ func TestProcessMessages_DropForwardsGateMetadata(t *testing.T) {
 	}
 }
 
-func TestProcessMessages_DeliveryAttemptAfterRefusalIsNotARetry(t *testing.T) {
+func TestProcessMessages_RetryCountFollowsDeliveryAttempt(t *testing.T) {
 	flow := &PubSubMQFlow{}
+	const sub = "attempt-sub"
+	const pool = "attempt-pool"
+	before := testutil.ToFloat64(metrics.AsyncReqs.WithLabelValues("", sub, pool))
 	ch := make(chan *api.InternalRequest, 1)
 	attempt := 2
 	msgData, _ := json.Marshal(api.RequestMessage{ID: "req-1"})
@@ -591,15 +597,119 @@ func TestProcessMessages_DeliveryAttemptAfterRefusalIsNotARetry(t *testing.T) {
 		case <-ctx.Done():
 		}
 	}()
-	if err := flow.processMessages(ctx, receive, "test-sub", "test-pool", ch, &mockAttributeGate{allowed: true}, nil, ""); err != nil {
+	if err := flow.processMessages(ctx, receive, sub, pool, ch, &mockAttributeGate{allowed: true}, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	<-done
 	if got == nil {
 		t.Fatal("expected the request to be admitted")
 	}
-	if got.RetryCount != 0 {
-		t.Fatalf("RetryCount = %d, want 0 when this delivery is the first admission", got.RetryCount)
+	if got.RetryCount != 1 {
+		t.Fatalf("RetryCount = %d, want 1 from DeliveryAttempt 2", got.RetryCount)
+	}
+	if got := testutil.ToFloat64(metrics.AsyncReqs.WithLabelValues("", sub, pool)); got != before {
+		t.Fatalf("AsyncReqs = %v, want %v; a redelivery this process did not refuse is not a new admission", got, before)
+	}
+}
+
+func TestProcessMessages_LocalRefusalCountsAdmission(t *testing.T) {
+	flow := &PubSubMQFlow{}
+	const sub = "refusal-sub"
+	const pool = "refusal-pool"
+	before := testutil.ToFloat64(metrics.AsyncReqs.WithLabelValues("", sub, pool))
+	msgData, _ := json.Marshal(api.RequestMessage{ID: "req-1"})
+
+	refuse := func(attempt int) {
+		t.Helper()
+		n := attempt
+		receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
+			f(ctx, &pubsub.Message{
+				ID:              "msg-admit",
+				Data:            msgData,
+				DeliveryAttempt: &n,
+			})
+			return nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := flow.processMessages(ctx, receive, sub, pool, make(chan *api.InternalRequest, 1), &mockAttributeGate{allowed: false}, nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refuse(1)
+	refuse(2)
+
+	admit := func(dest *PubSubMQFlow, attempt int) *api.InternalRequest {
+		t.Helper()
+		ch := make(chan *api.InternalRequest, 1)
+		n := attempt
+		receive := func(ctx context.Context, f func(context.Context, *pubsub.Message)) error {
+			f(ctx, &pubsub.Message{
+				ID:              "msg-admit",
+				Data:            msgData,
+				DeliveryAttempt: &n,
+			})
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		var got *api.InternalRequest
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			select {
+			case got = <-ch:
+				if val, ok := resultChannels.Load(got.TransportCorrelationID); ok {
+					val.(chan bool) <- true
+				}
+			case <-ctx.Done():
+			}
+		}()
+		if err := dest.processMessages(ctx, receive, sub, pool, ch, &mockAttributeGate{allowed: true}, nil, ""); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+		if got == nil {
+			t.Fatal("expected the request to be admitted")
+		}
+		return got
+	}
+
+	first := admit(flow, 3)
+	if first.RetryCount != 2 {
+		t.Fatalf("RetryCount = %d, want 2 from DeliveryAttempt 3", first.RetryCount)
+	}
+	if got := testutil.ToFloat64(metrics.AsyncReqs.WithLabelValues("", sub, pool)); got != before+1 {
+		t.Fatalf("AsyncReqs = %v, want %v after the first admission", got, before+1)
+	}
+
+	// Another replica did not see the refusals. Backoff still follows the
+	// broker, and the request is not counted again.
+	other := &PubSubMQFlow{}
+	redelivered := admit(other, 4)
+	if redelivered.RetryCount != 3 {
+		t.Fatalf("other replica RetryCount = %d, want 3", redelivered.RetryCount)
+	}
+	if got := testutil.ToFloat64(metrics.AsyncReqs.WithLabelValues("", sub, pool)); got != before+1 {
+		t.Fatalf("AsyncReqs = %v, want %v after redelivery to another replica", got, before+1)
+	}
+}
+
+func TestRefusedDeliveryExpires(t *testing.T) {
+	flow := &PubSubMQFlow{}
+	flow.refusedDelivery.Store("stale", time.Now().Add(-refusedDeliveryTTL-time.Second))
+	if flow.takeRefusal("stale") {
+		t.Fatal("expired refusal was counted")
+	}
+
+	flow.refusedDelivery.Store("old", time.Now().Add(-refusedDeliveryTTL-time.Second))
+	flow.refusedDelivery.Store("fresh", time.Now())
+	flow.sweepRefusals(time.Now())
+	if _, ok := flow.refusedDelivery.Load("old"); ok {
+		t.Fatal("expired refusal note was kept")
+	}
+	if _, ok := flow.refusedDelivery.Load("fresh"); !ok {
+		t.Fatal("fresh refusal note was swept")
 	}
 }
 

@@ -388,12 +388,12 @@ func TestNewDroppedResult(t *testing.T) {
 }
 
 func TestBackfillResultMetadata(t *testing.T) {
-	if got := BackfillResultMetadata(nil, nil); got != nil {
+	if got := backfillResultMetadata(nil, nil); got != nil {
 		t.Fatalf("empty backfill = %v, want nil", got)
 	}
 	request := map[string]string{ResultRouteAttribute: "route-1", "userid": "carol"}
 	result := map[string]string{"userid": "alice"}
-	got := BackfillResultMetadata(request, result)
+	got := backfillResultMetadata(request, result)
 	if got[ResultRouteAttribute] != "route-1" || got["userid"] != "alice" {
 		t.Fatalf("backfill = %v", got)
 	}

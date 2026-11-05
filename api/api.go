@@ -183,16 +183,16 @@ func NewDroppedResult(req Request, routing InternalRouting, gateResult *ResultMe
 	}
 	out := *gateResult
 	out.Routing = routing
-	out.Metadata = BackfillResultMetadata(req.ReqMetadata(), gateResult.Metadata)
+	out.Metadata = backfillResultMetadata(req.ReqMetadata(), gateResult.Metadata)
 	return out
 }
 
-// BackfillResultMetadata returns a new map containing request metadata, then
+// backfillResultMetadata returns a new map containing request metadata, then
 // result metadata. A key the result left out is filled from the request.
 // A key the result set wins. Both empty returns nil.
 // Drop paths use this so a gate that built its own result still carries
 // result_route and the rest of the request metadata.
-func BackfillResultMetadata(request, result map[string]string) map[string]string {
+func backfillResultMetadata(request, result map[string]string) map[string]string {
 	if len(request) == 0 && len(result) == 0 {
 		return nil
 	}

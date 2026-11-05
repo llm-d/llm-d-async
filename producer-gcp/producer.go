@@ -36,7 +36,14 @@ const (
 	resultReceiveBuffer      = 16
 	// receiveRestartBackoff keeps a caller that retries GetResult on every
 	// error from opening a new pair of StreamingPulls on each iteration.
+	// The dead-letter receive uses the same base delay, then doubles it.
 	receiveRestartBackoff = time.Second
+	maxDeadLetterBackoff  = 30 * time.Second
+	// synchronousPublishDelay is the publisher batch wait. SubmitRequest
+	// blocks on each publish, so the client default of 10ms caps a sequential
+	// caller near 100 requests per second. CountThreshold 1 sends the message
+	// immediately. This delay is the backstop if that threshold is raised.
+	synchronousPublishDelay = time.Millisecond
 	// resultMaxExtension matches the Pub/Sub client default. GetResult holds a
 	// message until the caller takes it, but the lease is not extended past
 	// this, and a slower caller is redelivered a duplicate.
@@ -44,7 +51,9 @@ const (
 	deadLetterMessage  = "request was dead-lettered"
 )
 
-var errProducerClosed = errors.New("producer is closed")
+// ErrProducerClosed is returned by SubmitRequest and GetResult after Close.
+// A retry loop stops on it with errors.Is.
+var ErrProducerClosed = errors.New("producer is closed")
 
 var _ api.Producer = (*Producer)(nil)
 
@@ -225,6 +234,8 @@ func NewProducer(ctx context.Context, cfg Config, opts ...Option) (*Producer, er
 	}
 
 	p.publisher = p.client.Publisher(p.cfg.RequestTopicID)
+	p.publisher.PublishSettings.CountThreshold = 1
+	p.publisher.PublishSettings.DelayThreshold = synchronousPublishDelay
 	opened = true
 	return p, nil
 }
@@ -299,9 +310,9 @@ func (p *Producer) CancelRequests(_ context.Context, requestIDs []string) error 
 // subscription. Later calls drain that stream. The message is acknowledged
 // only after this call takes it, and that ack is issued before the receive
 // returns. A message not taken within resultMaxExtension is redelivered.
-// A dead-letter receive failure is logged and does not stop the result
-// receive. If the result receive returns an error, this call returns that
-// error. The error stays on that stream. The next call reuses it for
+// A dead-letter receive failure is logged and retried with backoff. It does
+// not stop the result receive. If the result receive returns an error, this
+// call returns that error. The error stays on that stream. The next call reuses it for
 // receiveRestartBackoff, then starts a new one. A call still waiting on a
 // stream that has been replaced waits on the new stream instead of returning
 // the old error.
@@ -314,7 +325,7 @@ func (p *Producer) GetResult(ctx context.Context) (*api.ResultMessage, error) {
 	}
 	stream := p.ensureReceive()
 	if stream == nil {
-		return nil, errProducerClosed
+		return nil, ErrProducerClosed
 	}
 	return p.waitResult(ctx, stream)
 }
@@ -332,7 +343,7 @@ func (p *Producer) waitResult(ctx context.Context, stream *resultStream) (*api.R
 		case <-ctx.Done():
 			return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
 		case <-p.closed:
-			return nil, errProducerClosed
+			return nil, ErrProducerClosed
 		case <-stream.done:
 			if ctx.Err() != nil {
 				return nil, fmt.Errorf("failed to get result: %w", ctx.Err())
@@ -434,12 +445,11 @@ func (p *Producer) receiveSubscriptions(ctx context.Context) error {
 	}()
 	go func() {
 		defer wg.Done()
-		err := p.receiveSubscription(ctx, p.cfg.DeadLetterSubscriptionID, p.enqueueDeadLetter)
 		// The dead-letter subscription is optional. A missing subscription or
 		// a subscriber that cannot read it must not take down the result stream.
-		if err != nil && ctx.Err() == nil {
-			p.logger.Error(err, "dead-letter receive failed", "subscription", p.cfg.DeadLetterSubscriptionID)
-		}
+		// The receive retries on its own so a later dead letter is still delivered
+		// while the result stream stays up.
+		p.receiveDeadLetters(ctx)
 	}()
 	wg.Wait()
 	select {
@@ -447,6 +457,36 @@ func (p *Producer) receiveSubscriptions(ctx context.Context) error {
 		return err
 	default:
 		return nil
+	}
+}
+
+func (p *Producer) receiveDeadLetters(ctx context.Context) {
+	backoff := receiveRestartBackoff
+	for {
+		err := p.receiveSubscription(ctx, p.cfg.DeadLetterSubscriptionID, p.enqueueDeadLetter)
+		if ctx.Err() != nil {
+			return
+		}
+		delay := receiveRestartBackoff
+		if err != nil {
+			p.logger.Error(err, "dead-letter receive failed", "subscription", p.cfg.DeadLetterSubscriptionID)
+			delay = backoff
+			if backoff < maxDeadLetterBackoff {
+				backoff *= 2
+				if backoff > maxDeadLetterBackoff {
+					backoff = maxDeadLetterBackoff
+				}
+			}
+		} else {
+			backoff = receiveRestartBackoff
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 
@@ -544,7 +584,7 @@ func (p *Producer) streamErr(stream *resultStream) error {
 func (p *Producer) errIfClosed() error {
 	select {
 	case <-p.closed:
-		return errProducerClosed
+		return ErrProducerClosed
 	default:
 		return nil
 	}

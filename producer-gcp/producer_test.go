@@ -230,6 +230,9 @@ func TestNewProducerCreatesResources(t *testing.T) {
 	if reqSub.GetAckDeadlineSeconds() != requestAckDeadlineSeconds {
 		t.Errorf("request ack deadline = %d, want %d", reqSub.GetAckDeadlineSeconds(), requestAckDeadlineSeconds)
 	}
+	if p.publisher.PublishSettings.CountThreshold != 1 || p.publisher.PublishSettings.DelayThreshold != synchronousPublishDelay {
+		t.Errorf("publish settings = count %d delay %s, want count 1 delay %s", p.publisher.PublishSettings.CountThreshold, p.publisher.PublishSettings.DelayThreshold, synchronousPublishDelay)
+	}
 	if reqSub.GetExpirationPolicy() == nil || reqSub.GetExpirationPolicy().GetTtl() != nil {
 		t.Errorf("request subscription should never expire, got %+v", reqSub.GetExpirationPolicy())
 	}
@@ -657,12 +660,12 @@ func TestCloseThenUse(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := p.SubmitRequest(context.Background(), validRequest("after-close")); !errors.Is(err, errProducerClosed) {
+	if err := p.SubmitRequest(context.Background(), validRequest("after-close")); !errors.Is(err, ErrProducerClosed) {
 		t.Fatalf("SubmitRequest after Close = %v, want closed", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := p.GetResult(ctx); !errors.Is(err, errProducerClosed) {
+	if _, err := p.GetResult(ctx); !errors.Is(err, ErrProducerClosed) {
 		t.Fatalf("GetResult after Close = %v, want closed", err)
 	}
 }
@@ -925,6 +928,32 @@ func TestGetResultKeepsResultWhenDeadLetterReceiveFails(t *testing.T) {
 			t.Fatal("dead-letter receive failure was not logged")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The failed receive must start again. A subscription created after the
+	// failure is how a later dead letter still reaches GetResult.
+	if _, err := client.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name: topicResource(testProject, p.cfg.DeadLetterTopicID),
+	}); err != nil {
+		t.Fatalf("create dlq topic: %v", err)
+	}
+	if _, err := client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:   subscriptionResource(testProject, p.cfg.DeadLetterSubscriptionID),
+		Topic:  topicResource(testProject, p.cfg.DeadLetterTopicID),
+		Filter: resultRouteFilter(p.cfg.ResultRoute),
+	}); err != nil {
+		t.Fatalf("create dlq subscription: %v", err)
+	}
+	publishDeadLetter(t, client, p.cfg.DeadLetterTopicID, "poisoned", p.cfg.ResultRoute)
+
+	dlCtx, dlCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer dlCancel()
+	dead, err := p.GetResult(dlCtx)
+	if err != nil {
+		t.Fatalf("GetResult after dead-letter retry: %v", err)
+	}
+	if dead.ID != "poisoned" || dead.ErrorCode != api.ErrCodeDeadLettered {
+		t.Fatalf("result = %+v, want dead-lettered poisoned", dead)
 	}
 }
 
