@@ -61,7 +61,7 @@ func openSQLStore(t *testing.T) *sqlqueue.Store {
 	query := u.Query()
 	query.Set("search_path", schema)
 	u.RawQuery = query.Encode()
-	store, err := sqlqueue.Open(context.Background(), u.String())
+	store, err := sqlqueue.Open(context.Background(), u.String(), sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store
