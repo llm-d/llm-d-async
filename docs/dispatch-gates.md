@@ -114,11 +114,11 @@ The available gate types, at a glance:
 - `constant`: Always returns budget 1.0 (fully open). No parameters.
 
 - `redis`: Queries Redis for the dispatch budget (managed by an external system).
-  - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.
+  - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). When it exactly matches the `redis-sortedset` transport's address, the gate reuses the transport's client, including its credentials, TLS settings and database (the `/N` in the transport URL). Otherwise it opens a standalone connection without credentials on DB 0, shared by gates with the same address.
   - `budget_key` (optional): Redis key to read the dispatch budget from. Default is `dispatch-gate-budget`.
 
 - `redis-leased-rate`:
-  - `address` (**required**): Redis server address. Gate instances using the same address share a client connection pool.
+  - `address` (**required**): Redis server address. Reuses the `redis-sortedset` transport's client when it matches, as described for the `redis` gate; otherwise gates with the same address share a standalone client.
   - `control_key` (**required**): Redis hash containing the controller's leased rate command.
   - `pool_id` (optional): Worker-pool ID the command must match. Defaults to the owning worker pool and is required when no owner is available.
   - `state_key` (optional): Redis hash used by the shared token bucket. Defaults to `<control_key>:state`.
@@ -322,7 +322,7 @@ The available gate types, at a glance:
   - `gating_mode` (optional): `blocking` or `classifying`. In `blocking` mode the worker blocks until capacity frees up; in `classifying` (non-blocking) mode a request over the limit is refused (returned to the broker for redelivery). Default is `classifying`.
 
 - `redis-quota`: Per-attribute quota management via Redis.
-  - `address` (**required**): Redis server address.
+  - `address` (**required**): Redis server address. Reuses the `redis-sortedset` transport's client when it matches, as described for the `redis` gate.
   - `attribute` (optional): The message attribute to use for quota (e.g., `userid`). Default is `userid`.
   - `mode` (optional): `rate-limit` or `concurrency`. Default is `rate-limit`.
   - `limit` (**required**): The quota limit. Must be positive.

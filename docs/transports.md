@@ -236,7 +236,7 @@ In cluster mode every multi-key Lua script must stay within one hash slot. The s
 
 A result list usually lands in a different slot than its request queue. Publishing a result then takes two single-slot steps instead of one atomic script: the dispatcher renews its lease, pushes the record, then drops the claim. A crash between the push and the drop leaves the claim to expire and be redelivered, so a consumer can see that result twice. This is within the transport's documented at-least-once contract, and [durable result delivery](guides/durable-result-delivery.md) de-duplicates it by `(ID, RequestToken)`; name the result list with the queue's hash tag (for example `{request-sortedset}:results`) if you want the atomic path back. A payload stored apart with `WithPayloadKeys` lives in its own slot too, so in cluster mode it is deleted with a separate command after the ack, and the producer writes it before the enqueue; a payload key that outlives a crash expires on its own.
 
-The `redis`, `redis-quota` and `redis-leased-rate` dispatch gates take a single `address` and open a standalone connection to it. Against a cluster, point them at a node that owns the slot of their key (or front the cluster with a proxy); a key on another node answers `MOVED` and the gate fails closed.
+The `redis`, `redis-quota` and `redis-leased-rate` gates reuse this transport's client, including its credentials and database, when their `address` matches (see [dispatch gates](dispatch-gates.md)); otherwise they open a standalone connection. Against a cluster, point standalone gates at a node that owns the key's slot or front them with a proxy, because a `MOVED` response fails the gate closed.
 
 ## Implementations
 

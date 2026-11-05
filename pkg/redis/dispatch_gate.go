@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/llm-d/llm-d-async/api"
@@ -18,13 +19,13 @@ var _ pipeline.Gate = (*RedisDispatchGate)(nil)
 // the dispatch rate. If the key does not exist or is invalid, it defaults
 // to full capacity (1.0).
 type RedisDispatchGate struct {
-	rdb *goredis.Client
+	rdb goredis.UniversalClient
 	key string
 }
 
 // NewRedisDispatchGate creates a new RedisDispatchGate that reads budget
 // from the given Redis client and budget key.
-func NewRedisDispatchGate(client *goredis.Client, budgetKey string) *RedisDispatchGate {
+func NewRedisDispatchGate(client goredis.UniversalClient, budgetKey string) *RedisDispatchGate {
 	return &RedisDispatchGate{
 		rdb: client,
 		key: budgetKey,
@@ -47,8 +48,10 @@ func (g *RedisDispatchGate) Budget(ctx context.Context) float64 {
 	}
 	budget, err := strconv.ParseFloat(val, 64)
 	if err != nil {
+		// Log the parse failure without the value: budget_key may name any
+		// key readable with the gate's credentials.
 		logger := log.FromContext(ctx)
-		logger.V(logutil.DEFAULT).Error(err, "Failed to parse dispatch gate budget", "value", val)
+		logger.V(logutil.DEFAULT).Error(errors.Unwrap(err), "Failed to parse dispatch gate budget", "key", g.key, "valueLength", len(val))
 		return 1.0
 	}
 	if budget < 0 {

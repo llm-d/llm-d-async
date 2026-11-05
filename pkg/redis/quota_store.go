@@ -14,11 +14,11 @@ import (
 // after slotTTL without an acquire or release, which frees slots a crashed
 // dispatcher never returned.
 type QuotaStore struct {
-	rdb     *redis.Client
+	rdb     redis.UniversalClient
 	slotTTL time.Duration
 }
 
-func NewQuotaStore(rdb *redis.Client, slotTTL time.Duration) *QuotaStore {
+func NewQuotaStore(rdb redis.UniversalClient, slotTTL time.Duration) *QuotaStore {
 	return &QuotaStore{rdb: rdb, slotTTL: slotTTL}
 }
 

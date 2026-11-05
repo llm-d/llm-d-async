@@ -85,7 +85,7 @@ func TestNewUniversalClient_SelectsClientPerMode(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			c, err := newUniversalClient(tc.cfg)
+			c, _, err := newUniversalClient(tc.cfg)
 			if err != nil {
 				t.Fatal(err)
 			}

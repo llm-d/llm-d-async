@@ -35,6 +35,8 @@ const DefaultCacheTTL = 5 * time.Second
 
 var _ pipeline.GateFactory = (*GateFactory)(nil)
 
+var _ redisgate.RedisClientRegistrar = (*GateFactory)(nil)
+
 var _ QuotaStore = (*redisgate.QuotaStore)(nil)
 
 // GateFactory creates DispatchGate instances based on configuration.
@@ -42,8 +44,11 @@ type GateFactory struct {
 	prometheusURL string
 	cacheTTL      time.Duration
 	redisClients  map[string]*goredis.Client
-	sqlQuota      QuotaStore
-	logger        logr.Logger
+	// transportClients maps the Redis transport's primary address to its
+	// client, which the transport owns; Redis gates at that address reuse it.
+	transportClients map[string]goredis.UniversalClient
+	sqlQuota         QuotaStore
+	logger           logr.Logger
 }
 
 // NewGateFactory creates a new GateFactory with an optional Prometheus URL.
@@ -58,10 +63,11 @@ func NewGateFactory(prometheusURL string) *GateFactory {
 // for Prometheus metric sources. A TTL of 0 disables caching.
 func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *GateFactory {
 	return &GateFactory{
-		prometheusURL: prometheusURL,
-		cacheTTL:      cacheTTL,
-		redisClients:  make(map[string]*goredis.Client),
-		logger:        logr.Discard(),
+		prometheusURL:    prometheusURL,
+		cacheTTL:         cacheTTL,
+		redisClients:     make(map[string]*goredis.Client),
+		transportClients: make(map[string]goredis.UniversalClient),
+		logger:           logr.Discard(),
 	}
 }
 
@@ -81,7 +87,29 @@ func (f *GateFactory) WithSQLQuota(store QuotaStore) *GateFactory {
 	return f
 }
 
-// Close closes all Redis clients created by this factory.
+// RegisterRedisClient registers the Redis transport's client for Redis gates
+// at its primary address. Those gates use the transport's credentials, TLS
+// settings and database. The transport keeps ownership of client.
+func (f *GateFactory) RegisterRedisClient(client goredis.UniversalClient, options *goredis.UniversalOptions) {
+	f.transportClients[options.Addrs[0]] = client
+}
+
+// redisClient returns the transport's client when addr matches its primary
+// address, otherwise a standalone client this factory owns, shared per address.
+func (f *GateFactory) redisClient(addr string) goredis.UniversalClient {
+	if client, ok := f.transportClients[addr]; ok {
+		return client
+	}
+	client, ok := f.redisClients[addr]
+	if !ok {
+		client = goredis.NewClient(&goredis.Options{Addr: addr})
+		f.redisClients[addr] = client
+	}
+	return client
+}
+
+// Close closes the standalone Redis clients created by this factory and
+// forgets every client, so a second Close is a no-op.
 func (f *GateFactory) Close() error {
 	var firstErr error
 	for addr, client := range f.redisClients {
@@ -89,6 +117,8 @@ func (f *GateFactory) Close() error {
 			firstErr = fmt.Errorf("failed to close Redis client for %s: %w", addr, err)
 		}
 	}
+	clear(f.redisClients)
+	clear(f.transportClients)
 	return firstErr
 }
 
@@ -205,25 +235,14 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		if addr == "" {
 			return nil, fmt.Errorf("redis gate requires an 'address' in gate_params")
 		}
-		client, ok := f.redisClients[addr]
-		if !ok {
-			client = goredis.NewClient(&goredis.Options{Addr: addr})
-			f.redisClients[addr] = client
-		}
 		budgetKey := paramString(params, "budget_key", "dispatch-gate-budget")
-		return redisgate.NewRedisDispatchGate(client, budgetKey), nil
+		return redisgate.NewRedisDispatchGate(f.redisClient(addr), budgetKey), nil
 
 	case "redis-leased-rate":
 		addr := paramString(params, "address", "")
 		if addr == "" {
 			return nil, fmt.Errorf("redis-leased-rate gate requires an 'address' in gate_params")
 		}
-		client, ok := f.redisClients[addr]
-		if !ok {
-			client = goredis.NewClient(&goredis.Options{Addr: addr})
-			f.redisClients[addr] = client
-		}
-
 		poolID := paramString(params, "pool_id", cfg.Owner.WorkerPoolID)
 		if poolID == "" {
 			return nil, fmt.Errorf("redis-leased-rate gate requires a 'pool_id' in gate_params or a worker-pool owner")
@@ -240,23 +259,18 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("redis-leased-rate burst_seconds must be finite and positive, got %g", burstSeconds)
 		}
 		stateKey := paramString(params, "state_key", "")
-		return redisgate.NewRedisLeasedRateGate(client, controlKey, stateKey, poolID, burstSeconds), nil
+		return redisgate.NewRedisLeasedRateGate(f.redisClient(addr), controlKey, stateKey, poolID, burstSeconds), nil
 
 	case "redis-quota":
 		addr := paramString(params, "address", "")
 		if addr == "" {
 			return nil, fmt.Errorf("redis-quota gate requires an 'address' in gate_params")
 		}
-		client, ok := f.redisClients[addr]
-		if !ok {
-			client = goredis.NewClient(&goredis.Options{Addr: addr})
-			f.redisClients[addr] = client
-		}
 		q, err := quotaParams(cfg.GateType, params)
 		if err != nil {
 			return nil, err
 		}
-		return q.gate(redisgate.NewQuotaStore(client, q.window)), nil
+		return q.gate(redisgate.NewQuotaStore(f.redisClient(addr), q.window)), nil
 
 	case "sql-quota":
 		if f.sqlQuota == nil {
