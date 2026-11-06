@@ -169,6 +169,27 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_gate_metric_source_available",
 		Help: "1 when a metric-based dispatch gate's last evaluation got a usable reading from its metric source, 0 when it fell back to the configured 'fallback' budget (query error, no samples, or NaN/Inf). Distinguishes a fallback budget from a real reading of the same number: async_dispatch_budget 0 with this at 1 means a saturated pool, at 0 means unreadable metrics. async_gate_metric_value is stale whenever this is 0.",
 	}, gateLabels)
+	Resumes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: SchedulerSubsystem, Name: "resumes_total",
+		Help: "Total number of interrupted inference generations resumed from a persisted checkpoint, by trigger reason (error, eviction, redelivery, shutdown).",
+	}, []string{LabelQueueID, LabelQueueName, LabelPoolName, LabelReason})
+	ResumeRecoveredTokens = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: SchedulerSubsystem, Name: "resume_recovered_tokens_total",
+		Help: "Total number of previously generated output tokens preserved across continuation resumes instead of being discarded, by trigger reason.",
+	}, []string{LabelQueueID, LabelQueueName, LabelPoolName, LabelReason})
+	ResumeRecomputedPromptTokens = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: SchedulerSubsystem, Name: "resume_recomputed_prompt_tokens_total",
+		Help: "Total number of prompt/prefill tokens re-evaluated across resumed continuation attempts.",
+	}, queueLabels)
+	CheckpointWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: SchedulerSubsystem, Name: "checkpoint_writes_total",
+		Help: "Total number of Redis continuation checkpoint write attempts, by status (ok, fenced, error).",
+	}, []string{LabelQueueID, LabelQueueName, LabelPoolName, "status"})
+	CheckpointSizeBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Subsystem: SchedulerSubsystem, Name: "checkpoint_size_bytes",
+		Help:    "Serialized JSON size in bytes of persisted continuation checkpoints.",
+		Buckets: []float64{256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144},
+	}, queueLabels)
 )
 
 // Gate decision reason label values for async_gate_decisions_total.
@@ -543,6 +564,32 @@ func SetGateMetricSourceAvailable(available bool, queueID, queueName, poolName, 
 	GateMetricSourceAvailable.WithLabelValues(queueID, queueName, poolName, inferencePool).Set(v)
 }
 
+// RecordResume increments resumes_total and adds recoveredTokens (when > 0)
+// to resume_recovered_tokens_total under the given trigger reason.
+func RecordResume(reason string, recoveredTokens int64, queueID, queueName, poolName string) {
+	Resumes.WithLabelValues(queueID, queueName, poolName, reason).Inc()
+	if recoveredTokens > 0 {
+		ResumeRecoveredTokens.WithLabelValues(queueID, queueName, poolName, reason).Add(float64(recoveredTokens))
+	}
+}
+
+// RecordResumeRecomputedPromptTokens adds prompt/prefill tokens re-evaluated on
+// a resumed continuation attempt.
+func RecordResumeRecomputedPromptTokens(promptTokens int64, queueID, queueName, poolName string) {
+	if promptTokens > 0 {
+		ResumeRecomputedPromptTokens.WithLabelValues(queueID, queueName, poolName).Add(float64(promptTokens))
+	}
+}
+
+// RecordCheckpointWrite records one checkpoint write attempt and, on success
+// (sizeBytes > 0), observes the serialized checkpoint payload size.
+func RecordCheckpointWrite(status string, sizeBytes int, queueID, queueName, poolName string) {
+	CheckpointWrites.WithLabelValues(queueID, queueName, poolName, status).Inc()
+	if sizeBytes > 0 {
+		CheckpointSizeBytes.WithLabelValues(queueID, queueName, poolName).Observe(float64(sizeBytes))
+	}
+}
+
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
@@ -552,6 +599,7 @@ func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Colle
 		DispatchBudget, PoolWorkerLimit, QueueConfigReloads, QueueConfigLastSuccess,
 		DrainLimitRPS, DrainLimitLeaseValid, DrainLimitValidUntil, GateDecisions,
 		GateMetricValue, GateMetricThreshold, GateMetricSourceAvailable,
+		Resumes, ResumeRecoveredTokens, ResumeRecomputedPromptTokens, CheckpointWrites, CheckpointSizeBytes,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

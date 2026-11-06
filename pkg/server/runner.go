@@ -139,6 +139,9 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 	if provider, ok := flow.(pipeline.CancellationCheckerProvider); ok {
 		drainCtx = asyncworker.WithCancellationChecker(drainCtx, provider.CancellationChecker())
 	}
+	if provider, ok := flow.(pipeline.CheckpointStoreProvider); ok {
+		drainCtx = asyncworker.WithCheckpointStore(drainCtx, provider.CheckpointStore())
+	}
 
 	dispatch := policy.MergeRequestChannels(flow.RequestChannels(), poolsMap)
 

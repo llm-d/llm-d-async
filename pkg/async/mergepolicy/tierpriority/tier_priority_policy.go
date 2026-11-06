@@ -473,6 +473,7 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 					HttpHeaders:     headers,
 					RequestURL:      requestURL,
 					WorkerPoolID:    workerPoolID,
+					Resume:          chMeta.Resume,
 				}
 				metrics.IncQueueDepth(ir.QueueID, ir.RequestQueueName, workerPoolID)
 				mergedChannel <- erm

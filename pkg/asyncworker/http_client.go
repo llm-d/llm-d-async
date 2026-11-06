@@ -3,16 +3,21 @@ package asyncworker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	asyncapi "github.com/llm-d/llm-d-async/api"
 )
 
-var _ asyncapi.InferenceClient = (*HTTPInferenceClient)(nil)
+var (
+	_ asyncapi.InferenceClient          = (*HTTPInferenceClient)(nil)
+	_ asyncapi.StreamingInferenceClient = (*HTTPInferenceClient)(nil)
+)
 
 // HTTPInferenceClient is the default HTTP implementation of InferenceClient.
 type HTTPInferenceClient struct {
@@ -49,6 +54,87 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	}
 	defer result.Body.Close() // nolint:errcheck
 
+	return readHTTPResponse(result)
+}
+
+// SendStreamRequest implements StreamingInferenceClient for SSE-based inference requests.
+// Non-2xx responses are classified identically to SendRequest. On 2xx responses,
+// consume reads the response stream directly and returns the assembled JSON body.
+func (h *HTTPInferenceClient) SendStreamRequest(
+	ctx context.Context,
+	url string,
+	headers map[string]string,
+	payload []byte,
+	consume asyncapi.StreamConsumer,
+) (*asyncapi.InferenceResponse, error) {
+	request, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryInvalidReq,
+			Message:       "failed to create request",
+			RawError:      err,
+		}
+	}
+
+	for k, v := range headers {
+		request.Header.Set(k, v)
+	}
+	if request.Header.Get("Accept") == "" {
+		request.Header.Set("Accept", "text/event-stream")
+	}
+
+	result, err := h.client.Do(request)
+	if err != nil {
+		category := asyncapi.ErrCategoryServer
+		if ctx.Err() != nil {
+			category = asyncapi.ErrCategoryUnknown
+		}
+		return nil, &asyncapi.ClientError{
+			ErrorCategory: category,
+			Message:       "failed to send streaming request",
+			RawError:      err,
+		}
+	}
+	defer result.Body.Close() // nolint:errcheck
+
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		return readHTTPResponse(result)
+	}
+
+	droppedReason := result.Header.Get(asyncapi.DroppedReasonHeader)
+	retryAfter, _ := parseRetryAfter(result.Header.Get("Retry-After"))
+	respHeaders := make(map[string]string, len(result.Header))
+	for k, vs := range result.Header {
+		if len(vs) > 0 {
+			respHeaders[strings.ToLower(k)] = vs[0]
+		}
+	}
+
+	assembled, err := consume(result.StatusCode, respHeaders, result.Body)
+	resp := &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: assembled}
+	if err != nil {
+		var infErr asyncapi.InferenceError
+		if errors.As(err, &infErr) {
+			return resp, err
+		}
+		category := asyncapi.ErrCategoryServer
+		if ctx.Err() != nil {
+			category = asyncapi.ErrCategoryUnknown
+		}
+		return resp, &asyncapi.ClientError{
+			ErrorCategory: category,
+			Message:       "failed to consume streaming response",
+			RawError:      err,
+			RetryAfter:    retryAfter,
+			StatusCode:    result.StatusCode,
+			DroppedReason: droppedReason,
+		}
+	}
+
+	return resp, nil
+}
+
+func readHTTPResponse(result *http.Response) (*asyncapi.InferenceResponse, error) {
 	// Read the rejection context once: the headers are available on every path
 	// below, including the one where the body read fails.
 	droppedReason := result.Header.Get(asyncapi.DroppedReasonHeader)
