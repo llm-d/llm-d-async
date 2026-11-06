@@ -22,13 +22,31 @@ func NewQuotaStore(rdb redis.UniversalClient, slotTTL time.Duration) *QuotaStore
 	return &QuotaStore{rdb: rdb, slotTTL: slotTTL}
 }
 
+// quotaCallGuardTTL outlasts the retries of one script call, which finish
+// within a minute under the go-redis default timeouts. It does not follow
+// slotTTL or how long a slot is held, so guards number about 10 minutes of
+// calls.
+const quotaCallGuardTTL = 10 * time.Minute
+
+// quotaCallGuardKey marks that the call holding token has changed the counter
+// at key. go-redis retries a command whose reply was lost, so a counter script
+// can run twice for one call; the guard keeps the retry from counting again.
+// The hash tag keeps it in the counter's slot on a cluster client.
+func quotaCallGuardKey(key, token string) string {
+	return fmt.Sprintf("quota-call:%s:%s", slotKey(key, true), token)
+}
+
 func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (func(), bool, error) {
 	// Use Lua script for atomic check and increment
 	script := `
+		if redis.call("EXISTS", KEYS[2]) == 1 then
+			return 1
+		end
 		local current = redis.call("GET", KEYS[1])
 		if current and tonumber(current) >= tonumber(ARGV[1]) then
 			return 0
 		end
+		redis.call("SET", KEYS[2], "1", "PX", ARGV[3])
 		redis.call("INCR", KEYS[1])
 		-- Refresh the TTL on every acquire so the counter cannot expire while
 		-- requests are still in flight (#311 sibling). The key then expires only
@@ -42,7 +60,12 @@ func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (fu
 		ttl = 300
 	}
 
-	res, err := s.rdb.Eval(ctx, script, []string{key}, limit, ttl).Int64()
+	token, err := newClaimToken()
+	if err != nil {
+		return nil, false, fmt.Errorf("acquire concurrency quota: %w", err)
+	}
+	keys := []string{key, quotaCallGuardKey(key, token)}
+	res, err := s.rdb.Eval(ctx, script, keys, limit, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
 	if err != nil {
 		return nil, false, fmt.Errorf("acquire concurrency quota: %w", err)
 	}
@@ -76,6 +99,9 @@ func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (fu
 func (s *QuotaStore) releaseSlot(ctx context.Context, key string, ttl int) (int64, error) {
 	releaseScript := `
 		local current = redis.call("GET", KEYS[1])
+		if not redis.call("SET", KEYS[2], "1", "NX", "PX", ARGV[2]) then
+			return tonumber(current or "0")
+		end
 		if not current or tonumber(current) <= 0 then
 			return -1
 		end
@@ -86,7 +112,12 @@ func (s *QuotaStore) releaseSlot(ctx context.Context, key string, ttl int) (int6
 		end
 		return remaining
 	`
-	res, err := s.rdb.Eval(ctx, releaseScript, []string{key}, ttl).Int64()
+	token, err := newClaimToken()
+	if err != nil {
+		return 0, fmt.Errorf("release concurrency quota: %w", err)
+	}
+	keys := []string{key, quotaCallGuardKey(key, token)}
+	res, err := s.rdb.Eval(ctx, releaseScript, keys, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return 0, fmt.Errorf("release concurrency quota: %w", err)
 	}
