@@ -1,0 +1,1014 @@
+/*
+Copyright 2026 The llm-d Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package continuation
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"strings"
+	"testing"
+)
+
+// trickleReader splits reads into small chunks to exercise SSEReader across
+// arbitrary packet/chunk boundaries.
+type trickleReader struct {
+	data []byte
+	pos  int
+	step int
+}
+
+func (tr *trickleReader) Read(p []byte) (int, error) {
+	if tr.pos >= len(tr.data) {
+		return 0, io.EOF
+	}
+	n := tr.step
+	if n <= 0 || n > len(p) {
+		n = len(p)
+	}
+	if rem := len(tr.data) - tr.pos; rem < n {
+		n = rem
+	}
+	copy(p, tr.data[tr.pos:tr.pos+n])
+	tr.pos += n
+	return n, nil
+}
+
+type unexpectedEOFReader struct {
+	data []byte
+	pos  int
+}
+
+func (r *unexpectedEOFReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+func TestDetectEndpoint(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Endpoint
+		ok   bool
+	}{
+		{"http://epp:80/v1/completions", EndpointCompletions, true},
+		{"/v1/chat/completions?foo=1", EndpointChatCompletions, true},
+		{"https://host/prefix/v1/responses/", EndpointResponses, true},
+		{"/v1/embeddings", "", false},
+		{"/v1/audio/transcriptions", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := DetectEndpoint(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("DetectEndpoint(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestGuardsAndEligibility(t *testing.T) {
+	if err := CheckEligibility(EndpointChatCompletions, []byte(`{"model":"m","messages":[],"n":2}`), Options{}); !errors.Is(err, ErrMultipleChoices) {
+		t.Fatalf("expected ErrMultipleChoices for n=2, got %v", err)
+	}
+	if err := CheckEligibility(EndpointCompletions, []byte(`{"model":"m","prompt":"hi","best_of":2}`), Options{}); !errors.Is(err, ErrMultipleChoices) {
+		t.Fatalf("expected ErrMultipleChoices for best_of=2, got %v", err)
+	}
+	if err := CheckEligibility(EndpointCompletions, []byte(`{"model":"m","prompt":["hello","world"]}`), Options{}); !errors.Is(err, ErrMultipleChoices) {
+		t.Fatalf("expected ErrMultipleChoices for string-array prompt, got %v", err)
+	}
+	if err := CheckEligibility(EndpointCompletions, []byte(`{"model":"m","prompt":[101,102]}`), Options{TokenExact: false}); !errors.Is(err, ErrMissingTokenIDs) {
+		t.Fatalf("expected ErrMissingTokenIDs for token-id prompt when TokenExact=false, got %v", err)
+	}
+	if err := CheckEligibility(EndpointCompletions, []byte(`{"model":"m","prompt":[101,102]}`), Options{TokenExact: true}); err != nil {
+		t.Fatalf("expected token-id prompt to be eligible when TokenExact=true, got %v", err)
+	}
+	if err := CheckEligibility(EndpointCompletions, []byte(`{"model":"m"}`), Options{}); !errors.Is(err, ErrInvalidRequestJSON) {
+		t.Fatalf("expected ErrInvalidRequestJSON for missing prompt, got %v", err)
+	}
+	if err := CheckEligibility(EndpointChatCompletions, []byte(`{"model":"m"}`), Options{}); !errors.Is(err, ErrInvalidRequestJSON) {
+		t.Fatalf("expected ErrInvalidRequestJSON for missing messages, got %v", err)
+	}
+	if err := CheckEligibility(EndpointResponses, []byte(`{"model":"m"}`), Options{}); !errors.Is(err, ErrInvalidRequestJSON) {
+		t.Fatalf("expected ErrInvalidRequestJSON for missing input, got %v", err)
+	}
+	if err := CheckEligibility(Endpoint("/v1/embeddings"), []byte(`{}`), Options{}); !errors.Is(err, ErrUnsupportedEndpoint) {
+		t.Fatalf("expected ErrUnsupportedEndpoint, got %v", err)
+	}
+	if err := CheckEligibility(EndpointCompletions, []byte(`not-json`), Options{}); !errors.Is(err, ErrInvalidRequestJSON) {
+		t.Fatalf("expected ErrInvalidRequestJSON, got %v", err)
+	}
+}
+
+func TestCompletionsMultiResumeAndAssemble(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","prompt":"Count: ","max_tokens":10,"temperature":0}`)
+
+	prep, err := PrepareStreamRequest(EndpointCompletions, origReq, Options{})
+	if err != nil {
+		t.Fatalf("PrepareStreamRequest: %v", err)
+	}
+	var prepDoc struct {
+		Stream        bool            `json:"stream"`
+		StreamOptions map[string]bool `json:"stream_options"`
+	}
+	if err := json.Unmarshal(prep, &prepDoc); err != nil {
+		t.Fatalf("unmarshal prep: %v", err)
+	}
+	if !prepDoc.Stream {
+		t.Fatalf("expected stream=true")
+	}
+	if !prepDoc.StreamOptions["include_usage"] || !prepDoc.StreamOptions["continuous_usage_stats"] {
+		t.Fatalf("expected include_usage=true and continuous_usage_stats=true, got %+v", prepDoc.StreamOptions)
+	}
+
+	// Attempt 1: interrupted before [DONE] after 2 chunks.
+	sse1 := ": keepalive\n\n" +
+		`data: {"id":"cmpl-first","created":1700,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"text":"1, ","finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"cmpl-first","created":1700,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"text":"2, ","finish_reason":null}]}` + "\n\n"
+
+	acc1 := NewAccumulator(EndpointCompletions, nil, Options{})
+	err = acc1.ConsumeStream(&trickleReader{data: []byte(sse1), step: 7}, nil)
+	if !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream, got %v", err)
+	}
+	snap1 := acc1.CheckpointSnapshot()
+	if snap1.Text != "1, 2, " || snap1.ResponseID != "cmpl-first" || snap1.Usage.GeneratedTokens != 2 {
+		t.Fatalf("unexpected snap1: %+v", snap1)
+	}
+
+	// Round-trip checkpoint through JSON as Redis would.
+	rawSnap, err := json.Marshal(snap1)
+	if err != nil {
+		t.Fatalf("marshal snap1: %v", err)
+	}
+	var loadedSnap State
+	if err := json.Unmarshal(rawSnap, &loadedSnap); err != nil {
+		t.Fatalf("unmarshal snap1: %v", err)
+	}
+
+	contReq, exhausted, err := BuildContinuationRequest(origReq, &loadedSnap, Options{})
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: exhausted=%v err=%v", exhausted, err)
+	}
+	var contDoc map[string]any
+	if err := json.Unmarshal(contReq, &contDoc); err != nil {
+		t.Fatalf("unmarshal contReq: %v", err)
+	}
+	if contDoc["prompt"] != "Count: 1, 2, " {
+		t.Fatalf("expected continued prompt, got %v", contDoc["prompt"])
+	}
+	if int(contDoc["max_tokens"].(float64)) != 8 {
+		t.Fatalf("expected reduced max_tokens=8, got %v", contDoc["max_tokens"])
+	}
+
+	// Attempt 2: completes with a different upstream id and trailing usage chunk.
+	sse2 := `data: {"id":"cmpl-second","created":1701,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"text":"3.","finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"id":"cmpl-second","created":1701,"model":"Qwen/Qwen3-8B","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	acc2 := NewAccumulator(EndpointCompletions, &loadedSnap, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(sse2), nil); err != nil {
+		t.Fatalf("acc2 ConsumeStream: %v", err)
+	}
+	final := acc2.FinalState()
+	// Attempt 1 didn't get a usage chunk; OriginalPromptTokens inferred from 9 - 2 = 7 unless overridden.
+	final.Usage.OriginalPromptTokens = 5
+
+	assembled, err := AssembleResponse(final)
+	if err != nil {
+		t.Fatalf("AssembleResponse: %v", err)
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		Choices []struct {
+			Text         string `json:"text"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(assembled, &resp); err != nil {
+		t.Fatalf("unmarshal assembled: %v", err)
+	}
+	if resp.ID != "cmpl-first" {
+		t.Fatalf("expected preserved id cmpl-first, got %q", resp.ID)
+	}
+	if resp.Choices[0].Text != "1, 2, 3." || resp.Choices[0].FinishReason != "stop" {
+		t.Fatalf("unexpected choices: %+v", resp.Choices)
+	}
+	if resp.Usage.PromptTokens != 5 || resp.Usage.CompletionTokens != 4 || resp.Usage.TotalTokens != 9 {
+		t.Fatalf("unexpected usage: %+v", resp.Usage)
+	}
+	if final.Usage.RecomputedPromptTokens != 9 {
+		t.Fatalf("expected recomputed prompt tokens=9, got %d", final.Usage.RecomputedPromptTokens)
+	}
+}
+
+func TestCompletionsTokenIDPromptAndTokenExact(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","prompt":[101,102],"max_tokens":20}`)
+	opts := Options{TokenExact: true}
+
+	prep, err := PrepareStreamRequest(EndpointCompletions, origReq, opts)
+	if err != nil {
+		t.Fatalf("PrepareStreamRequest: %v", err)
+	}
+	if !bytes.Contains(prep, []byte(`"return_token_ids":true`)) {
+		t.Fatalf("expected return_token_ids:true in %s", prep)
+	}
+
+	sse1 := `data: {"id":"cmpl-tok","prompt_token_ids":[101,102],"choices":[{"index":0,"text":"Hi","token_ids":[201,202]}]}` + "\n\n"
+	acc1 := NewAccumulator(EndpointCompletions, nil, opts)
+	_ = acc1.ConsumeStream(strings.NewReader(sse1), nil)
+	snap := acc1.CheckpointSnapshot()
+
+	contReq, exhausted, err := BuildContinuationRequest(origReq, snap, opts)
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	var doc struct {
+		Prompt           []int `json:"prompt"`
+		KVTransferParams struct {
+			PromptTokenIDs []int `json:"prompt_token_ids"`
+		} `json:"kv_transfer_params"`
+	}
+	if err := json.Unmarshal(contReq, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := []int{101, 102, 201, 202}
+	if len(doc.Prompt) != 4 || doc.Prompt[3] != 202 {
+		t.Fatalf("prompt = %v, want %v", doc.Prompt, want)
+	}
+	if len(doc.KVTransferParams.PromptTokenIDs) != 4 {
+		t.Fatalf("kv prompt_token_ids = %v, want %v", doc.KVTransferParams.PromptTokenIDs, want)
+	}
+}
+
+func TestChatCompletionsReasoningMidThinkSplitAndDedup(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"What is 6*7?"}],"max_completion_tokens":50}`)
+
+	// Attempt 1 emits BOTH reasoning and reasoning_content (as vLLM does) and
+	// drops mid-reasoning before </think>.
+	sse1 := `data: {"id":"chatcmpl-r1","created":1800,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-r1","created":1800,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"delta":{"reasoning":"Let me ","reasoning_content":"Let me "}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-r1","created":1800,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"delta":{"reasoning":"compute 6*7. ","reasoning_content":"compute 6*7. "}}]}` + "\n\n"
+
+	acc1 := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	if err := acc1.ConsumeStream(strings.NewReader(sse1), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream, got %v", err)
+	}
+	snap1 := acc1.CheckpointSnapshot()
+	if snap1.Reasoning != "Let me compute 6*7. " {
+		t.Fatalf("reasoning was duplicated or mangled: %q", snap1.Reasoning)
+	}
+	if !snap1.InReasoning {
+		t.Fatalf("expected InReasoning=true")
+	}
+
+	contReq, exhausted, err := BuildContinuationRequest(origReq, snap1, Options{})
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	var contDoc struct {
+		ContinueFinalMessage bool             `json:"continue_final_message"`
+		AddGenerationPrompt  bool             `json:"add_generation_prompt"`
+		MaxCompletionTokens  int              `json:"max_completion_tokens"`
+		Messages             []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(contReq, &contDoc); err != nil {
+		t.Fatalf("unmarshal contReq: %v", err)
+	}
+	if !contDoc.ContinueFinalMessage || contDoc.AddGenerationPrompt {
+		t.Fatalf("expected continue_final_message=true, add_generation_prompt=false: %+v", contDoc)
+	}
+	lastMsg := contDoc.Messages[len(contDoc.Messages)-1]
+	if lastMsg["role"] != "assistant" || lastMsg["content"] != "" || lastMsg["reasoning"] != "Let me compute 6*7. " {
+		t.Fatalf("unexpected continuation assistant msg: %+v", lastMsg)
+	}
+
+	// Attempt 2: simulates vLLM's BaseThinkingReasoningParser emitting the
+	// remaining reasoning + "</think>\n" inside delta.content!
+	sse2 := `data: {"id":"chatcmpl-r2","created":1801,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-r2","created":1801,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"delta":{"content":"It is 42.</th"}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-r2","created":1801,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"delta":{"content":"ink>\nThe answer is 42."},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-r2","created":1801,"model":"Qwen/Qwen3-8B","choices":[],"usage":{"prompt_tokens":30,"completion_tokens":10,"total_tokens":40}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	acc2 := NewAccumulator(EndpointChatCompletions, snap1, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(sse2), nil); err != nil {
+		t.Fatalf("acc2 ConsumeStream: %v", err)
+	}
+
+	final := acc2.FinalState()
+	if final.Reasoning != "Let me compute 6*7. It is 42." {
+		t.Fatalf("expected recovered reasoning, got %q", final.Reasoning)
+	}
+	if final.Text != "The answer is 42." {
+		t.Fatalf("expected clean post-think content, got %q", final.Text)
+	}
+
+	assembled, err := AssembleResponse(final)
+	if err != nil {
+		t.Fatalf("AssembleResponse: %v", err)
+	}
+	if !bytes.Contains(assembled, []byte(`"chatcmpl-r1"`)) || !bytes.Contains(assembled, []byte(`"The answer is 42."`)) {
+		t.Fatalf("unexpected assembled chat response: %s", assembled)
+	}
+}
+
+func TestChatCompletionsMultipleInterruptionsMidReasoning(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"Solve 6*7"}],"max_completion_tokens":80}`)
+
+	// Attempt 1: interrupted mid-reasoning.
+	acc1 := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	_ = acc1.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-mr-1","choices":[{"index":0,"delta":{"reasoning":"Step 1. "}}]}`+"\n\n",
+	), nil)
+	snap1 := acc1.CheckpointSnapshot()
+
+	// Attempt 2: emits more reasoning inside delta.content AND a partial closing
+	// tag "</th", then gets interrupted AGAIN before "</think>"!
+	acc2 := NewAccumulator(EndpointChatCompletions, snap1, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-mr-2","choices":[{"index":0,"delta":{"content":"Step 2. "}}]}`+"\n\n"+
+			`data: {"id":"chat-mr-2","choices":[{"index":0,"delta":{"content":"Almost done.</th"}}]}`+"\n\n",
+	), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream on attempt 2, got %v", err)
+	}
+	snap2 := acc2.CheckpointSnapshot()
+	if snap2.Text != "" {
+		t.Fatalf("expected snap2.Text to remain empty mid-reasoning, got %q", snap2.Text)
+	}
+	if snap2.Reasoning != "Step 1. Step 2. Almost done." {
+		t.Fatalf("expected unclosed content reasoning folded into snap2.Reasoning (with partial tag stripped), got %q", snap2.Reasoning)
+	}
+	if !snap2.InReasoning {
+		t.Fatalf("expected snap2.InReasoning=true")
+	}
+
+	// Verify Attempt 3 continuation request carries reasoning in "reasoning" and "" in "content".
+	contReq3, exhausted, err := BuildContinuationRequest(origReq, snap2, Options{})
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	var contDoc struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(contReq3, &contDoc); err != nil {
+		t.Fatalf("unmarshal contReq3: %v", err)
+	}
+	lastMsg := contDoc.Messages[len(contDoc.Messages)-1]
+	if lastMsg["content"] != "" || lastMsg["reasoning"] != "Step 1. Step 2. Almost done." {
+		t.Fatalf("reasoning leaked into assistant content on attempt 3 request: %+v", lastMsg)
+	}
+
+	// Attempt 3: finishes thinking and emits final answer.
+	acc3 := NewAccumulator(EndpointChatCompletions, snap2, Options{})
+	if err := acc3.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-mr-3","choices":[{"index":0,"delta":{"content":" Done!</think>\n42"},"finish_reason":"stop"}]}`+"\n\n"+
+			"data: [DONE]\n\n",
+	), nil); err != nil {
+		t.Fatalf("acc3 ConsumeStream: %v", err)
+	}
+	final := acc3.FinalState()
+	if final.Reasoning != "Step 1. Step 2. Almost done. Done!" {
+		t.Fatalf("unexpected final.Reasoning: %q", final.Reasoning)
+	}
+	if final.Text != "42" {
+		t.Fatalf("unexpected final.Text: %q", final.Text)
+	}
+}
+
+func TestResponsesMultipleInterruptionsMidReasoning(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","input":"Explain gravity.","max_output_tokens":100}`)
+
+	// Attempt 1: interrupted inside reasoning item.
+	sse1 := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_mr","status":"in_progress"}}` + "\n\n" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress"}}` + "\n\n" +
+		"event: response.reasoning_text.delta\n" +
+		`data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_1","delta":"Part 1. "}` + "\n\n"
+
+	acc1 := NewAccumulator(EndpointResponses, nil, Options{})
+	_ = acc1.ConsumeStream(strings.NewReader(sse1), nil)
+	snap1 := acc1.CheckpointSnapshot()
+
+	// Attempt 2: server emits remaining reasoning in output_text.delta and drops
+	// AGAIN before </think>!
+	sse2 := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_mr_2","status":"in_progress"}}` + "\n\n" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_tmp","type":"message","role":"assistant","status":"in_progress"}}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_tmp","delta":"Part 2. </thi"}` + "\n\n"
+
+	acc2 := NewAccumulator(EndpointResponses, snap1, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(sse2), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream on attempt 2, got %v", err)
+	}
+	snap2 := acc2.CheckpointSnapshot()
+	if len(snap2.CompletedItems) != 0 {
+		t.Fatalf("expected 0 CompletedItems while still mid-reasoning, got %+v", snap2.CompletedItems)
+	}
+	if snap2.PartialItem == nil || snap2.PartialItem.Type != "reasoning" || snap2.PartialItem.Status != "incomplete" {
+		t.Fatalf("expected incomplete reasoning PartialItem on snap2, got %+v", snap2.PartialItem)
+	}
+	if snap2.PartialItem.Content[0].Text != "Part 1. Part 2. " || !snap2.InReasoning {
+		t.Fatalf("unexpected snap2 reasoning content: %+v (InReasoning=%v)", snap2.PartialItem.Content, snap2.InReasoning)
+	}
+
+	// Verify Attempt 3 continuation request still ends with incomplete reasoning item.
+	contReq3, exhausted, err := BuildContinuationRequest(origReq, snap2, Options{})
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	if bytes.Contains(contReq3, []byte(`"type":"message"`)) {
+		t.Fatalf("unclosed reasoning must not leak as a message item in continuation input: %s", contReq3)
+	}
+
+	// Attempt 3: emits </think> and final message.
+	sse3 := "event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_final","delta":"Part 3.</think>\nFinal gravity answer."}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_final","type":"message","role":"assistant","status":"completed"}}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_mr_3","status":"completed"}}` + "\n\n"
+
+	acc3 := NewAccumulator(EndpointResponses, snap2, Options{})
+	if err := acc3.ConsumeStream(strings.NewReader(sse3), nil); err != nil {
+		t.Fatalf("acc3 ConsumeStream: %v", err)
+	}
+	final := acc3.FinalState()
+	if len(final.CompletedItems) != 2 {
+		t.Fatalf("expected 2 completed items (reasoning + message), got %+v", final.CompletedItems)
+	}
+	if final.CompletedItems[0].Content[0].Text != "Part 1. Part 2. Part 3." {
+		t.Fatalf("unexpected reasoning text: %q", final.CompletedItems[0].Content[0].Text)
+	}
+	if final.CompletedItems[1].Content[0].Text != "Final gravity answer." {
+		t.Fatalf("unexpected message text: %q", final.CompletedItems[1].Content[0].Text)
+	}
+}
+
+func TestMidReasoningContinuationWhenTemplateClosesThinkInPrompt(t *testing.T) {
+	// Qwen3's Jinja chat template renders `<|im_start|>assistant\n<think>\n...\n</think>\n\n`
+	// when resuming with `continue_final_message=true` and `content=""` (token_exact=false).
+	// Attempt 2 therefore starts post-</think>, streams the final answer directly in
+	// delta.content / output_text.delta without emitting </think>, and finishes cleanly.
+	acc1 := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	_ = acc1.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-qwen3-1","choices":[{"index":0,"delta":{"reasoning":"Okay, 37 * 43..."}}]}`+"\n\n",
+	), nil)
+	snap1 := acc1.CheckpointSnapshot()
+
+	acc2 := NewAccumulator(EndpointChatCompletions, snap1, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-qwen3-2","choices":[{"index":0,"delta":{"content":"To compute 37 * 43: "}}]}`+"\n\n"+
+			`data: {"id":"chat-qwen3-2","choices":[{"index":0,"delta":{"content":"1591."},"finish_reason":"stop"}]}`+"\n\n"+
+			"data: [DONE]\n\n",
+	), nil); err != nil {
+		t.Fatalf("chat acc2 ConsumeStream: %v", err)
+	}
+	chatFinal := acc2.FinalState()
+	if chatFinal.Reasoning != "Okay, 37 * 43..." {
+		t.Fatalf("expected prior reasoning preserved unchanged, got %q", chatFinal.Reasoning)
+	}
+	if chatFinal.Text != "To compute 37 * 43: 1591." {
+		t.Fatalf("expected completed post-template answer in Text, got %q", chatFinal.Text)
+	}
+	if chatFinal.InReasoning || chatFinal.Usage.ReasoningTokens != 1 {
+		t.Fatalf("expected InReasoning=false and ReasoningTokens=1, got InReasoning=%v Usage=%+v",
+			chatFinal.InReasoning, chatFinal.Usage)
+	}
+
+	// Same scenario on /v1/responses: Attempt 1 interrupted mid-reasoning item,
+	// Attempt 2 emits message item directly without </think> and completes.
+	rAcc1 := NewAccumulator(EndpointResponses, nil, Options{})
+	_ = rAcc1.ConsumeStream(strings.NewReader(
+		"event: response.output_item.added\n"+
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_q1","type":"reasoning","status":"in_progress"}}`+"\n\n"+
+			"event: response.reasoning_text.delta\n"+
+			`data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_q1","delta":"Rayleigh note."}`+"\n\n",
+	), nil)
+	rSnap1 := rAcc1.CheckpointSnapshot()
+
+	rAcc2 := NewAccumulator(EndpointResponses, rSnap1, Options{})
+	if err := rAcc2.ConsumeStream(strings.NewReader(
+		"event: response.output_item.added\n"+
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_q2","type":"message","role":"assistant","status":"in_progress"}}`+"\n\n"+
+			"event: response.output_text.delta\n"+
+			`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_q2","delta":"Hello! Rayleigh scattering explains blue skies."}`+"\n\n"+
+			"event: response.output_item.done\n"+
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_q2","type":"message","role":"assistant","status":"completed"}}`+"\n\n"+
+			"event: response.completed\n"+
+			`data: {"type":"response.completed","response":{"id":"resp_q2","status":"completed"}}`+"\n\n",
+	), nil); err != nil {
+		t.Fatalf("responses rAcc2 ConsumeStream: %v", err)
+	}
+	rFinal := rAcc2.FinalState()
+	if len(rFinal.CompletedItems) != 2 || rFinal.CompletedItems[0].Type != "reasoning" || rFinal.CompletedItems[1].Type != "message" {
+		t.Fatalf("expected [reasoning, message] CompletedItems, got %+v", rFinal.CompletedItems)
+	}
+	if rFinal.CompletedItems[1].Content[0].Text != "Hello! Rayleigh scattering explains blue skies." {
+		t.Fatalf("unexpected message text: %q", rFinal.CompletedItems[1].Content[0].Text)
+	}
+}
+
+func TestSSEReaderDiscardsUnterminatedEventAtEOF(t *testing.T) {
+	// Stream has 1 complete event followed by an event cut mid-JSON at EOF (no \n\n).
+	cutMidJSON := `data: {"id":"cmpl-eof","choices":[{"index":0,"text":"Good "}]}` + "\n\n" +
+		`data: {"id":"cmpl-eof","choices":[{"index":0,"text":"cut-mid-json`
+
+	acc := NewAccumulator(EndpointCompletions, nil, Options{})
+	err := acc.ConsumeStream(strings.NewReader(cutMidJSON), nil)
+	if !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream (discarding half-received event), got %v", err)
+	}
+	snap := acc.CheckpointSnapshot()
+	if snap.Text != "Good " || snap.Usage.GeneratedTokens != 1 {
+		t.Fatalf("expected only complete event to be accumulated, got %+v", snap)
+	}
+
+	// Single newline without blank line must also be discarded per SSE spec.
+	singleNewline := `data: {"id":"cmpl-eof","choices":[{"index":0,"text":"First"}]}` + "\n\n" +
+		`data: {"id":"cmpl-eof","choices":[{"index":0,"text":"Unterminated"}]}` + "\n"
+
+	acc2 := NewAccumulator(EndpointCompletions, nil, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(singleNewline), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream on single-newline EOF, got %v", err)
+	}
+	if got := acc2.CheckpointSnapshot().Text; got != "First" {
+		t.Fatalf("expected unterminated single-newline event to be discarded, got %q", got)
+	}
+}
+
+func TestContinuousUsageStatsAndMultiTokenChunkBudgetReduction(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","prompt":"Count:","max_tokens":20}`)
+
+	// Simulate --stream-interval 4 where 2 SSE chunks carry 7 generated tokens
+	// reported via continuous_usage_stats before an interruption.
+	sse := `data: {"id":"cmpl-cu","choices":[{"index":0,"text":" 1 2 3 4"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}` + "\n\n" +
+		`data: {"id":"cmpl-cu","choices":[{"index":0,"text":" 5 6 7"}],"usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17}}` + "\n\n"
+
+	acc := NewAccumulator(EndpointCompletions, nil, Options{})
+	if err := acc.ConsumeStream(strings.NewReader(sse), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream, got %v", err)
+	}
+	snap := acc.CheckpointSnapshot()
+	if snap.Usage.GeneratedTokens != 7 || snap.Usage.OriginalPromptTokens != 10 {
+		t.Fatalf("expected exact 7 generated tokens and 10 prompt tokens from continuous usage, got %+v", snap.Usage)
+	}
+
+	contReq, exhausted, err := BuildContinuationRequest(origReq, snap, Options{})
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(contReq, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := int(doc["max_tokens"].(float64)); got != 13 {
+		t.Fatalf("expected max_tokens=13 (20 - 7 tokens, not 20 - 2 chunks), got %d", got)
+	}
+}
+
+func TestZeroCompletionTokensInInitialUsageDoesNotFreezeCount(t *testing.T) {
+	// Server emits {prompt_tokens: 50, completion_tokens: 0} on initial role
+	// chunk and plain deltas without usage thereafter.
+	sse := `data: {"id":"chat-u0","choices":[{"index":0,"delta":{"role":"assistant","content":""}}],"usage":{"prompt_tokens":50,"completion_tokens":0,"total_tokens":50}}` + "\n\n" +
+		`data: {"id":"chat-u0","choices":[{"index":0,"delta":{"content":"a"}}]}` + "\n\n" +
+		`data: {"id":"chat-u0","choices":[{"index":0,"delta":{"content":"b"}}]}` + "\n\n" +
+		`data: {"id":"chat-u0","choices":[{"index":0,"delta":{"content":"c"}}]}` + "\n\n"
+
+	acc := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	if err := acc.ConsumeStream(strings.NewReader(sse), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream, got %v", err)
+	}
+	if acc.AttemptDeltaTokens() != 3 {
+		t.Fatalf("expected AttemptDeltaTokens()=3 (not frozen at 0), got %d", acc.AttemptDeltaTokens())
+	}
+	snap := acc.CheckpointSnapshot()
+	if snap.Usage.OriginalPromptTokens != 50 || snap.Usage.GeneratedTokens != 3 {
+		t.Fatalf("unexpected usage: %+v", snap.Usage)
+	}
+
+	// Also verify partial usage followed by non-usage chunks continues advancing.
+	sseMixed := `data: {"id":"chat-u2","choices":[{"index":0,"delta":{"content":"hello world"}}],"usage":{"prompt_tokens":20,"completion_tokens":2,"total_tokens":22}}` + "\n\n" +
+		`data: {"id":"chat-u2","choices":[{"index":0,"delta":{"content":"!"}}]}` + "\n\n" +
+		`data: {"id":"chat-u2","choices":[{"index":0,"delta":{"content":"?"}}]}` + "\n\n"
+	accMixed := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	_ = accMixed.ConsumeStream(strings.NewReader(sseMixed), nil)
+	if accMixed.AttemptDeltaTokens() != 4 {
+		t.Fatalf("expected AttemptDeltaTokens()=4 (2 from usage + 2 subsequent deltas), got %d", accMixed.AttemptDeltaTokens())
+	}
+}
+
+func TestFinishReasonCompletesStreamWhenCutBeforeDone(t *testing.T) {
+	// 1. /v1/completions cut right after finish_reason="stop" (no [DONE]).
+	cmplSSE := `data: {"id":"cmpl-fin","choices":[{"index":0,"text":"Done.","finish_reason":"stop"}]}` + "\n\n"
+	acc1 := NewAccumulator(EndpointCompletions, nil, Options{})
+	if err := acc1.ConsumeStream(&unexpectedEOFReader{data: []byte(cmplSSE)}, nil); err != nil {
+		t.Fatalf("expected nil error when finish_reason=stop received before unexpected EOF, got %v", err)
+	}
+	st1 := acc1.FinalState()
+	if !st1.Completed || st1.FinishReason != "stop" || st1.Text != "Done." {
+		t.Fatalf("unexpected completed completions state: %+v", st1)
+	}
+
+	// 2. /v1/chat/completions tool_calls cut after finish_reason="tool_calls" before [DONE].
+	chatSSE := `data: {"id":"chat-fin","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"go\"}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"
+	acc2 := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(chatSSE), nil); err != nil {
+		t.Fatalf("expected nil error when finish_reason=tool_calls received before EOF, got %v", err)
+	}
+	st2 := acc2.FinalState()
+	if !st2.Completed || st2.FinishReason != "tool_calls" || len(st2.ToolCalls) != 1 || st2.ToolCalls[0].Function.Arguments != `{"q":"go"}` {
+		t.Fatalf("expected preserved completed tool call, got %+v", st2)
+	}
+}
+
+func TestChatPartialToolCallDroppedOnInterruption(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"Weather?"}]}`)
+	sse := `data: {"id":"chatcmpl-tc","choices":[{"index":0,"delta":{"reasoning":"Need weather tool."}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-tc","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"loc\":"}}]}}]}` + "\n\n"
+
+	acc := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	_ = acc.ConsumeStream(strings.NewReader(sse), nil)
+	snap := acc.CheckpointSnapshot()
+	if !snap.DroppedPartialToolCall || len(snap.ToolCalls) != 0 {
+		t.Fatalf("expected partial tool call to be dropped, got %+v", snap)
+	}
+	contReq, _, err := BuildContinuationRequest(origReq, snap, Options{})
+	if err != nil {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	if bytes.Contains(contReq, []byte("get_weather")) {
+		t.Fatalf("partial tool call must not appear in continuation request: %s", contReq)
+	}
+}
+
+func TestResponsesContinuationItemIDRotationAndReasoningSplit(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","input":"Explain gravity briefly.","max_output_tokens":100,"store":false}`)
+
+	// Attempt 1: starts reasoning item and interrupts mid-reasoning.
+	sse1 := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_orig","created_at":1900,"model":"Qwen/Qwen3-8B","status":"in_progress"}}` + "\n\n" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","content":[]}}` + "\n\n" +
+		"event: response.reasoning_text.delta\n" +
+		`data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_1","delta":"Mass curves "}` + "\n\n"
+
+	acc1 := NewAccumulator(EndpointResponses, nil, Options{})
+	if err := acc1.ConsumeStream(strings.NewReader(sse1), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream, got %v", err)
+	}
+	snap1 := acc1.CheckpointSnapshot()
+	if snap1.PartialItem == nil || snap1.PartialItem.Type != "reasoning" || snap1.PartialItem.Status != "incomplete" {
+		t.Fatalf("unexpected PartialItem: %+v", snap1.PartialItem)
+	}
+
+	contReq, exhausted, err := BuildContinuationRequest(origReq, snap1, Options{})
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	var contDoc struct {
+		Store           bool             `json:"store"`
+		MaxOutputTokens int              `json:"max_output_tokens"`
+		Input           []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(contReq, &contDoc); err != nil {
+		t.Fatalf("unmarshal contReq: %v", err)
+	}
+	if contDoc.Store != false || contDoc.MaxOutputTokens != 99 || len(contDoc.Input) != 2 {
+		t.Fatalf("unexpected normalized /v1/responses continuation: %+v", contDoc)
+	}
+	if contDoc.Input[0]["role"] != "user" || contDoc.Input[1]["type"] != "reasoning" || contDoc.Input[1]["status"] != "incomplete" {
+		t.Fatalf("unexpected input items: %+v", contDoc.Input)
+	}
+
+	// Attempt 2: simulates vLLM rotating item_id on message delta AND emitting
+	// remaining reasoning + </think> in output_text.delta!
+	sse2 := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_new","created_at":1901,"model":"Qwen/Qwen3-8B","status":"in_progress"}}` + "\n\n" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_stale","type":"message","role":"assistant","status":"in_progress","content":[]}}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_real","delta":"spacetime.</think>\nGravity is spacetime curvature."}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_real","type":"message","role":"assistant","status":"completed"}}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_new","status":"completed","usage":{"input_tokens":22,"output_tokens":12,"total_tokens":34}}}` + "\n\n"
+
+	acc2 := NewAccumulator(EndpointResponses, snap1, Options{})
+	if err := acc2.ConsumeStream(strings.NewReader(sse2), nil); err != nil {
+		t.Fatalf("acc2 ConsumeStream: %v", err)
+	}
+	final := acc2.FinalState()
+	final.Usage.OriginalPromptTokens = 10
+
+	assembled, err := AssembleResponse(final)
+	if err != nil {
+		t.Fatalf("AssembleResponse: %v", err)
+	}
+	var resp struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Output []struct {
+			ID      string                `json:"id"`
+			Type    string                `json:"type"`
+			Status  string                `json:"status"`
+			Content []ResponseContentPart `json:"content"`
+		} `json:"output"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(assembled, &resp); err != nil {
+		t.Fatalf("unmarshal assembled responses: %v", err)
+	}
+	if resp.ID != "resp_orig" || resp.Status != "completed" || len(resp.Output) != 2 {
+		t.Fatalf("unexpected assembled responses: %+v", resp)
+	}
+	if resp.Output[0].Type != "reasoning" || resp.Output[0].Content[0].Text != "Mass curves spacetime." {
+		t.Fatalf("unexpected reasoning output item: %+v", resp.Output[0])
+	}
+	if resp.Output[1].Type != "message" || resp.Output[1].ID != "msg_real" || resp.Output[1].Content[0].Text != "Gravity is spacetime curvature." {
+		t.Fatalf("unexpected message output item: %+v", resp.Output[1])
+	}
+	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 13 || resp.Usage.TotalTokens != 23 {
+		t.Fatalf("unexpected usage: %+v", resp.Usage)
+	}
+}
+
+func TestBudgetExhaustionAndMaxCheckpointCapAcrossAttempts(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","prompt":"Hi","max_tokens":3}`)
+	opts := Options{MaxCheckpointTokens: 2}
+
+	sse1 := `data: {"id":"cmpl-cap","choices":[{"index":0,"text":"A"}]}` + "\n\n" +
+		`data: {"id":"cmpl-cap","choices":[{"index":0,"text":"B"}]}` + "\n\n" +
+		`data: {"id":"cmpl-cap","choices":[{"index":0,"text":"C"}]}` + "\n\n"
+
+	acc1 := NewAccumulator(EndpointCompletions, nil, opts)
+	_ = acc1.ConsumeStream(strings.NewReader(sse1), nil)
+
+	// Attempt 1 CheckpointSnapshot caps at 2 tokens ("AB"), while live state saw 3 ("ABC").
+	snap1 := acc1.CheckpointSnapshot()
+	if !snap1.Capped || snap1.Text != "AB" || snap1.Usage.GeneratedTokens != 2 {
+		t.Fatalf("expected capped snapshot at 2 tokens ('AB'), got %+v", snap1)
+	}
+
+	// Attempt 2 resuming from capped snap1 MUST be able to advance the checkpoint
+	// by another MaxCheckpointTokens (2 -> 4 tokens, "ABCD") instead of staying
+	// frozen at snap1 ("AB")!
+	sse2 := `data: {"id":"cmpl-cap-2","choices":[{"index":0,"text":"C"}]}` + "\n\n" +
+		`data: {"id":"cmpl-cap-2","choices":[{"index":0,"text":"D"}]}` + "\n\n" +
+		`data: {"id":"cmpl-cap-2","choices":[{"index":0,"text":"E"}]}` + "\n\n"
+	acc2 := NewAccumulator(EndpointCompletions, snap1, opts)
+	_ = acc2.ConsumeStream(strings.NewReader(sse2), nil)
+	snap2 := acc2.CheckpointSnapshot()
+	if !snap2.Capped || snap2.Text != "ABCD" || snap2.Usage.GeneratedTokens != 4 {
+		t.Fatalf("expected attempt 2 checkpoint to advance to 4 tokens ('ABCD'), got %+v", snap2)
+	}
+
+	// Exhausted budget check when GeneratedTokens >= max_tokens (3 >= 3):
+	uncapped := acc1.FinalState()
+	_, exhausted, err := BuildContinuationRequest(origReq, uncapped, Options{})
+	if err != nil || !exhausted {
+		t.Fatalf("expected budgetExhausted=true, got exhausted=%v err=%v", exhausted, err)
+	}
+	MarkBudgetExhausted(uncapped)
+	assembled, err := AssembleResponse(uncapped)
+	if err != nil {
+		t.Fatalf("AssembleResponse: %v", err)
+	}
+	if !bytes.Contains(assembled, []byte(`"finish_reason":"length"`)) {
+		t.Fatalf("expected finish_reason=length: %s", assembled)
+	}
+}
+
+func TestResponsesCompletedReasoningBoundaryAndPartialFunctionCall(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","input":[{"role":"user","content":"Check weather"}],"max_output_tokens":60}`)
+
+	sse := "event: response.created\r\n" +
+		`data: {"type":"response.created","response":{"id":"resp_fc","status":"in_progress"}}` + "\r\n\r\n" +
+		"event: response.output_item.added\r\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_fc","type":"reasoning","status":"in_progress"}}` + "\r\n\r\n" +
+		"event: response.reasoning_text.delta\r\n" +
+		`data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_fc","delta":"Need tool."}` + "\r\n\r\n" +
+		"event: response.output_item.done\r\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_fc","type":"reasoning","status":"completed"}}` + "\r\n\r\n" +
+		"event: response.output_item.added\r\n" +
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"weather","status":"in_progress"}}` + "\r\n\r\n" +
+		"event: response.function_call_arguments.delta\r\n" +
+		`data: {"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_1","delta":"{\"city\":"}` + "\r\n\r\n"
+
+	acc := NewAccumulator(EndpointResponses, nil, Options{})
+	if err := acc.ConsumeStream(strings.NewReader(sse), nil); !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream, got %v", err)
+	}
+	snap := acc.CheckpointSnapshot()
+	if !snap.DroppedPartialToolCall || snap.PartialItem != nil || len(snap.CompletedItems) != 1 {
+		t.Fatalf("expected completed reasoning + dropped partial function_call: %+v", snap)
+	}
+
+	contReq, exhausted, err := BuildContinuationRequest(origReq, snap, Options{})
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	var doc struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(contReq, &doc); err != nil {
+		t.Fatalf("unmarshal contReq: %v", err)
+	}
+	// Expect [user, completed reasoning, trailing incomplete assistant message].
+	if len(doc.Input) != 3 {
+		t.Fatalf("expected 3 input items so last item is incomplete, got %d: %+v", len(doc.Input), doc.Input)
+	}
+	if doc.Input[1]["status"] != "completed" || doc.Input[2]["type"] != "message" || doc.Input[2]["status"] != "incomplete" {
+		t.Fatalf("unexpected continuation input items: %+v", doc.Input)
+	}
+}
+
+func TestThreeAttemptChainAndStreamError(t *testing.T) {
+	origReq := []byte(`{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"Spell ABC"}],"max_tokens":20}`)
+	opts := Options{TokenExact: true}
+
+	// Attempt 1 -> "A"
+	acc1 := NewAccumulator(EndpointChatCompletions, nil, opts)
+	_ = acc1.ConsumeStream(strings.NewReader(`data: {"id":"chat-3x","prompt_token_ids":[1,2],"choices":[{"index":0,"delta":{"content":"A"},"token_ids":[10]}]}`+"\n\n"), nil)
+	s1 := acc1.CheckpointSnapshot()
+
+	// Attempt 2 -> mid-stream error after "B"
+	acc2 := NewAccumulator(EndpointChatCompletions, s1, opts)
+	err := acc2.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-3x-2","choices":[{"index":0,"delta":{"content":"B"},"token_ids":[11]}]}`+"\n\n"+
+			`data: {"error":{"message":"cuda error","type":"server_error"}}`+"\n\n",
+	), nil)
+	if !errors.Is(err, ErrStreamError) {
+		t.Fatalf("expected ErrStreamError, got %v", err)
+	}
+	s2 := acc2.CheckpointSnapshot()
+	if s2.Text != "AB" || len(s2.GeneratedTokenIDs) != 2 {
+		t.Fatalf("unexpected s2: %+v", s2)
+	}
+
+	contReq3, exhausted, err := BuildContinuationRequest(origReq, s2, opts)
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	if !bytes.Contains(contReq3, []byte(`[1,2,10,11]`)) {
+		t.Fatalf("expected kv_transfer_params.prompt_token_ids [1,2,10,11] in %s", contReq3)
+	}
+
+	// Attempt 3 -> "C" + [DONE]
+	acc3 := NewAccumulator(EndpointChatCompletions, s2, opts)
+	if err := acc3.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-3x-3","choices":[{"index":0,"delta":{"content":"C"},"token_ids":[12],"finish_reason":"stop"}]}`+"\n\n"+
+			"data: [DONE]\n\n",
+	), nil); err != nil {
+		t.Fatalf("acc3: %v", err)
+	}
+	final := acc3.FinalState()
+	if final.ResponseID != "chat-3x" || final.Text != "ABC" || final.Attempt != 3 {
+		t.Fatalf("unexpected final state: %+v", final)
+	}
+}
+
+func TestUninterruptedStreamPastCheckpointCapReturnsFullOutput(t *testing.T) {
+	sse := `data: {"id":"cmpl-full","choices":[{"index":0,"text":"Hello "}]}` + "\n\n" +
+		`data: {"id":"cmpl-full","choices":[{"index":0,"text":"brave "}]}` + "\n\n" +
+		`data: {"id":"cmpl-full","choices":[{"index":0,"text":"world!","finish_reason":"stop"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	acc := NewAccumulator(EndpointCompletions, nil, Options{MaxCheckpointTokens: 1})
+	if err := acc.ConsumeStream(strings.NewReader(sse), nil); err != nil {
+		t.Fatalf("ConsumeStream: %v", err)
+	}
+	if snap := acc.CheckpointSnapshot(); snap.Text != "Hello " || !snap.Capped {
+		t.Fatalf("expected checkpoint capped at 1 chunk, got %+v", snap)
+	}
+	assembled, err := AssembleResponse(acc.FinalState())
+	if err != nil {
+		t.Fatalf("AssembleResponse: %v", err)
+	}
+	if !bytes.Contains(assembled, []byte(`"Hello brave world!"`)) {
+		t.Fatalf("expected full uninterrupted text in final response, got %s", assembled)
+	}
+}
+
+func TestVLLMQuirks_ChoicePromptTokenIDsAndUsageRecovery(t *testing.T) {
+	// 1. /v1/completions in vLLM emits prompt_token_ids inside choices[0].
+	opts := Options{TokenExact: true}
+	acc1 := NewAccumulator(EndpointCompletions, nil, opts)
+	_ = acc1.ConsumeStream(strings.NewReader(
+		`data: {"id":"cmpl-vllm","model":"Qwen/Qwen3-8B","choices":[{"index":0,"text":" 3,","prompt_token_ids":[101,102,103],"token_ids":[201,202]}]}`+"\n\n",
+	), nil)
+	snap := acc1.CheckpointSnapshot()
+	if len(snap.PromptTokenIDs) != 3 || snap.Usage.OriginalPromptTokens != 3 {
+		t.Fatalf("expected choice-level prompt_token_ids [101,102,103] and OriginalPromptTokens=3, got %+v", snap)
+	}
+	contReq, exhausted, err := BuildContinuationRequest([]byte(`{"model":"Qwen/Qwen3-8B","prompt":"1, 2,","max_tokens":20}`), snap, opts)
+	if err != nil || exhausted {
+		t.Fatalf("BuildContinuationRequest: %v", err)
+	}
+	if !bytes.Contains(contReq, []byte(`"prompt_token_ids":[101,102,103,201,202]`)) {
+		t.Fatalf("expected kv_transfer_params.prompt_token_ids in %s", contReq)
+	}
+
+	// 2. Post-reasoning continuation in text mode where Attempt 1 aborts before
+	// final usage (3 reasoning tokens + 2 content tokens = 5 generated, with
+	// continuous_usage_stats lacking completion_tokens_details) and Attempt 2
+	// emits only content while vLLM misreports reasoning_tokens=3 in final usage.
+	chatAcc1 := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	_ = chatAcc1.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-qwen","model":"Qwen/Qwen3-8B","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"t1 "}}],"usage":{"prompt_tokens":27,"completion_tokens":1}}`+"\n\n"+
+			`data: {"id":"chat-qwen","choices":[{"index":0,"delta":{"reasoning":"t2 "}}],"usage":{"prompt_tokens":27,"completion_tokens":2}}`+"\n\n"+
+			`data: {"id":"chat-qwen","choices":[{"index":0,"delta":{"reasoning":"t3"}}],"usage":{"prompt_tokens":27,"completion_tokens":3}}`+"\n\n"+
+			`data: {"id":"chat-qwen","choices":[{"index":0,"delta":{"content":"Hello "}}],"usage":{"prompt_tokens":27,"completion_tokens":4}}`+"\n\n"+
+			`data: {"id":"chat-qwen","choices":[{"index":0,"delta":{"content":"world"}}],"usage":{"prompt_tokens":27,"completion_tokens":5}}`+"\n\n",
+	), nil)
+	chatSnap := chatAcc1.CheckpointSnapshot()
+	if chatSnap.Usage.GeneratedTokens != 5 || chatSnap.Usage.ReasoningTokens != 3 {
+		t.Fatalf("expected 5 generated and 3 reasoning tokens on interrupted attempt 1, got %+v", chatSnap.Usage)
+	}
+
+	chatAcc2 := NewAccumulator(EndpointChatCompletions, chatSnap, Options{})
+	if err := chatAcc2.ConsumeStream(strings.NewReader(
+		`data: {"id":"chat-qwen-2","choices":[{"index":0,"delta":{"content":"!"}}]}`+"\n\n"+
+			`data: {"id":"chat-qwen-2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n"+
+			`data: {"id":"chat-qwen-2","choices":[],"usage":{"prompt_tokens":32,"completion_tokens":4,"total_tokens":36,"completion_tokens_details":{"reasoning_tokens":3}}}`+"\n\n"+
+			"data: [DONE]\n\n",
+	), nil); err != nil {
+		t.Fatalf("chatAcc2: %v", err)
+	}
+	final := chatAcc2.FinalState()
+	// OriginalPromptTokens = 27; ReasoningTokens stays 3 (Attempt 2 emitted 0 reasoning deltas).
+	if final.Usage.OriginalPromptTokens != 27 || final.Usage.GeneratedTokens != 9 || final.Usage.ReasoningTokens != 3 {
+		t.Fatalf("unexpected final usage: %+v", final.Usage)
+	}
+}
+
+func TestLargeStreamAccumulation(t *testing.T) {
+	const chunks = 2000
+	var sb strings.Builder
+	for i := range chunks {
+		if i < chunks/2 {
+			sb.WriteString(`data: {"id":"chat-big","choices":[{"index":0,"delta":{"reasoning":"r"}}]}` + "\n\n")
+		} else {
+			sb.WriteString(`data: {"id":"chat-big","choices":[{"index":0,"delta":{"content":"c"}}]}` + "\n\n")
+		}
+	}
+	sb.WriteString(`data: {"id":"chat-big","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n")
+	sb.WriteString("data: [DONE]\n\n")
+
+	acc := NewAccumulator(EndpointChatCompletions, nil, Options{})
+	if err := acc.ConsumeStream(strings.NewReader(sb.String()), nil); err != nil {
+		t.Fatalf("ConsumeStream: %v", err)
+	}
+	st := acc.FinalState()
+	if len(st.Reasoning) != chunks/2 || len(st.Text) != chunks/2 {
+		t.Fatalf("unexpected lengths: reasoning=%d text=%d", len(st.Reasoning), len(st.Text))
+	}
+}
+
+func BenchmarkAccumulatorChatStream(b *testing.B) {
+	var sb strings.Builder
+	for range 1000 {
+		sb.WriteString(`data: {"id":"chat-bench","choices":[{"index":0,"delta":{"content":"token "}}],"usage":{"prompt_tokens":16,"completion_tokens":1}}` + "\n\n")
+	}
+	sb.WriteString(`data: {"id":"chat-bench","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n")
+	sb.WriteString("data: [DONE]\n\n")
+	payload := []byte(sb.String())
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		acc := NewAccumulator(EndpointChatCompletions, nil, Options{})
+		if err := acc.ConsumeStream(bytes.NewReader(payload), nil); err != nil {
+			b.Fatal(err)
+		}
+		_ = acc.FinalState()
+	}
+}
