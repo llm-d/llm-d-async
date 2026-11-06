@@ -129,8 +129,13 @@ func (s *QuotaStore) Admit(ctx context.Context, key string, limit int, window ti
 	now := time.Now().UnixNano()
 	min := now - window.Nanoseconds()
 
+	// A go-redis retry resends the same now, so a member that is already
+	// present means an earlier attempt of this call was admitted.
 	script := `
 		redis.call("ZREMRANGEBYSCORE", KEYS[1], 0, ARGV[1])
+		if redis.call("ZSCORE", KEYS[1], ARGV[3]) then
+			return 1
+		end
 		local count = redis.call("ZCARD", KEYS[1])
 		if count >= tonumber(ARGV[2]) then
 			return 0

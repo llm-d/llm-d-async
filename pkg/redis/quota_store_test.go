@@ -236,6 +236,25 @@ func TestQuotaStoreReleaseRetryAfterLostReplyReturnsOneSlot(t *testing.T) {
 	})
 }
 
+func TestQuotaStoreAdmitRetryAfterLostReplyAtTheLastTokenIsAdmitted(t *testing.T) {
+	forEachClientLosingAReply(t, func(t *testing.T, store *QuotaStore, mr *miniredis.Miniredis, armed *atomic.Bool) {
+		ctx := context.Background()
+		armed.Store(true)
+		ok, err := store.Admit(ctx, "rate:k", 1, time.Minute)
+		require.NoError(t, err)
+		require.False(t, armed.Load(), "the admit reply was dropped")
+		require.True(t, ok, "the first attempt spent the token, so the retry must report it")
+
+		members, err := mr.ZMembers("rate:k")
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+
+		ok, err = store.Admit(ctx, "rate:k", 1, time.Minute)
+		require.NoError(t, err)
+		require.False(t, ok, "a later call is still limited")
+	})
+}
+
 func TestQuotaCallGuardKeySharesTheCounterSlot(t *testing.T) {
 	for _, key := range []string{"quota:userid:u1", "{tenant}quota:userid:u1", "quota:{"} {
 		require.True(t, sameHashSlot(key, quotaCallGuardKey(key, "token")), key)
