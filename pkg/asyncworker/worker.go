@@ -210,12 +210,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 
 						if verdict.Action == pipeline.ActionDrop {
 							metrics.RecordGateDecision(metrics.ReasonDropped, "", "", msg.WorkerPoolID)
-							var resultMsg asyncapi.ResultMessage
-							if verdict.Result != nil {
-								resultMsg = *verdict.Result
-							} else {
-								resultMsg = asyncapi.NewGateDroppedResult(msg.PublicRequest, msg.InternalRouting)
-							}
+							resultMsg := asyncapi.NewDroppedResult(msg.PublicRequest, msg.InternalRouting, verdict.Result)
 							select {
 							case resultChannel <- resultMsg:
 							case <-requestCtx.Done():
