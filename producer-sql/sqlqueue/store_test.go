@@ -298,15 +298,12 @@ func TestOpenRunsAgainstANewerAdditiveSchema(t *testing.T) {
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	_, err = migrate.Run(ctx, db)
-	require.NoError(t, err)
-	latest, err := migrate.LatestVersion()
-	require.NoError(t, err)
+	require.NoError(t, migrate.Run(ctx, db))
 	_, err = db.ExecContext(ctx, `
 		ALTER TABLE async_requests ADD COLUMN note TEXT NOT NULL DEFAULT '';
 		ALTER TABLE async_results ADD COLUMN note TEXT NOT NULL DEFAULT ''`)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `INSERT INTO async_schema_migrations (version, name) VALUES ($1, 'add_note')`, latest+1)
+	_, err = db.ExecContext(ctx, `INSERT INTO async_schema_migrations (version, name) SELECT max(version) + 1, 'add_note' FROM async_schema_migrations`)
 	require.NoError(t, err)
 
 	s, err := Open(ctx, dsn)

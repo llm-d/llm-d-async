@@ -11,23 +11,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestLoad(t *testing.T) {
-	migrations, err := Load()
+	migrations, err := load()
 	require.NoError(t, err)
 	require.NotEmpty(t, migrations, "no migrations embedded")
 	for i, m := range migrations {
-		assert.Equal(t, i+1, m.Version)
-		assert.NotEmpty(t, strings.TrimSpace(m.SQL), "migration %04d_%s is empty", m.Version, m.Name)
+		assert.Equal(t, i+1, m.version)
+		assert.NotEmpty(t, strings.TrimSpace(m.sql), "migration %04d_%s is empty", m.version, m.name)
 	}
+}
 
-	latest, err := LatestVersion()
+func latestVersion(t *testing.T) int {
+	t.Helper()
+	migrations, err := load()
 	require.NoError(t, err)
-	assert.Equal(t, len(migrations), latest)
+	return len(migrations)
 }
 
 func TestFileNamePattern(t *testing.T) {
@@ -96,6 +101,27 @@ func appliedVersions(t *testing.T, db *sql.DB) []int {
 	return versions
 }
 
+type logLines struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logLines) get() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+func captureLogs(ctx context.Context) (context.Context, *logLines) {
+	l := &logLines{}
+	logger := funcr.New(func(_, args string) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.lines = append(l.lines, args)
+	}, funcr.Options{})
+	return logr.NewContext(ctx, logger), l
+}
+
 func tableExists(t *testing.T, db *sql.DB, table string) bool {
 	t.Helper()
 	var exists bool
@@ -110,11 +136,12 @@ func TestRun(t *testing.T) {
 		db := newTestDB(t)
 		require.ErrorIs(t, Check(ctx, db), ErrSchemaMissing)
 
-		applied, err := Run(ctx, db)
-		require.NoError(t, err)
-		latest, err := LatestVersion()
-		require.NoError(t, err)
-		assert.Len(t, applied, latest)
+		logCtx, logs := captureLogs(ctx)
+		require.NoError(t, Run(logCtx, db))
+		latest := latestVersion(t)
+		assert.Len(t, appliedVersions(t, db), latest)
+		require.Len(t, logs.get(), latest)
+		assert.Contains(t, logs.get()[0], `"msg"="applied sql transport schema migration" "version"=1 "name"="initial_schema"`)
 		for _, table := range []string{
 			"async_requests", "async_partitions", "async_dispatchers", "async_results",
 			"async_quota_keys", "async_quota_holders", "async_quota_slots", "async_quota_windows", "async_quota_admits",
@@ -126,30 +153,65 @@ func TestRun(t *testing.T) {
 
 	t.Run("second run is a no-op", func(t *testing.T) {
 		db := newTestDB(t)
-		_, err := Run(ctx, db)
+		require.NoError(t, Run(ctx, db))
+		before := appliedVersions(t, db)
+
+		logCtx, logs := captureLogs(ctx)
+		require.NoError(t, Run(logCtx, db))
+		assert.Empty(t, logs.get())
+		assert.Equal(t, before, appliedVersions(t, db))
+	})
+
+	t.Run("a current schema takes no lock", func(t *testing.T) {
+		db := newTestDB(t)
+		require.NoError(t, Run(ctx, db))
+		holder := holdLock(t, db)
+
+		quick, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		require.NoError(t, Run(quick, db))
+		require.NoError(t, Check(quick, db))
+		require.NoError(t, holder.Rollback())
+	})
+
+	t.Run("a newer database is left alone", func(t *testing.T) {
+		db := newTestDB(t)
+		require.NoError(t, Run(ctx, db))
+		_, err := db.Exec(insertVersion, 9999, "from_the_future")
 		require.NoError(t, err)
 		before := appliedVersions(t, db)
 
-		applied, err := Run(ctx, db)
-		require.NoError(t, err)
-		assert.Empty(t, applied)
+		logCtx, logs := captureLogs(ctx)
+		require.NoError(t, Run(logCtx, db))
 		assert.Equal(t, before, appliedVersions(t, db))
+		require.Len(t, logs.get(), 1)
+		assert.Contains(t, logs.get()[0], `"databaseVersion"=9999`)
+	})
+
+	t.Run("a failed migration rolls back completely", func(t *testing.T) {
+		db := newTestDB(t)
+		_, err := db.Exec(`CREATE TABLE async_schema (version TEXT NOT NULL); CREATE TABLE async_quota_admits (key TEXT NOT NULL)`)
+		require.NoError(t, err)
+
+		require.ErrorContains(t, Run(ctx, db), "apply migration 0001_initial_schema")
+		require.ErrorIs(t, Check(ctx, db), ErrSchemaMissing)
+		assert.True(t, tableExists(t, db, "async_schema"), "the legacy version table survives")
+		assert.False(t, tableExists(t, db, "async_requests"), "tables created before the failure are rolled back")
 	})
 
 	t.Run("adopts a schema created before migrations existed", func(t *testing.T) {
 		db := newTestDB(t)
-		migrations, err := Load()
+		migrations, err := load()
 		require.NoError(t, err)
 		_, err = db.Exec(`CREATE TABLE async_schema (version TEXT NOT NULL); INSERT INTO async_schema VALUES ('legacy')`)
 		require.NoError(t, err)
-		_, err = db.Exec(migrations[0].SQL)
+		_, err = db.Exec(migrations[0].sql)
 		require.NoError(t, err)
 		_, err = db.Exec(`INSERT INTO async_quota_keys (key) VALUES ('kept')`)
 		require.NoError(t, err)
 		require.ErrorIs(t, Check(ctx, db), ErrSchemaMissing)
 
-		_, err = Run(ctx, db)
-		require.NoError(t, err)
+		require.NoError(t, Run(ctx, db))
 		assert.Equal(t, 1, appliedVersions(t, db)[0])
 		require.NoError(t, Check(ctx, db))
 		assert.False(t, tableExists(t, db, "async_schema"), "the legacy version table is dropped")
@@ -160,22 +222,20 @@ func TestRun(t *testing.T) {
 
 	t.Run("result claims keep results written before the upgrade", func(t *testing.T) {
 		db := newTestDB(t)
-		migrations, err := Load()
+		migrations, err := load()
 		require.NoError(t, err)
 		require.Greater(t, len(migrations), 1)
-		_, err = db.Exec(migrations[0].SQL)
+		_, err = db.Exec(migrations[0].sql)
 		require.NoError(t, err)
 		_, err = db.Exec(createVersionTable)
 		require.NoError(t, err)
-		_, err = db.Exec(insertVersion, migrations[0].Version, migrations[0].Name)
+		_, err = db.Exec(insertVersion, migrations[0].version, migrations[0].name)
 		require.NoError(t, err)
 		_, err = db.Exec(`INSERT INTO async_results (route, id, request_token, payload, created_at) VALUES ('route', 'old', 't', '{}', 0)`)
 		require.NoError(t, err)
 
-		applied, err := Run(ctx, db)
-		require.NoError(t, err)
-		require.NotEmpty(t, applied)
-		assert.Equal(t, 2, applied[0].Version)
+		require.NoError(t, Run(ctx, db))
+		assert.Equal(t, 2, appliedVersions(t, db)[1])
 		var id string
 		require.NoError(t, db.QueryRow(`SELECT id FROM async_claim_results('route', 'owner', 60000, 10)`).Scan(&id))
 		assert.Equal(t, "old", id, "a result written under version 1 is claimable after the upgrade")
@@ -188,35 +248,20 @@ func TestRun(t *testing.T) {
 		db := newTestDB(t)
 		const runners = 8
 
+		logCtx, logs := captureLogs(ctx)
 		var wg sync.WaitGroup
-		results := make(chan int, runners)
 		errs := make(chan error, runners)
 		for range runners {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				applied, err := Run(ctx, db)
-				if err != nil {
-					errs <- err
-					return
-				}
-				results <- len(applied)
-			}()
+			wg.Go(func() { errs <- Run(logCtx, db) })
 		}
 		wg.Wait()
-		close(results)
 		close(errs)
 
 		for err := range errs {
-			t.Errorf("concurrent Run: %v", err)
+			assert.NoError(t, err, "concurrent Run")
 		}
-		total := 0
-		for n := range results {
-			total += n
-		}
-		latest, err := LatestVersion()
-		require.NoError(t, err)
-		assert.Equal(t, latest, total)
+		latest := latestVersion(t)
+		assert.Len(t, logs.get(), latest, "each migration is applied by one runner")
 		assert.Len(t, appliedVersions(t, db), latest)
 	})
 }
@@ -226,19 +271,58 @@ func TestCheck(t *testing.T) {
 
 	t.Run("behind", func(t *testing.T) {
 		db := newTestDB(t)
-		_, err := Run(ctx, db)
-		require.NoError(t, err)
-		_, err = db.Exec("DELETE FROM " + versionTable)
+		require.NoError(t, Run(ctx, db))
+		_, err := db.Exec("DELETE FROM " + versionTable)
 		require.NoError(t, err)
 		require.ErrorIs(t, Check(ctx, db), ErrSchemaBehind)
 	})
 
 	t.Run("ahead is accepted", func(t *testing.T) {
 		db := newTestDB(t)
-		_, err := Run(ctx, db)
-		require.NoError(t, err)
-		_, err = db.Exec(insertVersion, 9999, "from_the_future")
+		require.NoError(t, Run(ctx, db))
+		_, err := db.Exec(insertVersion, 9999, "from_the_future")
 		require.NoError(t, err)
 		require.NoError(t, Check(ctx, db))
 	})
+
+	t.Run("waits for a migration in progress", func(t *testing.T) {
+		db := newTestDB(t)
+		migrations, err := load()
+		require.NoError(t, err)
+		migrating := holdLock(t, db)
+		_, err = migrating.Exec(createVersionTable)
+		require.NoError(t, err)
+		_, err = migrating.Exec(migrations[0].sql)
+		require.NoError(t, err)
+		for _, m := range migrations {
+			_, err = migrating.Exec(insertVersion, m.version, m.name)
+			require.NoError(t, err)
+		}
+
+		checked := make(chan error, 1)
+		go func() { checked <- Check(ctx, db) }()
+		select {
+		case err := <-checked:
+			t.Fatalf("Check returned %v before the migration committed", err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		require.NoError(t, migrating.Commit())
+		select {
+		case err := <-checked:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Check did not return after the migration committed")
+		}
+	})
+}
+
+// holdLock takes the migration lock in a transaction the test ends.
+func holdLock(t *testing.T, db *sql.DB) *sql.Tx {
+	t.Helper()
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.Exec("SELECT pg_advisory_xact_lock($1)", lockKey)
+	require.NoError(t, err)
+	return tx
 }

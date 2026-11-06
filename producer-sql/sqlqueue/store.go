@@ -96,7 +96,7 @@ func Open(ctx context.Context, dsn string, opts ...OpenOption) (*Store, error) {
 		return nil, fmt.Errorf("sqlqueue: ping: %w", err)
 	}
 	if o.migrate {
-		_, err = migrate.Run(ctx, db)
+		err = migrate.Run(ctx, db)
 	} else {
 		err = migrate.Check(ctx, db)
 	}

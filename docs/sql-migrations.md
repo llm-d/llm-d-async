@@ -10,8 +10,10 @@ newer to have started against the database first.
 
 ## How the schema gets applied
 
-The processor opens its store with `sqlqueue.WithMigrate()`. A run takes a
-transaction-scoped advisory lock before it does anything else, creates
+The processor opens its store with `sqlqueue.WithMigrate()`. A run first
+reads the recorded version and returns at once if the schema is current, so a
+steady-state restart takes no lock. Otherwise it takes a transaction-scoped
+advisory lock, creates
 `async_schema_migrations` if needed, applies every migration newer than the
 recorded version, and commits. Concurrent runs (several replicas starting at
 once, or several pods in a rollout) queue on the lock; the first one applies
@@ -21,6 +23,11 @@ exits instead of starting.
 
 A database newer than a build expects is accepted, so a rollback after a
 migration works.
+
+`producer-sql` reads the version the same way. If the schema is missing or
+behind, it waits on the same lock in shared mode before reading again, so a
+producer that starts while a processor is migrating sees the committed result
+instead of failing.
 
 Upgrading a database created before migrations existed needs nothing special.
 Migration `0001` uses `IF NOT EXISTS` and `CREATE OR REPLACE`, so it adopts
