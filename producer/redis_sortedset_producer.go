@@ -45,10 +45,9 @@ const (
 // Standalone only: its keys span several cluster slots.
 // KEYS[5] is the enqueue guard (see enqueueGuardKey).
 var submitRequestScript = redis.NewScript(`
-if not redis.call("SET", KEYS[5], "1", "NX") then
+if not redis.call("SET", KEYS[5], "1", "NX", "PX", ARGV[7]) then
   return 0
 end
-redis.call("EXPIREAT", KEYS[5], ARGV[6])
 local seq = redis.call("INCR", KEYS[1])
 redis.call("EXPIREAT", KEYS[1], ARGV[3])
 redis.call("DEL", KEYS[2])
@@ -56,7 +55,7 @@ redis.call("SET", KEYS[3], ARGV[1], "PX", ARGV[2])
 local score = tonumber(ARGV[6]) + math.min(seq, 2097151) / 2097152
 redis.call("ZADD", KEYS[4], string.format("%.17g", score), ARGV[4] .. seq .. ARGV[5])
 if KEYS[6] then
-  redis.call("SET", KEYS[6], ARGV[7], "PX", ARGV[8])
+  redis.call("SET", KEYS[6], ARGV[8], "PX", ARGV[9])
 end
 return seq
 `)
@@ -64,12 +63,12 @@ return seq
 // enqueueRequestScript is the cluster-mode half of submitRequestScript: the
 // sequence counter, the enqueue guard and the queue share a slot, while the
 // per-request markers are written beforehand with single-key commands.
-// KEYS: seq, queue, guard. ARGV: seqExpireAt, jsonBefore, jsonAfter, deadline.
+// KEYS: seq, queue, guard. ARGV: seqExpireAt, jsonBefore, jsonAfter, deadline,
+// guardTTLMillis.
 var enqueueRequestScript = redis.NewScript(`
-if not redis.call("SET", KEYS[3], "1", "NX") then
+if not redis.call("SET", KEYS[3], "1", "NX", "PX", ARGV[5]) then
   return 0
 end
-redis.call("EXPIREAT", KEYS[3], ARGV[4])
 local seq = redis.call("INCR", KEYS[1])
 redis.call("EXPIREAT", KEYS[1], ARGV[1])
 local score = tonumber(ARGV[4]) + math.min(seq, 2097151) / 2097152
@@ -82,6 +81,12 @@ const (
 	enqueueSeqFieldJSON       = `"enqueue_seq":`
 	enqueueSeqPlaceholderJSON = enqueueSeqFieldJSON + "-1"
 	enqueueSeqGrace           = time.Hour
+	// enqueueGuardTTL outlasts the retries of one script run, which finish
+	// within a minute under the go-redis default timeouts. It is relative and
+	// independent of the deadline: a server clock ahead of the producer cannot
+	// expire the guard before a retry, and guards do not accumulate for the
+	// length of a long deadline after their requests complete.
+	enqueueGuardTTL = 10 * time.Minute
 )
 
 // enqueueSeqKey names the per-queue, per-deadline sequence counter. In
@@ -360,6 +365,7 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 			envelope[:at+len(enqueueSeqFieldJSON)],
 			envelope[at+len(enqueueSeqPlaceholderJSON):],
 			deadline,
+			enqueueGuardTTL.Milliseconds(),
 		}
 		if ir.PayloadRef != "" {
 			keys = append(keys, ir.PayloadRef)
@@ -391,7 +397,7 @@ func (p *RedisSortedSetProducer) enqueueCluster(ctx context.Context, reqID, toke
 	}
 	return enqueueRequestScript.Run(ctx, p.client,
 		[]string{enqueueSeqKey(queue, deadline, true), queue, enqueueGuardKey(queue, token, true)},
-		seqExpireAt, jsonBefore, jsonAfter, deadline,
+		seqExpireAt, jsonBefore, jsonAfter, deadline, enqueueGuardTTL.Milliseconds(),
 	).Err()
 }
 

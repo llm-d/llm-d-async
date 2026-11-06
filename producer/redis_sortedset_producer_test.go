@@ -506,11 +506,13 @@ func TestSubmitRequest_ClearsStaleCancellationMarker(t *testing.T) {
 
 // dropReplyConn fails the reply read of the first EVAL written on it with
 // io.EOF after the server has answered, as a connection reset after the
-// script ran would. go-redis then retries the EVAL.
+// script ran would. go-redis then retries the EVAL. onDrop runs between the
+// two attempts.
 type dropReplyConn struct {
 	net.Conn
-	armed *atomic.Bool
-	drop  bool
+	armed  *atomic.Bool
+	onDrop func()
+	drop   bool
 }
 
 func (c *dropReplyConn) Write(b []byte) (int, error) {
@@ -524,46 +526,114 @@ func (c *dropReplyConn) Read(b []byte) (int, error) {
 	if c.drop {
 		_, _ = c.Conn.Read(b) // the reply arrived, so the script ran
 		_ = c.Close()
+		if c.onDrop != nil {
+			c.onDrop()
+		}
 		return 0, io.EOF
 	}
 	return c.Conn.Read(b)
+}
+
+// submitWithLostReply submits r1 through a client that loses the reply to the
+// first enqueue script, and requires that the loss happened.
+func submitWithLostReply(t *testing.T, mr *miniredis.Miniredis, cluster bool, deadline int64, onDrop func(*RedisSortedSetProducer)) {
+	t.Helper()
+	var armed atomic.Bool
+	armed.Store(true)
+	var producer *RedisSortedSetProducer
+	dialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &dropReplyConn{Conn: conn, armed: &armed, onDrop: func() {
+			if onDrop != nil {
+				onDrop(producer)
+			}
+		}}, nil
+	}
+	var client redis.UniversalClient = redis.NewClient(&redis.Options{Addr: mr.Addr(), Dialer: dialer})
+	if cluster {
+		client = redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{mr.Addr()}, Dialer: dialer})
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	var err error
+	producer, err = NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RequestQueueName: "requests",
+		ResultQueueName:  "results",
+	}, WithRedisClient(client))
+	require.NoError(t, err)
+
+	err = producer.SubmitRequest(context.Background(), &api.RequestMessage{
+		ID:       "r1",
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
+		Payload:  testPayload(map[string]any{"model": "test"}),
+	})
+	require.NoError(t, err)
+	require.False(t, armed.Load(), "the enqueue reply was dropped")
 }
 
 func TestSubmitRequest_RetryAfterLostReplyEnqueuesOnce(t *testing.T) {
 	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
 		t.Run(name, func(t *testing.T) {
 			mr := miniredis.RunT(t)
-			var armed atomic.Bool
-			armed.Store(true)
-			dialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
-				if err != nil {
-					return nil, err
-				}
-				return &dropReplyConn{Conn: conn, armed: &armed}, nil
-			}
-			var client redis.UniversalClient = redis.NewClient(&redis.Options{Addr: mr.Addr(), Dialer: dialer})
-			if cluster {
-				client = redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{mr.Addr()}, Dialer: dialer})
-			}
-			t.Cleanup(func() { _ = client.Close() })
-			producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
-				RequestQueueName: "requests",
-				ResultQueueName:  "results",
-			}, WithRedisClient(client))
-			require.NoError(t, err)
+			deadline := time.Now().Add(time.Hour).Unix()
+			submitWithLostReply(t, mr, cluster, deadline, nil)
 
-			err = producer.SubmitRequest(context.Background(), &api.RequestMessage{
-				ID:       "r1",
-				Created:  time.Now().Unix(),
-				Deadline: time.Now().Add(time.Hour).Unix(),
-				Payload:  testPayload(map[string]any{"model": "test"}),
-			})
-			require.NoError(t, err)
-			require.False(t, armed.Load(), "the enqueue reply was dropped")
 			members, err := mr.ZMembers("requests")
 			require.NoError(t, err)
 			assert.Len(t, members, 1)
+			seq, err := mr.Get(enqueueSeqKey("requests", deadline, cluster))
+			require.NoError(t, err)
+			assert.Equal(t, "1", seq)
+		})
+	}
+}
+
+func TestSubmitRequest_RetryAfterLostReplyKeepsACancel(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			submitWithLostReply(t, mr, cluster, time.Now().Add(time.Hour).Unix(), func(p *RedisSortedSetProducer) {
+				assert.NoError(t, p.CancelRequests(context.Background(), []string{"r1"}))
+			})
+
+			token, err := mr.Get(api.RequestActiveTokenKey("r1"))
+			require.NoError(t, err)
+			marker, err := mr.Get(api.RequestCancellationKey("r1"))
+			require.NoError(t, err)
+			assert.Equal(t, token, marker)
+		})
+	}
+}
+
+func TestSubmitRequest_RetryAfterLostReplyEnqueuesOnceWhenTheServerClockPassedTheDeadline(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			// Past the deadline, short of the sequence counter's grace.
+			mr.SetTime(time.Now().Add(time.Hour + enqueueSeqGrace/2))
+			submitWithLostReply(t, mr, cluster, time.Now().Add(time.Hour).Unix(), func(*RedisSortedSetProducer) {
+				mr.FastForward(time.Second) // the retry backoff
+			})
+
+			members, err := mr.ZMembers("requests")
+			require.NoError(t, err)
+			assert.Len(t, members, 1)
+		})
+	}
+}
+
+func TestSubmitRequest_EnqueueGuardTTLDoesNotFollowTheDeadline(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			submitWithLostReply(t, mr, cluster, time.Now().Add(24*time.Hour).Unix(), nil)
+
+			token, err := mr.Get(api.RequestActiveTokenKey("r1"))
+			require.NoError(t, err)
+			assert.Equal(t, enqueueGuardTTL, mr.TTL(enqueueGuardKey("requests", token, cluster)))
 		})
 	}
 }
