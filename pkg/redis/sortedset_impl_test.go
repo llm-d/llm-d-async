@@ -2370,3 +2370,31 @@ func testPayload(m map[string]any) json.RawMessage {
 	}
 	return b
 }
+
+func TestRedisSortedSetFlowShutdownClosesClient(t *testing.T) {
+	server := miniredis.RunT(t)
+	cfg := SortedSetConfig{
+		URL:            "redis://" + server.Addr(),
+		PollIntervalMs: 10,
+		BatchSize:      1,
+		Queues: []SortedSetQueueConfig{{
+			QueueName:    "requests",
+			WorkerPoolID: "default",
+			IGWBaseURL:   "http://gateway",
+		}},
+	}
+	cfg.ApplyDefaults()
+
+	flow, err := NewRedisSortedSetFlow(cfg, []pipeline.WorkerPoolConfig{{ID: "default", Workers: 1}}, nil)
+	if err != nil {
+		t.Fatalf("create sorted-set flow: %v", err)
+	}
+	if err := flow.rdb.Ping(context.Background()).Err(); err != nil {
+		t.Fatalf("ping before shutdown: %v", err)
+	}
+
+	flow.Shutdown()
+	if err := flow.rdb.Ping(context.Background()).Err(); err == nil {
+		t.Fatal("Redis client remained usable after flow shutdown")
+	}
+}

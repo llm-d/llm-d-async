@@ -262,10 +262,19 @@ func (r *RedisSortedSetFlow) newRequestChannel(cfg SortedSetQueueConfig) (reques
 	}, nil
 }
 
+// RedisClientRegistrar is implemented by gate factories that let redis gates
+// reuse the sorted-set transport's authenticated client.
+type RedisClientRegistrar interface {
+	RegisterRedisClient(client redis.UniversalClient, options *redis.UniversalOptions)
+}
+
 func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoolConfig, gateFactory pipeline.GateFactory) (*RedisSortedSetFlow, error) {
-	rdb, err := newUniversalClient(cfg.connection())
+	rdb, redisOptions, err := newUniversalClient(cfg.connection())
 	if err != nil {
 		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
+	}
+	if registrar, ok := gateFactory.(RedisClientRegistrar); ok {
+		registrar.RegisterRedisClient(rdb, redisOptions)
 	}
 	r := &RedisSortedSetFlow{
 		rdb:                    rdb,
@@ -582,6 +591,7 @@ func (r *RedisSortedSetFlow) Shutdown() {
 		r.hbCancel()
 	}
 	r.hbWg.Wait()
+	_ = r.rdb.Close()
 }
 
 func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {

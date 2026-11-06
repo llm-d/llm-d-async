@@ -33,7 +33,7 @@ var _ pipeline.Gate = (*RedisLeasedRateGate)(nil)
 // wait-on-refuse. Budget reports only whether a positive lease is active; the
 // exact request rate is enforced by Apply.
 type RedisLeasedRateGate struct {
-	rdb          *goredis.Client
+	rdb          goredis.UniversalClient
 	controlKey   string
 	stateKey     string
 	poolID       string
@@ -42,7 +42,7 @@ type RedisLeasedRateGate struct {
 
 // NewRedisLeasedRateGate constructs a leased rate gate. A one-second token
 // bucket is the conventional default; callers may choose a smaller burst.
-func NewRedisLeasedRateGate(client *goredis.Client, controlKey, stateKey, poolID string, burstSeconds float64) *RedisLeasedRateGate {
+func NewRedisLeasedRateGate(client goredis.UniversalClient, controlKey, stateKey, poolID string, burstSeconds float64) *RedisLeasedRateGate {
 	if stateKey == "" {
 		stateKey = controlKey + ":state"
 	}
