@@ -137,6 +137,10 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_pool_worker_limit",
 		Help: "Configured number of concurrent workers (the concurrency limit) for a pool. Compare against async_inflight_requests for worker utilization.",
 	}, []string{LabelPoolName})
+	PoolDeadlineRequiredReplicas = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_pool_deadline_required_replicas",
+		Help: "Replicas the pool's deployment needs to finish the queued items of all its queues before their deadlines: the work due within each horizon, in replica-seconds, is summed across the queues, then divided as for async_deadline_required_replicas, with the pool's deadline_scaling settings. Only set for pools with deadline_scaling, and not after a failed deadline read on any of their queues.",
+	}, []string{LabelPoolName})
 	QueueConfigReloads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_queue_config_reloads_total",
 		Help: "Count of queue-config hot reload attempts, by result (success or error). Errors leave the last good configuration in effect.",
@@ -502,6 +506,17 @@ func SetPoolWorkerLimit(poolName string, n float64) {
 	PoolWorkerLimit.WithLabelValues(poolName).Set(n)
 }
 
+// SetPoolDeadlineRequiredReplicas sets the replicas a pool needs to meet its
+// queues' deadlines.
+func SetPoolDeadlineRequiredReplicas(poolName string, replicas int) {
+	PoolDeadlineRequiredReplicas.WithLabelValues(poolName).Set(float64(replicas))
+}
+
+// RemovePoolDeadlineRequiredReplicas deletes a pool's series.
+func RemovePoolDeadlineRequiredReplicas(poolName string) {
+	PoolDeadlineRequiredReplicas.DeleteLabelValues(poolName)
+}
+
 // SetDrainLimit records the external controller lease observed by the most
 // recent gate evaluation. Callers determine live validity by comparing the
 // exported valid-until timestamp with the current time.
@@ -565,7 +580,7 @@ func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Colle
 		Retries, AsyncReqs, DispatchedReqs, GateWaitRequeues, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests, Tokens,
 		QueueDepth, GateWaitingRequests, InflightRequests, BrokerBacklog, BrokerBacklogSourceAvailable, InferenceLatencyTime, QueueResidenceTime,
 		DeadlineProximity, DeadlineRequiredReplicas,
-		DispatchBudget, PoolWorkerLimit, QueueConfigReloads, QueueConfigLastSuccess,
+		DispatchBudget, PoolWorkerLimit, PoolDeadlineRequiredReplicas, QueueConfigReloads, QueueConfigLastSuccess,
 		DrainLimitRPS, DrainLimitLeaseValid, DrainLimitValidUntil, GateDecisions,
 		GateMetricValue, GateMetricThreshold, GateMetricSourceAvailable,
 	}

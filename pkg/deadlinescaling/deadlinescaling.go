@@ -1,27 +1,19 @@
-// Package deadlinescaling turns a queue's deadline-proximity bucket counts into
-// the number of replicas needed to finish its queued items before their
-// deadlines, for an autoscaler to consume as a gauge.
+// Package deadlinescaling turns the deadline-proximity bucket counts of a queue,
+// or of all the queues of a worker pool, into the number of replicas needed to
+// finish their items before their deadlines, for an autoscaler to consume as a
+// gauge.
 package deadlinescaling
 
 import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/llm-d/llm-d-async/pipeline"
 )
 
-// Config is a queue's deadline_scaling block.
-type Config struct {
-	// ThroughputRPS is the number of items one replica finishes per second (R).
-	ThroughputRPS float64 `json:"throughput_rps"`
-	// ColdStartSeconds is how long a new replica takes to start serving (C).
-	ColdStartSeconds float64 `json:"cold_start_seconds"`
-	// MaxReplicas caps the result. Items due before a new replica could start,
-	// but not yet expired, pin the result to it.
-	MaxReplicas int `json:"max_replicas"`
-	// SafetyFactor, in (0, 1], shrinks the time a replica has for the items due
-	// within a horizon, to absorb the coarseness of the buckets. 0 means 1.
-	SafetyFactor float64 `json:"safety_factor,omitempty"`
-}
+// Config is a deadline_scaling block, on a worker pool or a queue.
+type Config pipeline.DeadlineScaling
 
 // Validate reports a setting that would make RequiredReplicas meaningless.
 func (c Config) Validate() error {
@@ -38,38 +30,50 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// RequiredReplicas is the maximum, over the horizons t > 0 with items due in
-// them, of B(t) / (R * (t - C) * SafetyFactor), rounded up and capped at
-// MaxReplicas. B(t) leaves out items already past their deadline (the t = 0
-// bucket): no replica count makes them on time. A horizon 0 < t <= C with
-// items in it returns MaxReplicas. boundaries and cumulative are aligned, most
-// urgent first, as the deadline-proximity metric orders them; a queue with no
-// items still due needs 0.
-func (c Config) RequiredReplicas(boundaries []time.Duration, cumulative []int64) int {
-	safety := c.SafetyFactor
-	if safety == 0 {
-		safety = 1
-	}
-	coldStart := time.Duration(c.ColdStartSeconds * float64(time.Second))
-	need := 0.0
+// AddWork adds a queue's items due within each horizon to work, in
+// replica-seconds: items divided by rps, the items one replica finishes per
+// second. It leaves out items already past their deadline (the t = 0 bucket):
+// no replica count makes them on time. boundaries, cumulative and work are
+// aligned, most urgent first, as the deadline-proximity metric orders them.
+// Adding each queue of a pool gives the pool's work.
+func AddWork(work []float64, boundaries []time.Duration, cumulative []int64, rps float64) {
 	var expired int64
 	for i, horizon := range boundaries {
-		if i >= len(cumulative) {
+		if i >= len(cumulative) || i >= len(work) {
 			break
 		}
 		if horizon <= 0 {
 			expired = cumulative[i]
 			continue
 		}
-		due := cumulative[i] - expired
-		if due <= 0 {
+		if due := cumulative[i] - expired; due > 0 {
+			work[i] += float64(due) / rps
+		}
+	}
+}
+
+// RequiredReplicas is the maximum, over the horizons t > 0 with work due in
+// them, of W(t) / ((t - C) * SafetyFactor), rounded up and capped at
+// MaxReplicas, where W(t) is the work due within t (see AddWork). Work due
+// within 0 < t <= C returns MaxReplicas; no work needs 0.
+func (c Config) RequiredReplicas(boundaries []time.Duration, work []float64) int {
+	safety := c.SafetyFactor
+	if safety == 0 {
+		safety = 1
+	}
+	coldStart := time.Duration(c.ColdStartSeconds * float64(time.Second))
+	need := 0.0
+	for i, horizon := range boundaries {
+		if i >= len(work) {
+			break
+		}
+		if horizon <= 0 || work[i] <= 0 {
 			continue
 		}
 		if horizon <= coldStart {
 			return c.MaxReplicas
 		}
-		budget := (horizon - coldStart).Seconds() * safety
-		need = math.Max(need, float64(due)/(c.ThroughputRPS*budget))
+		need = math.Max(need, work[i]/((horizon-coldStart).Seconds()*safety))
 	}
 	if need == 0 {
 		return 0

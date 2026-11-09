@@ -189,7 +189,13 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 	}
 
 	if reporter, ok := flow.(pipeline.BacklogReporter); ok && opts.Transport.BacklogPollInterval > 0 {
-		go pollBacklog(ctx, reporter, opts.Transport.BacklogPollInterval)
+		poolScaling := make(map[string]deadlinescaling.Config)
+		for id, p := range poolsMap {
+			if p.DeadlineScaling != nil {
+				poolScaling[id] = deadlinescaling.Config(*p.DeadlineScaling)
+			}
+		}
+		go pollBacklog(ctx, reporter, opts.Transport.BacklogPollInterval, poolScaling)
 	} else if !ok {
 		setupLog.Info("Selected flow does not support broker backlog metrics", "transport", opts.effectiveTransportType())
 	}
@@ -245,6 +251,11 @@ func loadWorkerPools(workerConfig WorkerConfig, setupLog logr.Logger) (poolsMap 
 
 	poolsMap = make(map[string]pipeline.WorkerPoolConfig)
 	for _, p := range pools {
+		if p.DeadlineScaling != nil {
+			if err := deadlinescaling.Config(*p.DeadlineScaling).Validate(); err != nil {
+				return nil, -1, fmt.Errorf("pool %q: %w", p.ID, err)
+			}
+		}
 		if p.Workers <= 0 {
 			p.Workers = workerConfig.Concurrency
 		}
@@ -465,7 +476,9 @@ var (
 	_ deadlineScalingSource = (*sqlflow.Flow)(nil)
 )
 
-func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interval time.Duration) {
+// pollBacklog publishes each queue's broker backlog every interval and, for
+// each pool in pools, the replicas the pool needs for all its queues' deadlines.
+func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interval time.Duration, pools map[string]deadlinescaling.Config) {
 	logger := ctrl.Log.WithName("backlog-poller")
 	scaling, _ := reporter.(deadlineScalingSource)
 	buckets := metrics.DeadlineProximityBuckets()
@@ -482,10 +495,20 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 			logger.V(logging.DEFAULT).Error(err, "Failed to poll broker backlog")
 		}
 		current := make(map[queueLabels]struct{}, len(stats))
+		// A pool's work is summed across its queues before the division, so
+		// queues that share its deployment aren't each counted in full. A pool
+		// with a queue that has no deadline counts this poll is left out: a
+		// partial sum would undercount.
+		poolWork := make(map[string][]float64, len(pools))
+		poolPartial := make(map[string]bool)
 		for _, s := range stats {
 			current[queueLabels{id: s.QueueID, name: s.QueueName, pool: s.PoolName}] = struct{}{}
 			metrics.SetBrokerBacklog(s.QueueID, s.QueueName, s.PoolName, float64(s.Depth))
 			metrics.SetBrokerBacklogSourceAvailable(s.QueueID, s.QueueName, s.PoolName, s.SourceAvailable)
+			pool, pooled := pools[s.PoolName]
+			if pooled && (s.ExpiringCounts == nil || s.ExpiringCountsFailed) {
+				poolPartial[s.PoolName] = true
+			}
 			// Nil counts mean the broker cannot report per-item deadlines
 			// (e.g. Cloud Pub/Sub); emit nothing for it. When present they are
 			// exact cumulative bucket counts, zeroed on a failed read so the
@@ -496,9 +519,14 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 					counts = append(counts, ec.Count)
 				}
 				metrics.SetDeadlineProximity(s.QueueID, s.QueueName, s.PoolName, counts)
+				var queueCfg deadlinescaling.Config
+				queueScaled := false
 				if scaling != nil {
-					if cfg, ok := scaling.DeadlineScaling(s.QueueID); ok && !s.ExpiringCountsFailed {
-						metrics.SetDeadlineRequiredReplicas(s.QueueID, s.QueueName, s.PoolName, cfg.RequiredReplicas(buckets, counts))
+					queueCfg, queueScaled = scaling.DeadlineScaling(s.QueueID)
+					if queueScaled && !s.ExpiringCountsFailed {
+						work := make([]float64, len(buckets))
+						deadlinescaling.AddWork(work, buckets, counts, queueCfg.ThroughputRPS)
+						metrics.SetDeadlineRequiredReplicas(s.QueueID, s.QueueName, s.PoolName, queueCfg.RequiredReplicas(buckets, work))
 					} else {
 						// The queue has none, a reload removed them, or the read
 						// failed: no series, so the autoscaler's fallback applies
@@ -506,6 +534,23 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 						metrics.RemoveDeadlineRequiredReplicas(s.QueueID, s.QueueName, s.PoolName)
 					}
 				}
+				if pooled && !s.ExpiringCountsFailed {
+					rps := pool.ThroughputRPS
+					if queueScaled {
+						rps = queueCfg.ThroughputRPS
+					}
+					if poolWork[s.PoolName] == nil {
+						poolWork[s.PoolName] = make([]float64, len(buckets))
+					}
+					deadlinescaling.AddWork(poolWork[s.PoolName], buckets, counts, rps)
+				}
+			}
+		}
+		for name, cfg := range pools {
+			if work, ok := poolWork[name]; ok && !poolPartial[name] {
+				metrics.SetPoolDeadlineRequiredReplicas(name, cfg.RequiredReplicas(buckets, work))
+			} else {
+				metrics.RemovePoolDeadlineRequiredReplicas(name)
 			}
 		}
 		if err == nil {

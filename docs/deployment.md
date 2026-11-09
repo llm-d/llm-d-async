@@ -113,3 +113,4 @@ When using multiple queues or topics, the worker capacities and pool-level gates
 - `workers` (required): Number of concurrent workers dedicated to this pool. Must be positive.
 - `gate_type` (optional): The type of dispatch gate to apply to the pool (e.g. `local-max-concurrency`, `prometheus-saturation`).
 - `gate_params` (optional): Key-value parameters configuring the gate.
+- `deadline_scaling` (optional): Publishes `llm_d_async_async_pool_deadline_required_replicas` for the pool (see [Observability](observability.md)): `throughput_rps` (items one replica finishes per second; a queue's own `deadline_scaling.throughput_rps` overrides it for that queue), `cold_start_seconds`, `max_replicas`, and optional `safety_factor` in (0, 1].

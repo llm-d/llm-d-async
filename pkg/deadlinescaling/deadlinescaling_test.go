@@ -23,6 +23,13 @@ func counts(perBucket map[time.Duration]int64) []int64 {
 	return out
 }
 
+// required is RequiredReplicas for a single queue.
+func required(c Config, due map[time.Duration]int64) int {
+	work := make([]float64, len(buckets))
+	AddWork(work, buckets, counts(due), c.ThroughputRPS)
+	return c.RequiredReplicas(buckets, work)
+}
+
 func TestRequiredReplicas(t *testing.T) {
 	base := Config{ThroughputRPS: 2, ColdStartSeconds: 60, MaxReplicas: 10}
 	for _, tc := range []struct {
@@ -60,7 +67,7 @@ func TestRequiredReplicas(t *testing.T) {
 			map[time.Duration]int64{time.Second: 1}, 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.cfg.RequiredReplicas(buckets, counts(tc.due)); got != tc.want {
+			if got := required(tc.cfg, tc.due); got != tc.want {
 				t.Fatalf("RequiredReplicas = %d, want %d", got, tc.want)
 			}
 		})
@@ -69,8 +76,52 @@ func TestRequiredReplicas(t *testing.T) {
 
 func TestRequiredReplicasIgnoresMissingCounts(t *testing.T) {
 	cfg := Config{ThroughputRPS: 1, MaxReplicas: 3}
-	if got := cfg.RequiredReplicas(buckets, nil); got != 0 {
+	work := make([]float64, len(buckets))
+	AddWork(work, buckets, nil, cfg.ThroughputRPS)
+	if got := cfg.RequiredReplicas(buckets, work); got != 0 {
 		t.Fatalf("RequiredReplicas without counts = %d, want 0", got)
+	}
+}
+
+// The pool's work is summed across its queues before the division. R = 1 and
+// C = 60s, as in the review of #526.
+func TestPoolRequiredReplicas(t *testing.T) {
+	pool := Config{ThroughputRPS: 1, ColdStartSeconds: 60, MaxReplicas: 10}
+	type queue struct {
+		rps float64
+		due map[time.Duration]int64
+	}
+	for _, tc := range []struct {
+		name   string
+		queues []queue
+		want   int
+	}{
+		// Alone, 100 due within 2m need 2 and 600 within 30m need 1. Together:
+		// max(100 / 60s, 700 / 1740s) -> 2, not 3.
+		{"queues peak at different horizons", []queue{
+			{1, map[time.Duration]int64{2 * time.Minute: 100}},
+			{1, map[time.Duration]int64{30 * time.Minute: 600}},
+		}, 2},
+		// Each needs 2 alone; together 200 / 60s -> 4, not 2.
+		{"queues peak at the same horizon", []queue{
+			{1, map[time.Duration]int64{2 * time.Minute: 100}},
+			{1, map[time.Duration]int64{2 * time.Minute: 100}},
+		}, 4},
+		// A queue whose items take half as long adds half the work: (50 + 100) / 60s -> 3.
+		{"per-queue throughput", []queue{
+			{2, map[time.Duration]int64{2 * time.Minute: 100}},
+			{1, map[time.Duration]int64{2 * time.Minute: 100}},
+		}, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := make([]float64, len(buckets))
+			for _, q := range tc.queues {
+				AddWork(work, buckets, counts(q.due), q.rps)
+			}
+			if got := pool.RequiredReplicas(buckets, work); got != tc.want {
+				t.Fatalf("RequiredReplicas = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
