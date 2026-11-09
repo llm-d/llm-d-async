@@ -131,7 +131,7 @@ A saturated `llama-pool` above blocks only its own merged channel — `qwen-pool
 
 ### Retries and Deadlines
 
-Every request message carries a mandatory `deadline` (Unix seconds). When processing fails — shed by a gate or a server-side error — the message is scheduled for a retry with exponential backoff, as long as the deadline has not passed. A message whose deadline passes produces a `DEADLINE_EXCEEDED` error result.
+Every request message carries a mandatory `deadline` (Unix seconds). When processing fails — shed by a gate, a server-side error, or a transient connection failure to the inference gateway (timeout, refused, reset, or closed before a response) — the message is scheduled for a retry with exponential backoff, as long as the deadline has not passed. A message whose deadline passes produces a `DEADLINE_EXCEEDED` error result.
 
 ### Request Body Transforms
 

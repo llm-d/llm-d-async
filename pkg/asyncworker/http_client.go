@@ -3,10 +3,13 @@ package asyncworker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 
 	asyncapi "github.com/llm-d/llm-d-async/api"
@@ -42,7 +45,7 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	result, err := h.client.Do(request)
 	if err != nil {
 		return nil, &asyncapi.ClientError{
-			ErrorCategory: asyncapi.ErrCategoryUnknown,
+			ErrorCategory: transportErrorCategory(err),
 			Message:       "failed to send request",
 			RawError:      err,
 		}
@@ -98,6 +101,26 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	}
 
 	return resp, nil
+}
+
+// transportErrorCategory classifies an http.Client.Do failure. Timeouts and
+// connections that were refused, reset, or closed before a response are
+// ErrCategoryServer. Everything else is ErrCategoryUnknown.
+func transportErrorCategory(err error) asyncapi.ErrorCategory {
+	var netErr net.Error
+	switch {
+	case errors.As(err, &netErr) && netErr.Timeout(),
+		errors.Is(err, io.EOF),
+		errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, syscall.ECONNREFUSED),
+		errors.Is(err, syscall.ECONNRESET),
+		errors.Is(err, syscall.ECONNABORTED),
+		errors.Is(err, syscall.EPIPE),
+		errors.Is(err, syscall.EHOSTUNREACH):
+		return asyncapi.ErrCategoryServer
+	default:
+		return asyncapi.ErrCategoryUnknown
+	}
 }
 
 // parseRetryAfter parses a Retry-After header value, which can be either
