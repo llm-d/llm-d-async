@@ -15,8 +15,8 @@ type Config struct {
 	ThroughputRPS float64 `json:"throughput_rps"`
 	// ColdStartSeconds is how long a new replica takes to start serving (C).
 	ColdStartSeconds float64 `json:"cold_start_seconds"`
-	// MaxReplicas caps the result. Items due before a new replica could start
-	// pin the result to it.
+	// MaxReplicas caps the result. Items due before a new replica could start,
+	// but not yet expired, pin the result to it.
 	MaxReplicas int `json:"max_replicas"`
 	// SafetyFactor, in (0, 1], shrinks the time a replica has for the items due
 	// within a horizon, to absorb the coarseness of the buckets. 0 means 1.
@@ -38,11 +38,13 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// RequiredReplicas is the maximum, over the horizons t whose cumulative count
-// B(t) is positive, of B(t) / (R * (t - C) * SafetyFactor), rounded up and
-// capped at MaxReplicas. A horizon t <= C with items in it returns
-// MaxReplicas. boundaries and cumulative are aligned, most urgent first, as
-// the deadline-proximity metric orders them; an empty queue needs 0.
+// RequiredReplicas is the maximum, over the horizons t > 0 with items due in
+// them, of B(t) / (R * (t - C) * SafetyFactor), rounded up and capped at
+// MaxReplicas. B(t) leaves out items already past their deadline (the t = 0
+// bucket): no replica count makes them on time. A horizon 0 < t <= C with
+// items in it returns MaxReplicas. boundaries and cumulative are aligned, most
+// urgent first, as the deadline-proximity metric orders them; a queue with no
+// items still due needs 0.
 func (c Config) RequiredReplicas(boundaries []time.Duration, cumulative []int64) int {
 	safety := c.SafetyFactor
 	if safety == 0 {
@@ -50,15 +52,24 @@ func (c Config) RequiredReplicas(boundaries []time.Duration, cumulative []int64)
 	}
 	coldStart := time.Duration(c.ColdStartSeconds * float64(time.Second))
 	need := 0.0
+	var expired int64
 	for i, horizon := range boundaries {
-		if i >= len(cumulative) || cumulative[i] <= 0 {
+		if i >= len(cumulative) {
+			break
+		}
+		if horizon <= 0 {
+			expired = cumulative[i]
+			continue
+		}
+		due := cumulative[i] - expired
+		if due <= 0 {
 			continue
 		}
 		if horizon <= coldStart {
 			return c.MaxReplicas
 		}
 		budget := (horizon - coldStart).Seconds() * safety
-		need = math.Max(need, float64(cumulative[i])/(c.ThroughputRPS*budget))
+		need = math.Max(need, float64(due)/(c.ThroughputRPS*budget))
 	}
 	if need == 0 {
 		return 0

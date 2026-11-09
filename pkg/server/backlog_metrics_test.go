@@ -106,3 +106,25 @@ func TestRemoveQueueSnapshotsDropsDeadlineRequiredReplicas(t *testing.T) {
 		t.Fatal("a removed queue kept its required-replicas series")
 	}
 }
+
+func TestPollBacklogDropsDeadlineRequiredReplicasOnFailedRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := deadlinescaling.Config{ThroughputRPS: 2, ColdStartSeconds: 60, MaxReplicas: 10}
+	reporter := scalingBacklogReporter{
+		oneShotBacklogReporter: oneShotBacklogReporter{cancel: cancel, stats: []pipeline.QueueBacklogStat{
+			{QueueID: "q-read-ok", QueueName: "queue-read-ok", PoolName: "pool-read", Depth: 240, SourceAvailable: true, ExpiringCounts: expiring(240)},
+			{QueueID: "q-read-bad", QueueName: "queue-read-bad", PoolName: "pool-read", SourceAvailable: true, ExpiringCounts: expiring(0), ExpiringCountsFailed: true},
+		}},
+		configs: map[string]deadlinescaling.Config{"q-read-ok": cfg, "q-read-bad": cfg},
+	}
+	metrics.SetDeadlineRequiredReplicas("q-read-bad", "queue-read-bad", "pool-read", 3) // from the previous poll
+
+	pollBacklog(ctx, reporter, time.Hour)
+
+	if got := testutil.ToFloat64(metrics.DeadlineRequiredReplicas.WithLabelValues("q-read-ok", "queue-read-ok", "pool-read")); got != 2 {
+		t.Fatalf("required replicas = %v, want 2", got)
+	}
+	if metrics.DeadlineRequiredReplicas.DeleteLabelValues("q-read-bad", "queue-read-bad", "pool-read") {
+		t.Fatal("the queue whose deadline read failed kept its required-replicas series")
+	}
+}

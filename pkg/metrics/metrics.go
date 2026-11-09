@@ -123,7 +123,7 @@ var (
 	}, queueLabels)
 	DeadlineRequiredReplicas = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_deadline_required_replicas",
-		Help: "Replicas needed to finish the queue's queued items before their deadlines, from the latest deadline-proximity snapshot and the queue's deadline_scaling settings: the maximum over horizons t of B(t) / (throughput_rps * (t - cold_start_seconds) * safety_factor), rounded up and capped at max_replicas. Only set for queues with deadline_scaling, on brokers that expose per-item deadlines.",
+		Help: "Replicas needed to finish the queue's queued items before their deadlines, from the latest deadline-proximity snapshot and the queue's deadline_scaling settings: the maximum over horizons t of B(t) / (throughput_rps * (t - cold_start_seconds) * safety_factor), where B(t) leaves out expired items, rounded up and capped at max_replicas. Only set for queues with deadline_scaling, on brokers that expose per-item deadlines, and not after a failed deadline read.",
 	}, queueLabels)
 	BrokerBacklogSourceAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_broker_backlog_source_available",

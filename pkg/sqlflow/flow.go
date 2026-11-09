@@ -821,6 +821,7 @@ func (f *Flow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, e
 			}
 			expiring = make([]int64, len(labels))
 			depth = 0
+			stat.ExpiringCountsFailed = true
 		}
 		stat.Depth = depth
 		stat.ExpiringCounts = make([]pipeline.ExpiringCount, 0, len(labels))

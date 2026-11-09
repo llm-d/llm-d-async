@@ -497,10 +497,12 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 				}
 				metrics.SetDeadlineProximity(s.QueueID, s.QueueName, s.PoolName, counts)
 				if scaling != nil {
-					if cfg, ok := scaling.DeadlineScaling(s.QueueID); ok {
+					if cfg, ok := scaling.DeadlineScaling(s.QueueID); ok && !s.ExpiringCountsFailed {
 						metrics.SetDeadlineRequiredReplicas(s.QueueID, s.QueueName, s.PoolName, cfg.RequiredReplicas(buckets, counts))
 					} else {
-						// The queue has none, or a reload removed them.
+						// The queue has none, a reload removed them, or the read
+						// failed: no series, so the autoscaler's fallback applies
+						// instead of a 0 read from zeroed counts.
 						metrics.RemoveDeadlineRequiredReplicas(s.QueueID, s.QueueName, s.PoolName)
 					}
 				}

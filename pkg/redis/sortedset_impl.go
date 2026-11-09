@@ -677,6 +677,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 			// stale value for this queue after a failed poll. The zeroed
 			// expiring counts clear the deadline-proximity snapshot.
 			stat.ExpiringCounts = zeroExpiringCounts(bucketLabels)
+			stat.ExpiringCountsFailed = true
 			stats = append(stats, stat)
 			continue
 		}
@@ -687,6 +688,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 			// Report 0 rather than skipping so the gauges do not retain a
 			// stale value for this queue after a failed poll.
 			stat.ExpiringCounts = zeroExpiringCounts(bucketLabels)
+			stat.ExpiringCountsFailed = true
 			stats = append(stats, stat)
 			continue
 		}
@@ -707,6 +709,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 				firstErr = fmt.Errorf("deadline reads on queue %q: %w", cd.queueName, secondaryErr)
 			}
 			stat.ExpiringCounts = zeroExpiringCounts(bucketLabels)
+			stat.ExpiringCountsFailed = true
 			stats = append(stats, stat)
 			continue
 		}

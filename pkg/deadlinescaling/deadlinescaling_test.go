@@ -34,7 +34,10 @@ func TestRequiredReplicas(t *testing.T) {
 		{"empty queue", base, nil, 0},
 		{"due before a replica can start", base, map[time.Duration]int64{30 * time.Second: 1}, 10},
 		{"due exactly at the cold start", base, map[time.Duration]int64{time.Minute: 1}, 10},
-		{"already expired", base, map[time.Duration]int64{0: 1, time.Hour: 5}, 10},
+		// Expired items count in every later bucket; they are left out of each.
+		// 5 / (2 * 3540s) -> 1.
+		{"expired items don't count", base, map[time.Duration]int64{0: 1000, time.Hour: 5}, 1},
+		{"only expired items", base, map[time.Duration]int64{0: 3}, 0},
 		// 240 items due within 2m: 2 rps * (120s - 60s) = 120 per replica -> 2.
 		{"one horizon", base, map[time.Duration]int64{2 * time.Minute: 240}, 2},
 		// One item more than two replicas finish needs a third.
