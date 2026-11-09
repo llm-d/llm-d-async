@@ -644,10 +644,7 @@ func TestGateWaitBackoffIsBoundedAndJittered(t *testing.T) {
 }
 
 func TestTransportError_Retries(t *testing.T) {
-	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("dial tcp 10.0.0.1:80: connect: connection refused")
-	})
-	inferenceClient := NewHTTPInferenceClient(httpclient)
+	inferenceClient := NewHTTPInferenceClient(&http.Client{})
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)
@@ -661,7 +658,7 @@ func TestTransportError_Retries(t *testing.T) {
 		Created:  time.Now().Unix(),
 		Deadline: time.Now().Add(100 * time.Second).Unix(),
 		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
-	}, "http://localhost:30800/v1/completions", map[string]string{})
+	}, closedServerURL(t), map[string]string{})
 
 	select {
 	case r := <-retryChannel:
@@ -675,6 +672,51 @@ func TestTransportError_Retries(t *testing.T) {
 		t.Errorf("transport error produced a final result instead of a retry: %+v", r)
 	case <-time.After(time.Second):
 		t.Errorf("timeout waiting for the retry")
+	}
+}
+
+func TestPermanentTransportError_NoRetry(t *testing.T) {
+	inferenceClient := NewHTTPInferenceClient(&http.Client{})
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "permanent",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
+	}, "ftp://127.0.0.1/v1/completions", map[string]string{})
+
+	select {
+	case r := <-retryChannel:
+		t.Errorf("permanent transport error was retried: %+v", r)
+	case r := <-resultChannel:
+		if r.ID != "permanent" {
+			t.Errorf("result id = %q, want permanent", r.ID)
+		}
+		if r.StatusCode != 0 {
+			t.Errorf("StatusCode = %d, want 0 when no HTTP response was received", r.StatusCode)
+		}
+		if r.ErrorCode != asyncapi.ErrCodeInferenceError {
+			t.Errorf("ErrorCode = %q, want %q", r.ErrorCode, asyncapi.ErrCodeInferenceError)
+		}
+		if r.ErrorMessage == "" {
+			t.Error("ErrorMessage is empty")
+		}
+		var resultMap map[string]any
+		if err := json.Unmarshal([]byte(r.Payload), &resultMap); err != nil {
+			t.Fatalf("unmarshal result payload %q: %v", r.Payload, err)
+		}
+		if _, hasError := resultMap["error"]; !hasError {
+			t.Errorf("result payload has no error field: %s", r.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("timeout waiting for the result")
 	}
 }
 

@@ -24,7 +24,7 @@ type InferenceClient interface {
 	// Errors should implement InferenceError to provide an ErrorCategory via Category().
 	// ErrorCategory determines retry and shedding behavior through its Fatal() and Sheddable() methods:
 	//   - ErrCategoryRateLimit:  retryable, sheddable (e.g. 429)
-	//   - ErrCategoryServer:     retryable (e.g. 5xx)
+	//   - ErrCategoryServer:     retryable (e.g. 5xx, or a connection that timed out or was refused, reset, or closed before a response)
 	//   - ErrCategoryInvalidReq: not retryable (e.g. 4xx)
 	//   - ErrCategoryAuth:       not retryable
 	//   - ErrCategoryParse:      not retryable

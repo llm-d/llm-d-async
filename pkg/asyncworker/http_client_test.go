@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -183,27 +185,133 @@ func TestSendRequest_serverError(t *testing.T) {
 	}
 }
 
-func TestSendRequest_transportError(t *testing.T) {
-	client := NewHTTPInferenceClient(NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("connection refused")
-	}))
+func closedServerURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	return url
+}
 
-	resp, err := client.SendRequest(context.Background(), "http://localhost/v1/completions", nil, []byte(`{}`))
-	if err == nil {
-		t.Fatal("expected error for transport failure")
+func droppedConnectionURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer is not a hijacker")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func hangingServerURL(t *testing.T) string {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	return srv.URL
+}
+
+func untrustedTLSServerURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestSendRequest_transportErrorCategory(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    func(t *testing.T) string
+		client *http.Client
+		want   asyncapi.ErrorCategory
+	}{
+		{name: "connection refused", url: closedServerURL, client: &http.Client{}, want: asyncapi.ErrCategoryServer},
+		{name: "connection closed before response", url: droppedConnectionURL, client: &http.Client{}, want: asyncapi.ErrCategoryServer},
+		{name: "client timeout", url: hangingServerURL, client: &http.Client{Timeout: 50 * time.Millisecond}, want: asyncapi.ErrCategoryServer},
+		{name: "unsupported scheme", url: func(*testing.T) string { return "ftp://127.0.0.1/v1/completions" }, client: &http.Client{}, want: asyncapi.ErrCategoryUnknown},
+		{name: "missing host", url: func(*testing.T) string { return "http:///v1/completions" }, client: &http.Client{}, want: asyncapi.ErrCategoryUnknown},
+		{name: "untrusted TLS certificate", url: untrustedTLSServerURL, client: &http.Client{}, want: asyncapi.ErrCategoryUnknown},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewHTTPInferenceClient(tt.client)
+
+			resp, err := client.SendRequest(context.Background(), tt.url(t), nil, []byte(`{}`))
+			if err == nil {
+				t.Fatal("expected error for transport failure")
+			}
+			var ce *asyncapi.ClientError
+			if !errors.As(err, &ce) {
+				t.Fatalf("expected *ClientError, got %T", err)
+			}
+			if ce.ErrorCategory != tt.want {
+				t.Errorf("category = %s, want %s (err: %v)", ce.ErrorCategory, tt.want, err)
+			}
+			if ce.ErrorCategory.Fatal() != (tt.want == asyncapi.ErrCategoryUnknown) {
+				t.Errorf("Fatal() = %t for category %s", ce.ErrorCategory.Fatal(), ce.ErrorCategory)
+			}
+			if ce.StatusCode != 0 {
+				t.Errorf("StatusCode = %d, want 0 for transport error", ce.StatusCode)
+			}
+			if resp != nil {
+				t.Errorf("resp = %+v, want nil for transport error", resp)
+			}
+		})
+	}
+}
+
+func TestSendRequest_redirectPolicyRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+	client := NewHTTPInferenceClient(&http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirects are not followed") },
+	})
+
+	_, err := client.SendRequest(context.Background(), srv.URL, nil, []byte(`{}`))
 	var ce *asyncapi.ClientError
 	if !errors.As(err, &ce) {
-		t.Fatalf("expected *ClientError, got %T", err)
+		t.Fatalf("expected *ClientError, got %T (%v)", err, err)
+	}
+	if ce.ErrorCategory != asyncapi.ErrCategoryUnknown {
+		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryUnknown)
+	}
+}
+
+func TestSendRequest_contextDeadlineStaysRetryable(t *testing.T) {
+	client := NewHTTPInferenceClient(&http.Client{})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	t.Cleanup(cancel)
+
+	_, err := client.SendRequest(ctx, hangingServerURL(t), nil, []byte(`{}`))
+	var ce *asyncapi.ClientError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *ClientError, got %T (%v)", err, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to wrap context.DeadlineExceeded", err)
 	}
 	if ce.ErrorCategory != asyncapi.ErrCategoryServer {
-		t.Errorf("category = %s, want %s so the worker retries it", ce.ErrorCategory, asyncapi.ErrCategoryServer)
-	}
-	if ce.StatusCode != 0 {
-		t.Errorf("StatusCode = %d, want 0 for transport error", ce.StatusCode)
-	}
-	if resp != nil {
-		t.Errorf("resp = %+v, want nil for transport error", resp)
+		t.Errorf("category = %s, want %s", ce.ErrorCategory, asyncapi.ErrCategoryServer)
 	}
 }
 
