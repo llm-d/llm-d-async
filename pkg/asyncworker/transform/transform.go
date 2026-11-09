@@ -1,8 +1,8 @@
-// Package transform defines the request body-transform extension point: a typed
-// plugin capability that lets providers rewrite the outgoing HTTP body at
-// dispatch time (e.g. from OpenAI-style JSON into multipart/form-data) based on
-// per-message metadata, while leaving the default JSON path untouched when no
-// plugin applies.
+// Package transform defines the body-transform extension points: typed plugin
+// capabilities that let providers rewrite the outgoing HTTP body at dispatch
+// time (e.g. from OpenAI-style JSON into multipart/form-data) and the response
+// body before it is published as a result, based on per-message metadata, while
+// leaving the default path untouched when no plugin applies.
 //
 // It builds on the generic plugin framework in pkg/plugins (EPP-style Plugin,
 // Registry, Handle). Concrete transforms (such as a gcs_uri multipart provider)
@@ -67,4 +67,21 @@ type ContextTransform interface {
 	// ctx.Deadline() alone. requestURL is the full URL the request will be
 	// sent to, so a transform can recognize messages by endpoint path.
 	TransformContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string) (body []byte, contentType string, handled bool, err error)
+}
+
+// ResponseTransform is a post-dispatch body-transform plugin. The worker invokes
+// the configured chain on a 2xx response body before the result is published. A
+// plugin that does not recognize a response returns handled=false, preserving
+// the verbatim body.
+type ResponseTransform interface {
+	plugins.Plugin
+
+	// Transform optionally rewrites the response body. When it recognizes the
+	// response it returns the new body and handled=true; a non-empty
+	// contentType replaces the result's content type, and an empty one keeps
+	// the response's. Otherwise it returns handled=false and the original body
+	// is published unchanged. ctx carries the request deadline and is cancelled
+	// on shutdown. An error is fatal: the worker publishes an error result and
+	// does not retry, since the inference call already succeeded.
+	Transform(ctx context.Context, responseBody []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error)
 }

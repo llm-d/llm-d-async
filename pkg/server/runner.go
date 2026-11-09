@@ -409,11 +409,11 @@ func loadTransforms(ctx context.Context, configFile string, setupLog logr.Logger
 	if err != nil {
 		return nil, fmt.Errorf("failed to load transform configuration: %w", err)
 	}
-	chain, err := transform.BuildChain(cfg.RequestTransforms, plugins.NewHandle(ctx))
+	chain, err := transform.BuildChainFromConfig(cfg, plugins.NewHandle(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("failed to build request transform chain: %w", err)
+		return nil, fmt.Errorf("failed to build transform chain: %w", err)
 	}
-	setupLog.Info("Loaded request transform plugins", "count", chain.Len())
+	setupLog.Info("Loaded transform plugins", "request", chain.Len(), "response", chain.ResponseLen())
 	return chain, nil
 }
 

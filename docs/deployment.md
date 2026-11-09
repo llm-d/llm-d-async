@@ -48,7 +48,7 @@ make deploy-ap-on-k8s
 | `transport-config-watch-interval` | `0` | For `redis-sortedset` only, periodically reloads the `queues` field from `transport-config-file`. The file must contain a complete valid transport configuration. Changes to other transport fields require a restart. |
 | `pool-config-file` | — | Path to the JSON worker pool definitions. If omitted, a single `"default"` worker pool is created with concurrency determined by the global `concurrency` flag. See [Worker Pools Configuration](#worker-pools-configuration). |
 | `request-merge-policy-config-file` | — | Path to the JSON request merge policy specification (`type` and `parameters`). If not specified, defaults to the `random-robin` policy. The older `--request-merge-policy-config` name is a deprecated alias. |
-| `transform-config-file` | — | Path to the JSON request body transform configuration. Empty disables transforms. See [Request Body Transform Reference](request-body-transforms.md#request-body-transform-reference). |
+| `transform-config-file` | — | Path to the JSON request and response body transform configuration. Empty disables transforms. See [Request Body Transform Reference](request-body-transforms.md#request-body-transform-reference). |
 
 **Gating and Prometheus:**
 

@@ -58,6 +58,29 @@ Transforms run on every dispatch attempt, including retries. A plugin that also 
 
 For an `api.ClientError`, the error result, the span and the retry log carry its category and message but not the cause it wraps in `RawError`, so a plugin can keep an SDK error (with request IDs or signed URLs) for `errors.Is`/`errors.As` without it reaching results or traces. This only drops `RawError`: other errors, and any text wrapped around the `ClientError`, are reported as they are. The span records the error's own category, while the result code stays `INVALID_REQUEST`.
 
+## Response body transforms
+
+Response body-transform plugins rewrite a successful response body before it is published as the result `payload`, for example to override a model name or unwrap a provider-specific envelope. They are configured in the same file under `responseTransforms`, with the same entry shape:
+
+```json
+{
+  "responseTransforms": [
+    {
+      "name": "my-response-rewrite",
+      "type": "<registered response plugin type>",
+      "parameters": {}
+    }
+  ]
+}
+```
+
+- **Activation:** only 2xx responses are passed to the chain; 3xx and error responses are published unchanged. Each plugin receives the response body and the message's `metadata`.
+- **Ordering:** plugins run in order and the first one that handles the response wins. When no plugin handles it, the body is published byte-for-byte.
+- **Content type:** a plugin may return a content type along with the new body; it replaces the result's `content_type`. An empty value keeps the response's. The status code and forwarded headers are always published unchanged.
+- **Context:** each plugin receives the request's context, which carries the request deadline and is cancelled on shutdown.
+- **Errors:** a transform error publishes an `INFERENCE_ERROR` result and is not retried, since the inference call already succeeded.
+- **Names:** plugin names must be unique across `requestTransforms` and `responseTransforms`.
+
 ## `gcs_uri_multipart` plugin
 
 Rewrites a JSON body into `multipart/form-data` for endpoints that take a signed object URL. Because producers can't put raw media bytes on the broker, the queued `payload` carries a signed URL (e.g. a GCS V4 signed URL) in a `gcs_uri` field.
