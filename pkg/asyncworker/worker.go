@@ -351,7 +351,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 					sendCtx, stopCancellationWatch := watchInflightCancellation(reqCtx, logger, msg)
 					resp, err := client.SendRequest(sendCtx, msg.RequestURL, sendHeaders, sendPayload)
 					cancelledInFlight := stopCancellationWatch()
-					metrics.RecordInferenceLatency(float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
+					metrics.RecordInferenceLatency(reqCtx, float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
 
 					if err == nil {
 						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)

@@ -27,9 +27,7 @@ import (
 	"github.com/llm-d/llm-d-async/pkg/version"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -357,23 +355,23 @@ func initHealthServer(impl pipeline.Flow, serverCfg ServerConfig, setupLog logr.
 }
 
 func startMetricsServer(ctx context.Context, serverCfg ServerConfig) error {
-	metricsServerOptions := metricsserver.Options{
-		BindAddress: fmt.Sprintf(":%d", serverCfg.MetricsPort),
-		FilterProvider: func() func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
-			if serverCfg.MetricsEndpointAuth {
-				return filters.WithAuthenticationAndAuthorization
-			}
-			return nil
-		}(),
-	}
 	restConfig := ctrl.GetConfigOrDie()
 
-	msrv, err := metricsserver.NewServer(metricsServerOptions, restConfig, http.DefaultClient)
+	msrv, err := metricsserver.NewServer(metricsServerOptions(serverCfg), restConfig, http.DefaultClient)
 	if err != nil {
 		return fmt.Errorf("failed to create metrics server: %w", err)
 	}
 	go msrv.Start(ctx) //nolint:errcheck
 	return nil
+}
+
+// metricsServerOptions configures the metrics server: serverCfg's port, and
+// /metrics served with OpenMetrics, behind auth when it is on.
+func metricsServerOptions(serverCfg ServerConfig) metricsserver.Options {
+	return metricsserver.Options{
+		BindAddress:    fmt.Sprintf(":%d", serverCfg.MetricsPort),
+		FilterProvider: openMetricsFilterProvider(serverCfg.MetricsEndpointAuth),
+	}
 }
 
 func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int) (*asyncworker.HTTPInferenceClient, error) {
