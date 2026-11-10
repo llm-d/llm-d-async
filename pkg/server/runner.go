@@ -547,9 +547,15 @@ func pollBacklog(ctx context.Context, reporter pipeline.BacklogReporter, interva
 			}
 		}
 		for name, cfg := range pools {
-			if work, ok := poolWork[name]; ok && !poolPartial[name] {
+			work, ok := poolWork[name]
+			switch {
+			case ok && !poolPartial[name]:
 				metrics.SetPoolDeadlineRequiredReplicas(name, cfg.RequiredReplicas(buckets, work))
-			} else {
+			case !ok && !poolPartial[name] && err == nil:
+				// The read succeeded and the pool has no queues, e.g. after a
+				// reload removed the last one: nothing is due.
+				metrics.SetPoolDeadlineRequiredReplicas(name, 0)
+			default:
 				metrics.RemovePoolDeadlineRequiredReplicas(name)
 			}
 		}

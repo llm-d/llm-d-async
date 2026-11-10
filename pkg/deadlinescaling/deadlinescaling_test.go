@@ -41,6 +41,12 @@ func TestRequiredReplicas(t *testing.T) {
 		{"empty queue", base, nil, 0},
 		{"due before a replica can start", base, map[time.Duration]int64{30 * time.Second: 1}, 10},
 		{"due exactly at the cold start", base, map[time.Duration]int64{time.Minute: 1}, 10},
+		// C = 90s falls inside (1m, 2m]: an item there may be due before a
+		// replica can start. Past that bucket: 1 / (2 * 210s) -> 1.
+		{"due in the bucket around the cold start", Config{ThroughputRPS: 2, ColdStartSeconds: 90, MaxReplicas: 10},
+			map[time.Duration]int64{2 * time.Minute: 1}, 10},
+		{"due after the bucket around the cold start", Config{ThroughputRPS: 2, ColdStartSeconds: 90, MaxReplicas: 10},
+			map[time.Duration]int64{5 * time.Minute: 1}, 1},
 		// Expired items count in every later bucket; they are left out of each.
 		// 5 / (2 * 3540s) -> 1.
 		{"expired items don't count", base, map[time.Duration]int64{0: 1000, time.Hour: 5}, 1},

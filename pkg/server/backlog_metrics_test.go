@@ -153,6 +153,41 @@ func TestPollBacklogPublishesPoolDeadlineRequiredReplicas(t *testing.T) {
 	}
 }
 
+// cleanBacklogReporter is oneShotBacklogReporter without the read error.
+type cleanBacklogReporter struct{ oneShotBacklogReporter }
+
+func (r cleanBacklogReporter) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
+	stats, _ := r.oneShotBacklogReporter.QueueBacklog(ctx)
+	return stats, nil
+}
+
+// A pool with no queues after a successful read has nothing due: 0, not a
+// missing series that would keep an autoscaler on its fallback. A failed read
+// still drops it.
+func TestPollBacklogPublishesZeroForPoolWithoutQueues(t *testing.T) {
+	pools := map[string]deadlinescaling.Config{"pool-empty": {ThroughputRPS: 2, ColdStartSeconds: 60, MaxReplicas: 10}}
+	other := []pipeline.QueueBacklogStat{
+		{QueueID: "q-elsewhere", QueueName: "queue-elsewhere", PoolName: "pool-other", SourceAvailable: true, ExpiringCounts: expiring(240)},
+	}
+	metrics.PoolDeadlineRequiredReplicas.Reset()
+	metrics.SetPoolDeadlineRequiredReplicas("pool-empty", 3) // from before the reload
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pollBacklog(ctx, cleanBacklogReporter{oneShotBacklogReporter{cancel: cancel, stats: other}}, time.Hour, pools)
+	if n := testutil.CollectAndCount(metrics.PoolDeadlineRequiredReplicas); n != 1 {
+		t.Fatalf("%d pool series, want pool-empty's", n)
+	}
+	if got := testutil.ToFloat64(metrics.PoolDeadlineRequiredReplicas); got != 0 {
+		t.Fatalf("pool required replicas = %v, want 0", got)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	pollBacklog(ctx, oneShotBacklogReporter{cancel: cancel, stats: other}, time.Hour, pools)
+	if n := testutil.CollectAndCount(metrics.PoolDeadlineRequiredReplicas); n != 0 {
+		t.Fatal("the pool kept its required-replicas series after a failed read")
+	}
+}
+
 func TestPollBacklogDropsPoolDeadlineRequiredReplicasOnFailedRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	reporter := oneShotBacklogReporter{cancel: cancel, stats: []pipeline.QueueBacklogStat{

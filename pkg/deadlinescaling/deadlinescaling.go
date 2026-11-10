@@ -54,8 +54,9 @@ func AddWork(work []float64, boundaries []time.Duration, cumulative []int64, rps
 
 // RequiredReplicas is the maximum, over the horizons t > 0 with work due in
 // them, of W(t) / ((t - C) * SafetyFactor), rounded up and capped at
-// MaxReplicas, where W(t) is the work due within t (see AddWork). Work due
-// within 0 < t <= C returns MaxReplicas; no work needs 0.
+// MaxReplicas, where W(t) is the work due within t (see AddWork). Work that
+// may be due within C, in a bucket that starts before C, returns MaxReplicas;
+// no work needs 0.
 func (c Config) RequiredReplicas(boundaries []time.Duration, work []float64) int {
 	safety := c.SafetyFactor
 	if safety == 0 {
@@ -63,17 +64,25 @@ func (c Config) RequiredReplicas(boundaries []time.Duration, work []float64) int
 	}
 	coldStart := time.Duration(c.ColdStartSeconds * float64(time.Second))
 	need := 0.0
+	var prev time.Duration
+	prevWork := 0.0
 	for i, horizon := range boundaries {
 		if i >= len(work) {
 			break
 		}
-		if horizon <= 0 || work[i] <= 0 {
+		if horizon <= 0 {
 			continue
 		}
-		if horizon <= coldStart {
+		// The bucket (prev, horizon] can't tell an item due before C from one
+		// due after it, so new work in a bucket that starts before C counts
+		// as due within C.
+		if work[i] > prevWork && prev < coldStart {
 			return c.MaxReplicas
 		}
-		need = math.Max(need, work[i]/((horizon-coldStart).Seconds()*safety))
+		if work[i] > 0 {
+			need = math.Max(need, work[i]/((horizon-coldStart).Seconds()*safety))
+		}
+		prev, prevWork = horizon, work[i]
 	}
 	if need == 0 {
 		return 0
