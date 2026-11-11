@@ -18,13 +18,22 @@ package flowcontrol
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/stretchr/testify/require"
@@ -120,4 +129,69 @@ func TestNewPrometheusRoundTripper(t *testing.T) {
 		_, err := NewPrometheusRoundTripper("", filepath.Join(t.TempDir(), "absent-token"))
 		require.Error(t, err)
 	})
+}
+
+// selfSignedServerCert returns a serving certificate for localhost that is its
+// own CA, and that certificate PEM-encoded.
+func selfSignedServerCert(t *testing.T, commonName string) (tls.Certificate, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key},
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func TestPrometheusGateReloadsRotatedCA(t *testing.T) {
+	oldCert, oldCA := selfSignedServerCert(t, "old-ca")
+	newCert, newCA := selfSignedServerCert(t, "new-ca")
+
+	var serving atomic.Pointer[tls.Certificate]
+	serving.Store(&oldCert)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"1"]}]}}`))
+	}))
+	srv.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return serving.Load(), nil
+		},
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	// Address the server by name: without SNI it would serve httptest's own
+	// certificate instead of calling GetCertificate.
+	_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	require.NoError(t, err)
+	url := "https://" + net.JoinHostPort("localhost", port)
+
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	require.NoError(t, os.WriteFile(caFile, oldCA, 0o600))
+	rt, err := NewPrometheusRoundTripper(caFile, "")
+	require.NoError(t, err)
+	gate := newQueryGate(t, NewGateFactoryWithCacheTTL(url, 0).WithPrometheusTransport(rt))
+	require.Equal(t, 1.0, gate.Budget(context.Background()), "gate should trust the server through the CA file")
+
+	// The server starts serving a certificate from a new CA. Dropping the open
+	// connections forces the next query to handshake again.
+	serving.Store(&newCert)
+	srv.CloseClientConnections()
+	require.Equal(t, 0.0, gate.Budget(context.Background()), "the old CA must not verify the new certificate")
+
+	// Rotating the CA file is enough: the same gate picks it up.
+	require.NoError(t, os.WriteFile(caFile, newCA, 0o600))
+	require.Equal(t, 1.0, gate.Budget(context.Background()), "gate should reload the rotated CA file")
 }
