@@ -47,7 +47,8 @@ func NewPrometheusRoundTripper(caFile, bearerTokenFile string) (http.RoundTrippe
 	if bearerTokenFile != "" {
 		// The library only reads the token on the first request; check it
 		// now so a wrong path fails at startup instead of closing the gates.
-		if _, err := os.ReadFile(bearerTokenFile); err != nil { // #nosec G304 -- path from trusted CLI flag
+		_, err := os.ReadFile(bearerTokenFile) // #nosec G304 -- path from trusted CLI flag
+		if err != nil {
 			return nil, fmt.Errorf("failed to read Prometheus bearer token file: %w", err)
 		}
 		cfg.Authorization = &promconfig.Authorization{Type: "Bearer", CredentialsFile: bearerTokenFile}
