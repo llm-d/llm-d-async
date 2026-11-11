@@ -50,14 +50,19 @@ func newAuthenticatedPrometheus(t *testing.T, token *atomic.Value) (*httptest.Se
 	return srv, caFile
 }
 
-func queryGateBudget(t *testing.T, factory *GateFactory) float64 {
+func newQueryGate(t *testing.T, factory *GateFactory) pipeline.Gate {
 	t.Helper()
 	gate, err := factory.CreateGate(pipeline.GateConfig{
 		GateType:   "prometheus-query",
 		GateParams: map[string]any{"query": "up"},
 	})
 	require.NoError(t, err)
-	return gate.Budget(context.Background())
+	return gate
+}
+
+func queryGateBudget(t *testing.T, factory *GateFactory) float64 {
+	t.Helper()
+	return newQueryGate(t, factory).Budget(context.Background())
 }
 
 func TestPrometheusGateAuthenticatesWithCAAndRotatedToken(t *testing.T) {
@@ -70,15 +75,15 @@ func TestPrometheusGateAuthenticatesWithCAAndRotatedToken(t *testing.T) {
 
 	rt, err := NewPrometheusRoundTripper(caFile, tokenFile)
 	require.NoError(t, err)
-	factory := NewGateFactoryWithCacheTTL(srv.URL, 0).WithPrometheusTransport(rt)
+	gate := newQueryGate(t, NewGateFactoryWithCacheTTL(srv.URL, 0).WithPrometheusTransport(rt))
 
-	require.Equal(t, 1.0, queryGateBudget(t, factory), "gate should read the metric through TLS with the bearer token")
+	require.Equal(t, 1.0, gate.Budget(context.Background()), "gate should read the metric through TLS with the bearer token")
 
-	// The server now only accepts a new token; the gate must pick it up from
-	// the file without being rebuilt, as with a rotated service account token.
+	// The server now only accepts a new token; the same gate must pick it up
+	// from the file, as with a rotated service account token.
 	token.Store("second-token")
 	require.NoError(t, os.WriteFile(tokenFile, []byte("second-token"), 0o600))
-	require.Equal(t, 1.0, queryGateBudget(t, factory), "gate should send the rotated token")
+	require.Equal(t, 1.0, gate.Budget(context.Background()), "gate should send the rotated token")
 }
 
 func TestPrometheusGateFailsClosedWithoutCredentials(t *testing.T) {
@@ -108,6 +113,11 @@ func TestNewPrometheusRoundTripper(t *testing.T) {
 
 	t.Run("missing CA file is rejected at startup", func(t *testing.T) {
 		_, err := NewPrometheusRoundTripper(filepath.Join(t.TempDir(), "absent.crt"), "")
+		require.Error(t, err)
+	})
+
+	t.Run("missing bearer token file is rejected at startup", func(t *testing.T) {
+		_, err := NewPrometheusRoundTripper("", filepath.Join(t.TempDir(), "absent-token"))
 		require.Error(t, err)
 	})
 }
