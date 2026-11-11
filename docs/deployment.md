@@ -56,6 +56,10 @@ make deploy-ap-on-k8s
 |------|---------|-------------|
 | `prometheus-url` | — | Prometheus server URL for metric-based gates (e.g., http://localhost:9090). Required when using metric-based gates (`prometheus-saturation`, `prometheus-budget`, `prometheus-query`). For Google Managed Prometheus (GMP), point this to a local proxy or GMP frontend that handles authentication — direct GMP URLs are not supported as the Async Processor does not perform GMP authentication. |
 | `prometheus-cache-ttl` | `5s` | TTL for cached Prometheus metric sources (e.g. `1m`, `0s` to disable). Increasing this reduces Prometheus load but also reduces the responsiveness of dispatch gates to metric changes. |
+| `prometheus-bearer-token-file` | — | Path to a file holding a bearer token sent with every Prometheus query. The file must exist at startup and is re-read on each request, so rotated tokens (e.g. projected service account tokens) apply without a restart. Use an `https://` `prometheus-url` with it; over `http://` the token is sent unencrypted. |
+| `prometheus-ca-cert` | — | Path to a CA certificate file (PEM) for verifying the Prometheus server. Must exist at startup; reloaded when the file changes. |
+
+These two flags let metric gates query a Prometheus API that requires a bearer token and a private CA, such as OpenShift's Thanos Querier. On OpenShift, grant the Async Processor's service account `cluster-monitoring-view` (cluster-wide metrics read), set `prometheus-url` to `https://thanos-querier.openshift-monitoring.svc:9091`, and point the flags at the service account mount (`/var/run/secrets/kubernetes.io/serviceaccount/token` and `.../service-ca.crt`). In the Helm chart these are `ap.prometheusAuth.bearerTokenFile` and `ap.prometheusAuth.caCertFile`. The chart only passes the paths; it does not mount the files, so on other platforms provide them through your own volume.
 
 **Timeouts and draining:**
 

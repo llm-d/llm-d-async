@@ -96,8 +96,10 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	gateFactory = flowcontrol.NewGateFactoryWithCacheTTL(opts.Prometheus.URL, opts.Prometheus.CacheTTL).
-		WithLogger(setupLog)
+	gateFactory, err = newGateFactory(opts.Prometheus, setupLog)
+	if err != nil {
+		return err
+	}
 
 	policy, err := loadRequestMergePolicy(opts.mergePolicyConfigFile(), ctx)
 	if err != nil {
@@ -410,6 +412,18 @@ func loadTransforms(ctx context.Context, configFile string, setupLog logr.Logger
 	}
 	setupLog.Info("Loaded request transform plugins", "count", chain.Len())
 	return chain, nil
+}
+
+// newGateFactory builds the gate factory from the Prometheus options,
+// including the CA and bearer token Prometheus gates authenticate with.
+func newGateFactory(cfg PrometheusConfig, logger logr.Logger) (*flowcontrol.GateFactory, error) {
+	transport, err := flowcontrol.NewPrometheusRoundTripper(cfg.CACertFile, cfg.BearerTokenFile)
+	if err != nil {
+		return nil, err
+	}
+	return flowcontrol.NewGateFactoryWithCacheTTL(cfg.URL, cfg.CacheTTL).
+		WithPrometheusTransport(transport).
+		WithLogger(logger), nil
 }
 
 func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {

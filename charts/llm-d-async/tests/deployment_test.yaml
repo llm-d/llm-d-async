@@ -544,3 +544,16 @@ tests:
                 name: RELEASE-NAME-llm-d-async-sql
                 key: url
           any: true
+
+  - it: should pass the Prometheus bearer token and CA files when set
+    set:
+      ap.prometheusURL: https://thanos-querier.openshift-monitoring.svc:9091
+      ap.prometheusAuth.bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      ap.prometheusAuth.caCertFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --prometheus-bearer-token-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --prometheus-ca-cert=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt

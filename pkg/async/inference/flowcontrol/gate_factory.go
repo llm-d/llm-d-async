@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -42,8 +43,11 @@ var _ QuotaStore = (*redisgate.QuotaStore)(nil)
 // GateFactory creates DispatchGate instances based on configuration.
 type GateFactory struct {
 	prometheusURL string
-	cacheTTL      time.Duration
-	redisClients  map[string]*goredis.Client
+	// prometheusTransport carries the CA and bearer token for Prometheus
+	// queries; nil uses the Prometheus client's default transport.
+	prometheusTransport http.RoundTripper
+	cacheTTL            time.Duration
+	redisClients        map[string]*goredis.Client
 	// transportClients maps the Redis transport's primary address to its
 	// client, which the transport owns; Redis gates at that address reuse it.
 	transportClients map[string]goredis.UniversalClient
@@ -78,6 +82,19 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 func (f *GateFactory) WithLogger(logger logr.Logger) *GateFactory {
 	f.logger = logger
 	return f
+}
+
+// WithPrometheusTransport sets the HTTP transport Prometheus gates use, for
+// example one from NewPrometheusRoundTripper that adds a CA bundle and a
+// bearer token.
+func (f *GateFactory) WithPrometheusTransport(rt http.RoundTripper) *GateFactory {
+	f.prometheusTransport = rt
+	return f
+}
+
+// prometheusConfig is the client config every Prometheus gate uses.
+func (f *GateFactory) prometheusConfig() promapi.Config {
+	return promapi.Config{Address: f.prometheusURL, RoundTripper: f.prometheusTransport}
 }
 
 // WithSQLQuota sets the store behind sql-quota gates, which share the sql
@@ -296,7 +313,7 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := promapi.Config{Address: f.prometheusURL}
+		promConfig := f.prometheusConfig()
 		source, err := NewSaturationPromQLSourceFromConfig(promConfig, params)
 		if err != nil {
 			return nil, err
@@ -339,7 +356,7 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := promapi.Config{Address: f.prometheusURL}
+		promConfig := f.prometheusConfig()
 		namespace := paramString(params, "namespace", "")
 
 		flowControlSource, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxConcurrency, namespace)
@@ -395,7 +412,7 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := promapi.Config{Address: f.prometheusURL}
+		promConfig := f.prometheusConfig()
 		source, err := NewPromQLMetricSource(promConfig, query)
 		if err != nil {
 			return nil, err
