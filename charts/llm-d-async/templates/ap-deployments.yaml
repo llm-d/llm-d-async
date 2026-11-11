@@ -76,6 +76,14 @@ spec:
           {{- if .Values.ap.prometheusCacheTTL }}
           - --prometheus-cache-ttl={{ .Values.ap.prometheusCacheTTL }}
           {{- end }}
+          {{- with .Values.ap.prometheusAuth }}
+          {{- if .bearerTokenFile }}
+          - --prometheus-bearer-token-file={{ .bearerTokenFile }}
+          {{- end }}
+          {{- if .caCertFile }}
+          - --prometheus-ca-cert={{ .caCertFile }}
+          {{- end }}
+          {{- end }}
           {{- if .Values.ap.workerPools }}
           - --pool-config-file=/etc/llm-d-async/config/worker-pools.json
           {{- end }}

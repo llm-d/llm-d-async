@@ -96,7 +96,12 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		return err
 	}
 
+	promTransport, err := flowcontrol.NewPrometheusRoundTripper(opts.Prometheus.CACertFile, opts.Prometheus.BearerTokenFile)
+	if err != nil {
+		return err
+	}
 	gateFactory = flowcontrol.NewGateFactoryWithCacheTTL(opts.Prometheus.URL, opts.Prometheus.CacheTTL).
+		WithPrometheusTransport(promTransport).
 		WithLogger(setupLog)
 
 	policy, err := loadRequestMergePolicy(opts.mergePolicyConfigFile(), ctx)

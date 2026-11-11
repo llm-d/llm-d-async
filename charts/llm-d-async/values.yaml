@@ -55,6 +55,16 @@ ap:
   drainTimeout: "2m"
   prometheusURL: ""
   prometheusCacheTTL: ""
+  # Authentication for metric gates whose Prometheus API needs it, such as
+  # OpenShift's Thanos Querier (https://thanos-querier.openshift-monitoring.svc:9091),
+  # which also requires the service account to hold cluster-monitoring-view.
+  # Paths are inside the container; on OpenShift the default service account
+  # mount provides both:
+  #   bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  #   caCertFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+  prometheusAuth:
+    bearerTokenFile: ""
+    caCertFile: ""
   # Extra environment variables to inject into the processor container.
   # Useful for passing backend-specific configuration like PUBSUB_EMULATOR_HOST.
   # Note: Avoid setting NAMESPACE or POD_NAME here as it will override the downward
