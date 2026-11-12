@@ -29,11 +29,12 @@ type TLSConfig struct {
 }
 
 type WorkerConfig struct {
-	Concurrency          int
-	RequestTimeout       time.Duration
-	GateWaitTimeout      time.Duration
-	DrainTimeout         time.Duration
-	PoolConfigFile       string
+	Concurrency     int
+	RequestTimeout  time.Duration
+	GateWaitTimeout time.Duration
+	DrainTimeout    time.Duration
+	PoolConfigFile  string
+
 	ResultHeaderPrefixes []string
 	MaxResponseBytes     int64
 }
