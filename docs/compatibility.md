@@ -3,8 +3,8 @@
 The producer libraries (`github.com/llm-d/llm-d-async/producer` for the Redis
 transports, `github.com/llm-d/llm-d-async/producer-sql` for the `sql` transport)
 and the Async Processor binary are released together from one commit, but they
-rarely run at the same version: the library is compiled into your application, the processor
-is a deployment. This page states which combinations work and what contributors
+don't always run at the same version: the library is compiled into your
+application, the processor is a deployment. This page states which combinations work and what contributors
 must keep true so that they stay working.
 
 ## What couples them
