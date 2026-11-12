@@ -203,6 +203,8 @@ Results are written to the result queue/topic with the following structure:
 | `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE`. A response larger than `--max-response-bytes` (chart: `ap.maxResponseBytes`) is not retried and yields `INFERENCE_ERROR`. |
 | `error_message` | string | Human-readable description accompanying `error_code` |
 
+[`examples/speech`](../examples/speech/main.go) submits a `/v1/audio/speech` request and writes the audio from its result to a file.
+
 ### Internal Wire Format
 
 On the broker itself, messages travel in a tagged envelope carrying the request kind and internal routing (producers create this automatically):
