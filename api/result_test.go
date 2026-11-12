@@ -2,41 +2,24 @@ package api
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
+	"maps"
 	"testing"
 )
-
-// wavClip returns a 16-bit mono PCM WAV whose header carries NUL bytes and whose samples are
-// not valid UTF-8, the shape vllm-omni returns from /v1/audio/speech.
-func wavClip(samples []int16) []byte {
-	var b bytes.Buffer
-	dataLen := uint32(len(samples) * 2)
-	b.WriteString("RIFF")
-	_ = binary.Write(&b, binary.LittleEndian, 36+dataLen)
-	b.WriteString("WAVEfmt ")
-	_ = binary.Write(&b, binary.LittleEndian, []any{uint32(16), uint16(1), uint16(1), uint32(24000), uint32(48000), uint16(2), uint16(16)})
-	b.WriteString("data")
-	_ = binary.Write(&b, binary.LittleEndian, dataLen)
-	_ = binary.Write(&b, binary.LittleEndian, samples)
-	return b.Bytes()
-}
 
 func TestNewResponseResult(t *testing.T) {
 	req := &RequestMessage{ID: "speech-1", Metadata: map[string]string{"tenant": "a"}}
 	routing := InternalRouting{RequestToken: "gen-1"}
-	audio := wavClip([]int16{0, 32767, -32768, 1234, -1})
-	silence := make([]byte, 64)
+	audio := []byte("RIFF\x2e\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\xc0\x5d\x00\x00\x80\xbb\x00\x00\x02\x00\x10\x00data\x0a\x00\x00\x00\x00\x00\xff\x7f\x00\x80\xd2\x04\xff\xff")
 
 	tests := []struct {
 		name         string
 		resp         InferenceResponse
-		wantEncoding string
+		wantEncoding PayloadEncoding
 	}{
 		{
-			name:         "json body stays inline",
-			resp:         InferenceResponse{StatusCode: 200, Body: []byte(`{"text":"héllo"}`), ContentType: "application/json"},
-			wantEncoding: "",
+			name: "json body stays inline",
+			resp: InferenceResponse{StatusCode: 200, Body: []byte(`{"text":"héllo"}`), ContentType: "application/json"},
 		},
 		{
 			name: "audio body is base64 encoded",
@@ -49,14 +32,12 @@ func TestNewResponseResult(t *testing.T) {
 			wantEncoding: PayloadEncodingBase64,
 		},
 		{
-			name:         "all-NUL body is valid UTF-8 and stays inline",
-			resp:         InferenceResponse{StatusCode: 200, Body: silence, ContentType: "audio/pcm"},
-			wantEncoding: "",
+			name: "all-NUL body is valid UTF-8 and stays inline",
+			resp: InferenceResponse{StatusCode: 200, Body: make([]byte, 64), ContentType: "audio/pcm"},
 		},
 		{
-			name:         "empty body",
-			resp:         InferenceResponse{StatusCode: 204},
-			wantEncoding: "",
+			name: "empty body",
+			resp: InferenceResponse{StatusCode: 204},
 		},
 		{
 			name:         "error status with binary body",
@@ -92,13 +73,8 @@ func TestNewResponseResult(t *testing.T) {
 			if got.ContentType != tc.resp.ContentType {
 				t.Errorf("ContentType = %q, want %q", got.ContentType, tc.resp.ContentType)
 			}
-			if len(got.Headers) != len(tc.resp.Headers) {
-				t.Fatalf("Headers = %v, want %v", got.Headers, tc.resp.Headers)
-			}
-			for k, v := range tc.resp.Headers {
-				if got.Headers[k] != v {
-					t.Errorf("Headers[%q] = %q, want %q", k, got.Headers[k], v)
-				}
+			if !maps.Equal(got.Headers, tc.resp.Headers) {
+				t.Errorf("Headers = %v, want %v", got.Headers, tc.resp.Headers)
 			}
 		})
 	}
@@ -146,7 +122,7 @@ func TestResultMessageOmitsUnsetBinaryFields(t *testing.T) {
 	}
 	for _, k := range []string{"payload_encoding", "content_type", "headers"} {
 		if _, ok := fields[k]; ok {
-			t.Errorf("legacy result carries %q: %s", k, wire)
+			t.Errorf("text result carries %q: %s", k, wire)
 		}
 	}
 }

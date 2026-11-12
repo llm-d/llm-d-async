@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -543,13 +545,8 @@ func TestSendRequest_responseMetadata(t *testing.T) {
 			if resp.ContentType != "audio/wav" {
 				t.Errorf("ContentType = %q, want audio/wav", resp.ContentType)
 			}
-			if len(resp.Headers) != len(tc.wantHeaders) {
-				t.Fatalf("Headers = %v, want %v", resp.Headers, tc.wantHeaders)
-			}
-			for k, v := range tc.wantHeaders {
-				if resp.Headers[k] != v {
-					t.Errorf("Headers[%q] = %q, want %q", k, resp.Headers[k], v)
-				}
+			if !maps.Equal(resp.Headers, tc.wantHeaders) {
+				t.Errorf("Headers = %v, want %v", resp.Headers, tc.wantHeaders)
 			}
 		})
 	}
@@ -600,6 +597,7 @@ func TestSendRequest_maxResponseBytes(t *testing.T) {
 	}{
 		{name: "zero is unlimited", limit: 0},
 		{name: "negative is unlimited", limit: -1},
+		{name: "max int64 is unlimited", limit: math.MaxInt64, query: "?chunked=1"},
 		{name: "body at the limit is read", limit: int64(len(body))},
 		{name: "chunked body at the limit is read", limit: int64(len(body)), query: "?chunked=1"},
 		{name: "content length over the limit fails", limit: int64(len(body)) - 1, wantErr: true},
@@ -632,5 +630,28 @@ func TestSendRequest_maxResponseBytes(t *testing.T) {
 				t.Errorf("err = %q, want the limit in the message", ce.Error())
 			}
 		})
+	}
+}
+
+type failingFullReader struct{}
+
+func (failingFullReader) Read(p []byte) (int, error) {
+	return len(p), errors.New("checksum mismatch")
+}
+
+func TestSendRequest_oversizedBodyWithReadError(t *testing.T) {
+	client := NewHTTPInferenceClient(NewTestClient(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(failingFullReader{}), Header: make(http.Header), ContentLength: -1}, nil
+	}), WithMaxResponseBytes(99))
+	resp, err := client.SendRequest(context.Background(), "http://localhost/v1/audio/speech", nil, []byte(`{}`))
+	if resp != nil {
+		t.Errorf("resp = %+v, want nil so no truncated body becomes a result", resp)
+	}
+	var ce *asyncapi.ClientError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %v, want *ClientError", err)
+	}
+	if ce.Category() != asyncapi.ErrCategoryInvalidReq || !errors.Is(err, errResponseTooLarge) {
+		t.Errorf("err = %v (category %s), want the non-retryable size error", err, ce.Category())
 	}
 }

@@ -29,15 +29,13 @@ type TLSConfig struct {
 }
 
 type WorkerConfig struct {
-	Concurrency     int
-	RequestTimeout  time.Duration
-	GateWaitTimeout time.Duration
-	DrainTimeout    time.Duration
-	PoolConfigFile  string
-	// ResultHeaderPrefixes selects the inference response headers forwarded in results.
+	Concurrency          int
+	RequestTimeout       time.Duration
+	GateWaitTimeout      time.Duration
+	DrainTimeout         time.Duration
+	PoolConfigFile       string
 	ResultHeaderPrefixes []string
-	// MaxResponseBytes caps the inference response body size; 0 is unlimited.
-	MaxResponseBytes int64
+	MaxResponseBytes     int64
 }
 
 // TransportOptions groups the transport selection and configuration flags.
