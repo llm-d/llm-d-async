@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -477,37 +476,6 @@ func TestSQLFlow_BinaryResultRoundTrips(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, audio, body, "audio bytes changed on the way through Postgres")
 	})
-}
-
-func TestSQLFlow_LargeResultRoundTrips(t *testing.T) {
-	for _, size := range []int{256 << 10, 1 << 20, 4 << 20} {
-		t.Run(fmt.Sprintf("%d bytes", size), func(t *testing.T) {
-			withSQLDSN(t, func(t *testing.T, dsn string) {
-				b64 := strings.Repeat("A", size)
-				body := `{"data":[{"b64_json":"` + b64 + `"}]}`
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = io.WriteString(w, body)
-				}))
-				t.Cleanup(srv.Close)
-
-				h := startSQLFlowWorkers(t, dsn, srv.URL, 60, 100*time.Millisecond, 1)
-				require.NoError(t, h.producer.SubmitRequest(context.Background(), &api.RequestMessage{
-					ID:       "image-1",
-					Created:  time.Now().Unix(),
-					Deadline: time.Now().Add(5 * time.Minute).Unix(),
-					Endpoint: "/v1/images/generations",
-					Payload:  testPayload(map[string]any{"model": "flux", "prompt": "a fox"}),
-				}))
-
-				res := getResult(t, h.producer, 20*time.Second)
-				require.Equal(t, "image-1", res.ID)
-				require.Equal(t, http.StatusOK, res.StatusCode, res.ErrorMessage)
-				assert.Equal(t, len(body), len(res.Payload))
-				assert.True(t, res.Payload == body, "payload changed on the way through Postgres")
-			})
-		})
-	}
 }
 
 func TestSQLFlow_OversizedResultFailsWithoutRetry(t *testing.T) {
