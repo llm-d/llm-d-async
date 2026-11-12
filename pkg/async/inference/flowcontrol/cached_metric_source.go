@@ -49,6 +49,11 @@ func NewCachedMetricSource(source MetricSource, ttl time.Duration) *CachedMetric
 // Query returns cached samples if the cache is still valid, otherwise
 // delegates to the underlying source and caches the result. Waiting for an
 // in-flight query honors the caller's context.
+//
+// A refresh that fails after the caller's own context ended is not cached:
+// that error describes the caller (a gate-wait deadline, a shutdown), not
+// the backend, and caching it would hand every other gate the fallback
+// budget until the TTL runs out.
 func (c *CachedMetricSource) Query(ctx context.Context) ([]Sample, error) {
 	select {
 	case c.queryLock <- struct{}{}:
@@ -62,7 +67,11 @@ func (c *CachedMetricSource) Query(ctx context.Context) ([]Sample, error) {
 		return c.samples, c.err
 	}
 
-	c.samples, c.err = c.source.Query(ctx)
+	samples, err := c.source.Query(ctx)
+	if err != nil && ctx.Err() != nil {
+		return nil, err
+	}
+	c.samples, c.err = samples, err
 	c.expiry = now.Add(c.ttl)
 	return c.samples, c.err
 }
