@@ -6,9 +6,13 @@ import "context"
 // StatusCode is non-zero whenever an HTTP response was received (including 4xx/5xx).
 // A zero StatusCode means no HTTP response was obtained (e.g. transport/network failure).
 // Body contains the response body; it may be partial if a read error occurred.
+// ContentType is the response's Content-Type header. Headers holds the response headers the
+// client is configured to forward, keyed by lowercase name.
 type InferenceResponse struct {
-	StatusCode int
-	Body       []byte
+	StatusCode  int
+	Body        []byte
+	ContentType string
+	Headers     map[string]string
 }
 
 // InferenceClient defines the interface for sending inference requests.
