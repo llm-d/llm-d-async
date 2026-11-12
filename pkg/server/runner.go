@@ -126,7 +126,7 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	inferenceClient, err := initInferenceClient(opts.TLS, totalConcurrency)
+	inferenceClient, err := initInferenceClient(opts.TLS, totalConcurrency, opts.Worker)
 	if err != nil {
 		return err
 	}
@@ -378,7 +378,7 @@ func startMetricsServer(ctx context.Context, serverCfg ServerConfig) error {
 	return nil
 }
 
-func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int) (*asyncworker.HTTPInferenceClient, error) {
+func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int, worker WorkerConfig) (*asyncworker.HTTPInferenceClient, error) {
 	tlsConfig, err := buildTLSConfig(tlsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build TLS configuration: %w", err)
@@ -395,7 +395,10 @@ func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int) (*asyncworker.H
 			return "http-request"
 		}),
 	)}
-	return asyncworker.NewHTTPInferenceClient(inferenceHTTPClient), nil
+	return asyncworker.NewHTTPInferenceClient(inferenceHTTPClient,
+		asyncworker.WithResultHeaderPrefixes(worker.ResultHeaderPrefixes...),
+		asyncworker.WithMaxResponseBytes(worker.MaxResponseBytes),
+	), nil
 }
 
 func loadTransforms(ctx context.Context, configFile string, setupLog logr.Logger) (*transform.Chain, error) {

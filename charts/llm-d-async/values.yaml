@@ -53,6 +53,12 @@ ap:
   # until the request's own deadline.
   gateWaitTimeout: "5m"
   drainTimeout: "2m"
+  # Inference response header name prefixes (case-insensitive) copied into each
+  # result's headers, e.g. ["x-vllm-omni-", "x-audio-"] for vllm-omni speech usage.
+  resultHeaderPrefixes: []
+  # Inference response body size limit in bytes. Larger responses fail with
+  # INFERENCE_ERROR and are not retried. 0 is unlimited.
+  maxResponseBytes: 0
   prometheusURL: ""
   prometheusCacheTTL: ""
   # Authentication for metric gates whose Prometheus API needs it, such as
