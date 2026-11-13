@@ -18,7 +18,12 @@ package flowcontrol
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -492,4 +497,182 @@ func TestGateFactory_PropagatesOwnerToSaturationGate(t *testing.T) {
 	metricGate, ok := tierGate.saturationGate.(*MetricDispatchGate)
 	assert.True(t, ok)
 	assert.Equal(t, owner, metricGate.owner)
+}
+
+// --- GMP auth RoundTripper tests ---
+
+func TestIsGMPURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"GMP global path", "https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus", true},
+		{"subdomain is not GMP", "https://prometheus.monitoring.googleapis.com/v1/projects/p/location/global/prometheus", false},
+		{"plain prometheus", "http://prometheus:9090", false},
+		{"grafana mimir", "https://prometheus-prod-us-central1.grafana.net/api/prom", false},
+		{"not a url at all", "not a url at all", false},
+		{"malformed url does not panic", "ht!tp://broken[url", false},
+		{"empty string", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isGMPURL(tt.url))
+		})
+	}
+}
+
+func TestGateFactory_prometheusConfig(t *testing.T) {
+	t.Run("non-GMP URL leaves RoundTripper nil", func(t *testing.T) {
+		f := NewGateFactory("http://localhost:9090")
+		cfg, err := f.prometheusConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "http://localhost:9090", cfg.Address)
+		assert.Nil(t, cfg.RoundTripper)
+	})
+
+	t.Run("explicit transport wins over GMP ADC", func(t *testing.T) {
+		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		wantRT := http.DefaultTransport
+		f.WithPrometheusTransport(wantRT)
+		adcCalled := false
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
+			adcCalled = true
+			return &http.Client{}, nil
+		}
+		cfg, err := f.prometheusConfig()
+		require.NoError(t, err)
+		assert.False(t, adcCalled, "explicit transport must suppress ADC")
+		assert.Equal(t, wantRT, cfg.RoundTripper)
+	})
+
+	t.Run("GMP URL with ADC stub wires RoundTripper", func(t *testing.T) {
+		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		wantRT := http.DefaultTransport
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
+			return &http.Client{Transport: wantRT}, nil
+		}
+		cfg, err := f.prometheusConfig()
+		require.NoError(t, err)
+		assert.Equal(t, f.prometheusURL, cfg.Address)
+		assert.Equal(t, wantRT, cfg.RoundTripper)
+	})
+
+	t.Run("GMP URL with ADC failure fails closed", func(t *testing.T) {
+		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		adcErr := errors.New("no ADC available")
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
+			return nil, adcErr
+		}
+		_, err := f.prometheusConfig()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, adcErr)
+		assert.Contains(t, err.Error(), "requires GCP Application Default Credentials")
+	})
+
+	t.Run("ADC client is built once and shared across gates", func(t *testing.T) {
+		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		var calls int
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
+			calls++
+			return &http.Client{Transport: http.DefaultTransport}, nil
+		}
+		cfg1, err := f.prometheusConfig()
+		require.NoError(t, err)
+		cfg2, err := f.prometheusConfig()
+		require.NoError(t, err)
+		assert.Equal(t, 1, calls, "ADC client must be built once per factory")
+		assert.Same(t, cfg1.RoundTripper, cfg2.RoundTripper)
+	})
+}
+
+// gmpAuthTestTransport is a stub http.RoundTripper that injects an OAuth-style
+// Authorization header and rewrites the request URL to point at an httptest.Server.
+// It mirrors what google.DefaultClient's oauth2.Transport would do against a real
+// GMP endpoint, but without requiring live Application Default Credentials.
+type gmpAuthTestTransport struct {
+	serverURL string
+	token     string
+}
+
+func (t *gmpAuthTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// Set the bearer token google.DefaultClient's transport would inject.
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	// Rewrite the request to hit the local httptest server instead of the
+	// (non-routable) GMP host. Clone first so the original request is untouched.
+	u, err := url.Parse(t.serverURL)
+	if err != nil {
+		return nil, err
+	}
+	r.Host = u.Host
+	r.URL.Host = u.Host
+	r.URL.Scheme = u.Scheme
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// newGMPAuthTestServer stands up a Prometheus-shaped HTTP server that returns
+// HTTP 401 (mirroring GMP's unauthenticated behavior) unless the request carries
+// an Authorization header, in which case it returns a success vector with value.
+func newGMPAuthTestServer(t *testing.T, value string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = fmt.Fprint(w, `{"error":{"code":401,"message":"Request is missing required authentication credential."}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1234567,"%s"]}]}}`, value)
+	}))
+}
+
+// TestGateFactory_GMPAuthE2E is the end-to-end regression guard for the GMP-401
+// bug: it proves prometheusConfig's RoundTripper flows through CreateGate ->
+// api.NewClient -> a live HTTP query against a GMP-styled server. The authed
+// arm reads a real sample (not the fallback); the unauthed arm reproduces the
+// pre-fix behavior (every query 401s -> fallback) and would fail if the
+// RoundTripper wiring were reverted.
+func TestGateFactory_GMPAuthE2E(t *testing.T) {
+	const sampleValue = "0.5"
+	const fallback = 0.0
+
+	server := newGMPAuthTestServer(t, sampleValue)
+	defer server.Close()
+
+	t.Run("authed via GMP RoundTripper reads real sample", func(t *testing.T) {
+		// Use the real GMP URL form so isGMPURL() -> prometheusConfig() takes the
+		// auth path; the gmpAuthTestTransport rewrites the request to server.URL.
+		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
+			return &http.Client{Transport: &gmpAuthTestTransport{serverURL: server.URL, token: "test-token"}}, nil
+		}
+		gate, err := f.CreateGate(pipeline.GateConfig{
+			GateType:   "prometheus-query",
+			GateParams: map[string]any{"query": "up", "fallback": fallback},
+		})
+		require.NoError(t, err)
+		metricGate, ok := gate.(*MetricDispatchGate)
+		require.True(t, ok)
+		// threshold is 0.0 for prometheus-query, so Budget() returns the sample
+		// value itself when available — distinct from the fallback (0.0). This
+		// proves the authenticated request succeeded end-to-end.
+		assert.Equal(t, 0.5, metricGate.Budget(context.Background()))
+	})
+
+	t.Run("unauthed non-GMP URL falls to fallback (regression case)", func(t *testing.T) {
+		// Point at the server via a plain (non-GMP) URL so prometheusConfig()
+		// leaves RoundTripper nil — reproducing pre-fix, no-auth behavior.
+		f := NewGateFactory(server.URL)
+		gate, err := f.CreateGate(pipeline.GateConfig{
+			GateType:   "prometheus-query",
+			GateParams: map[string]any{"query": "up", "fallback": fallback},
+		})
+		require.NoError(t, err)
+		metricGate, ok := gate.(*MetricDispatchGate)
+		require.True(t, ok)
+		// Server returns 401 without an Authorization header -> source.Query
+		// errors -> gate returns fallback. Guards against re-introducing the
+		// silent-401 path.
+		assert.Equal(t, fallback, metricGate.Budget(context.Background()))
+	})
 }

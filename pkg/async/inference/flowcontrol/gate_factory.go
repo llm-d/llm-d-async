@@ -17,11 +17,15 @@ limitations under the License.
 package flowcontrol
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -29,6 +33,7 @@ import (
 	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	promapi "github.com/prometheus/client_golang/api"
 	goredis "github.com/redis/go-redis/v9"
+	"golang.org/x/oauth2/google"
 )
 
 // DefaultCacheTTL is the default TTL for cached Prometheus metric sources.
@@ -53,6 +58,19 @@ type GateFactory struct {
 	transportClients map[string]goredis.UniversalClient
 	sqlQuota         QuotaStore
 	logger           logr.Logger
+	// gmpClientFn returns an authenticated HTTP client for GMP's Prometheus
+	// HTTP Query API. Defaults to google.DefaultClient (Application Default
+	// Credentials / Workload Identity); overridable in same-package tests to
+	// avoid requiring live ADC in CI.
+	gmpClientFn func(ctx context.Context, scopes ...string) (*http.Client, error)
+	// gmpClientOnce memoizes gmpRT/gmpClientErr so every Prometheus gate
+	// shares one ADC client instead of building one per CreateGate. The
+	// outcome — including an ADC failure — is cached permanently; callers
+	// abort on the first gate-creation error, so no later gate would see
+	// a different result anyway.
+	gmpClientOnce sync.Once
+	gmpRT         http.RoundTripper
+	gmpClientErr  error
 }
 
 // NewGateFactory creates a new GateFactory with an optional Prometheus URL.
@@ -72,6 +90,7 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 		redisClients:     make(map[string]*goredis.Client),
 		transportClients: make(map[string]goredis.UniversalClient),
 		logger:           logr.Discard(),
+		gmpClientFn:      google.DefaultClient,
 	}
 }
 
@@ -92,9 +111,36 @@ func (f *GateFactory) WithPrometheusTransport(rt http.RoundTripper) *GateFactory
 	return f
 }
 
-// prometheusConfig is the client config every Prometheus gate uses.
-func (f *GateFactory) prometheusConfig() promapi.Config {
-	return promapi.Config{Address: f.prometheusURL, RoundTripper: f.prometheusTransport}
+// prometheusConfig is the client config every Prometheus gate uses. An
+// explicitly configured transport (bearer token and/or CA, see
+// NewPrometheusRoundTripper) takes precedence; otherwise a Google Managed
+// Prometheus URL gets GCP Application Default Credentials (e.g. GKE Workload
+// Identity). On a GMP URL that ADC cannot authenticate, it returns an error so
+// the gate fails closed at construction rather than silently HTTP 401'ing on
+// every query and falling back to its configured fallback value (default 0.0,
+// gate perpetually closed). Plain prometheus / mimir / victoria-metrics URLs
+// keep the Prometheus client's default transport.
+func (f *GateFactory) prometheusConfig() (promapi.Config, error) {
+	cfg := promapi.Config{Address: f.prometheusURL, RoundTripper: f.prometheusTransport}
+	if cfg.RoundTripper != nil || !isGMPURL(f.prometheusURL) {
+		return cfg, nil
+	}
+	f.gmpClientOnce.Do(func() {
+		gcpClient, err := f.gmpClientFn(context.Background(), gmpScope)
+		if err != nil {
+			f.gmpClientErr = fmt.Errorf("prometheus-url %q targets Google Managed Prometheus, "+
+				"which requires GCP Application Default Credentials (e.g. GKE Workload "+
+				"Identity); either configure ADC or set --prometheus-bearer-token-file "+
+				"and --prometheus-ca-cert: %w", f.prometheusURL, err)
+			return
+		}
+		f.gmpRT = gcpClient.Transport
+	})
+	if f.gmpClientErr != nil {
+		return cfg, f.gmpClientErr
+	}
+	cfg.RoundTripper = f.gmpRT
+	return cfg, nil
 }
 
 // WithSQLQuota sets the store behind sql-quota gates, which share the sql
@@ -313,7 +359,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := f.prometheusConfig()
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
 		source, err := NewSaturationPromQLSourceFromConfig(promConfig, params)
 		if err != nil {
 			return nil, err
@@ -356,7 +405,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := f.prometheusConfig()
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
 		namespace := paramString(params, "namespace", "")
 
 		flowControlSource, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxConcurrency, namespace)
@@ -412,7 +464,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := f.prometheusConfig()
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
 		source, err := NewPromQLMetricSource(promConfig, query)
 		if err != nil {
 			return nil, err
@@ -698,6 +753,22 @@ func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
 		return NewCachedMetricSource(s, ttl)
 	}
 	return s
+}
+
+// isGMPURL reports whether urlStr targets Google Managed Prometheus's
+// Prometheus HTTP Query API. Detection is host-based (exactly
+// monitoring.googleapis.com — GMP encodes location in the URL path, not the
+// host), so an operator's plain prometheus / mimir / victoria-metrics /
+// grafana URL gets an unauthenticated client, preserving prior behavior. A
+// malformed URL falls back to a substring check so it still gets the auth
+// path, yielding a clearer ADC error than a silent HTTP 401 at query time.
+// The function never panics.
+func isGMPURL(urlStr string) bool {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return strings.Contains(urlStr, "monitoring.googleapis.com")
+	}
+	return strings.EqualFold(u.Host, "monitoring.googleapis.com")
 }
 
 // paramMapAny extracts a map[string]any from params.
