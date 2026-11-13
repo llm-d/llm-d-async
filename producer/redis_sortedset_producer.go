@@ -81,12 +81,16 @@ const (
 	enqueueSeqFieldJSON       = `"enqueue_seq":`
 	enqueueSeqPlaceholderJSON = enqueueSeqFieldJSON + "-1"
 	enqueueSeqGrace           = time.Hour
-	// enqueueGuardTTL outlasts the retries of one script run, which finish
-	// within a minute under the go-redis default timeouts. It is relative and
-	// independent of the deadline: a server clock ahead of the producer cannot
-	// expire the guard before a retry, and guards do not accumulate for the
-	// length of a long deadline after their requests complete.
-	enqueueGuardTTL = 10 * time.Minute
+	// enqueueGuardTTL outlasts the retries of one script run. Under the
+	// go-redis defaults the last retry runs at most about 53s after the first
+	// attempt: the first attempt's 5s read timeout, then three retries of up
+	// to 16s each (pool wait, dial and write timeouts). A read_timeout above
+	// about 14s or a larger max_retries in the Redis URL can push the retries
+	// past this TTL. It is relative and independent of the deadline: a server
+	// clock ahead of the producer cannot expire the guard before a retry, and
+	// guards do not accumulate for the length of a long deadline after their
+	// requests complete.
+	enqueueGuardTTL = 2 * time.Minute
 )
 
 // enqueueSeqKey names the per-queue, per-deadline sequence counter. In
