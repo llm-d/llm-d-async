@@ -22,11 +22,13 @@ func NewQuotaStore(rdb redis.UniversalClient, slotTTL time.Duration) *QuotaStore
 	return &QuotaStore{rdb: rdb, slotTTL: slotTTL}
 }
 
-// quotaCallGuardTTL outlasts the retries of one script call, which finish
-// within a minute under the go-redis default timeouts. It does not follow
-// slotTTL or how long a slot is held, so guards number about 10 minutes of
-// calls.
-const quotaCallGuardTTL = 10 * time.Minute
+// quotaCallGuardTTL outlasts the retries of one script call. Under the
+// go-redis defaults the last retry runs at most about 53s after the first
+// attempt: the first attempt's 5s read timeout, then three retries of up to
+// 16s each (pool wait, dial and write timeouts). A read_timeout above about
+// 14s or a larger max_retries in the Redis URL can push the retries past
+// this TTL. It does not follow slotTTL or how long a slot is held.
+const quotaCallGuardTTL = 2 * time.Minute
 
 // quotaCallGuardKey marks that the call holding token has changed the counter
 // at key. go-redis retries a command whose reply was lost, so a counter script

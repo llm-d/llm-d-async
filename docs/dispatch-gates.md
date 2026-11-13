@@ -324,7 +324,7 @@ The available gate types, at a glance:
 - `redis-quota`: Per-attribute quota management via Redis.
   - `address` (**required**): Redis server address. Reuses the `redis-sortedset` transport's client when it matches, as described for the `redis` gate.
   - `attribute` (optional): The message attribute to use for quota (e.g., `userid`). Default is `userid`.
-  - `mode` (optional): `rate-limit` or `concurrency`. Default is `rate-limit`. In `concurrency` mode each admitted acquire and each release also writes a `quota-call:<counter key>:<token>` guard that expires after 10 minutes. These keys sit outside `prefix`, so a Redis ACL scoped by key pattern must allow them.
+  - `mode` (optional): `rate-limit` or `concurrency`. Default is `rate-limit`. In `concurrency` mode each admitted acquire and each release also writes a `quota-call:<counter key>:<token>` guard that expires after 2 minutes. These keys sit outside `prefix`, so a Redis ACL scoped by key pattern must allow them.
   - `limit` (**required**): The quota limit. Must be positive.
   - `window` (optional): The time window for rate limiting (e.g., `1m`, `10s`). Default is `1m`.
   - `prefix` (optional): Redis key prefix. Default is `quota:`.
