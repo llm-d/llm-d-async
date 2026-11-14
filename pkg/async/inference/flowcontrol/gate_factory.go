@@ -33,6 +33,7 @@ import (
 	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	promapi "github.com/prometheus/client_golang/api"
 	goredis "github.com/redis/go-redis/v9"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
 
@@ -59,18 +60,21 @@ type GateFactory struct {
 	sqlQuota         QuotaStore
 	logger           logr.Logger
 	// gmpClientFn returns an authenticated HTTP client for GMP's Prometheus
-	// HTTP Query API. Defaults to google.DefaultClient (Application Default
-	// Credentials / Workload Identity); overridable in same-package tests to
-	// avoid requiring live ADC in CI.
-	gmpClientFn func(ctx context.Context, scopes ...string) (*http.Client, error)
-	// gmpClientOnce memoizes gmpRT/gmpClientErr so every Prometheus gate
-	// shares one ADC client instead of building one per CreateGate. The
-	// outcome — including an ADC failure — is cached permanently; callers
-	// abort on the first gate-creation error, so no later gate would see
-	// a different result anyway.
-	gmpClientOnce sync.Once
-	gmpRT         http.RoundTripper
-	gmpClientErr  error
+	// HTTP Query API plus the token source that backs it, so callers can
+	// prove the credentials actually mint tokens before using the client.
+	// Defaults to newGMPClient (Application Default Credentials / Workload
+	// Identity); overridable in same-package tests to avoid requiring live
+	// ADC in CI.
+	gmpClientFn func(ctx context.Context, scopes ...string) (*http.Client, oauth2.TokenSource, error)
+	// gmpTokenTimeout bounds the initial token acquisition so an unreachable
+	// token endpoint cannot hang gate creation.
+	gmpTokenTimeout time.Duration
+	// gmpMu guards gmpRT. A successfully built transport is cached so every
+	// Prometheus gate shares one ADC client; failures are not cached, so a
+	// later CreateGate — config reloads retry gate creation on each tick —
+	// can succeed once credentials are fixed, without a process restart.
+	gmpMu sync.Mutex
+	gmpRT http.RoundTripper
 }
 
 // NewGateFactory creates a new GateFactory with an optional Prometheus URL.
@@ -90,7 +94,8 @@ func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *G
 		redisClients:     make(map[string]*goredis.Client),
 		transportClients: make(map[string]goredis.UniversalClient),
 		logger:           logr.Discard(),
-		gmpClientFn:      google.DefaultClient,
+		gmpClientFn:      newGMPClient,
+		gmpTokenTimeout:  defaultGMPTokenTimeout,
 	}
 }
 
@@ -115,32 +120,102 @@ func (f *GateFactory) WithPrometheusTransport(rt http.RoundTripper) *GateFactory
 // explicitly configured transport (bearer token and/or CA, see
 // NewPrometheusRoundTripper) takes precedence; otherwise a Google Managed
 // Prometheus URL gets GCP Application Default Credentials (e.g. GKE Workload
-// Identity). On a GMP URL that ADC cannot authenticate, it returns an error so
-// the gate fails closed at construction rather than silently HTTP 401'ing on
-// every query and falling back to its configured fallback value (default 0.0,
-// gate perpetually closed). Plain prometheus / mimir / victoria-metrics URLs
-// keep the Prometheus client's default transport.
+// Identity). GMP URLs authenticate eagerly and fail closed at construction —
+// the scheme must be https, ADC discovery must succeed, and an initial token
+// must be mintable — rather than silently HTTP 401'ing on every query and
+// falling back to the configured fallback value (default 0.0, gate
+// perpetually closed). A successful transport is cached; authentication
+// failures are not, so the config reload path (which retries gate creation
+// every tick) can succeed once credentials are corrected. Plain prometheus /
+// mimir / victoria-metrics URLs keep the Prometheus client's default
+// transport.
 func (f *GateFactory) prometheusConfig() (promapi.Config, error) {
 	cfg := promapi.Config{Address: f.prometheusURL, RoundTripper: f.prometheusTransport}
 	if cfg.RoundTripper != nil || !isGMPURL(f.prometheusURL) {
 		return cfg, nil
 	}
-	f.gmpClientOnce.Do(func() {
-		gcpClient, err := f.gmpClientFn(context.Background(), gmpScope)
+	f.gmpMu.Lock()
+	defer f.gmpMu.Unlock()
+	if f.gmpRT == nil {
+		rt, err := f.newAuthedPrometheusClient(context.Background())
 		if err != nil {
-			f.gmpClientErr = fmt.Errorf("prometheus-url %q targets Google Managed Prometheus, "+
-				"which requires GCP Application Default Credentials (e.g. GKE Workload "+
-				"Identity); either configure ADC or set --prometheus-bearer-token-file "+
-				"and --prometheus-ca-cert: %w", f.prometheusURL, err)
-			return
+			return cfg, err
 		}
-		f.gmpRT = gcpClient.Transport
-	})
-	if f.gmpClientErr != nil {
-		return cfg, f.gmpClientErr
+		f.gmpRT = rt
 	}
 	cfg.RoundTripper = f.gmpRT
 	return cfg, nil
+}
+
+// defaultGMPTokenTimeout bounds the initial GMP token acquisition so an
+// unreachable token endpoint cannot hang gate creation.
+const defaultGMPTokenTimeout = 10 * time.Second
+
+// newGMPClient builds an HTTP client authenticated with GCP Application
+// Default Credentials for the given scopes, and returns the token source
+// backing it so callers can verify the credentials can actually mint tokens
+// before using the client. The credentials are built with a non-cancelling
+// context: x/oauth2 captures this context into the returned token source and
+// reuses it for every token refresh for the life of the client, so it must
+// not carry the caller's deadline or cancellation.
+func newGMPClient(ctx context.Context, scopes ...string) (*http.Client, oauth2.TokenSource, error) {
+	longCtx := context.WithoutCancel(ctx)
+	creds, err := google.FindDefaultCredentials(longCtx, scopes...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("finding GCP Application Default Credentials: %w", err)
+	}
+	return oauth2.NewClient(longCtx, creds.TokenSource), creds.TokenSource, nil
+}
+
+// newAuthedPrometheusClient builds the authenticated GMP RoundTripper that
+// prometheusConfig caches. It fails closed on non-https GMP URLs (the OAuth
+// access token would otherwise be sent in cleartext), on ADC discovery
+// failure, and on initial token-acquisition failure; none of those outcomes
+// are cached, so a later CreateGate retries them.
+func (f *GateFactory) newAuthedPrometheusClient(ctx context.Context) (http.RoundTripper, error) {
+	u, err := url.Parse(f.prometheusURL)
+	if err != nil || u.Scheme != "https" {
+		return nil, fmt.Errorf("prometheus-url %q targets Google Managed Prometheus but is "+
+			"not an https:// URL; refusing to send OAuth access tokens in cleartext",
+			f.prometheusURL)
+	}
+	ctx, cancel := context.WithTimeout(ctx, f.gmpTokenTimeout)
+	defer cancel()
+	gcpClient, tokenSource, err := f.gmpClientFn(ctx, gmpScope)
+	if err != nil {
+		return nil, f.gmpADCError(err)
+	}
+	if err := mintInitialToken(ctx, tokenSource); err != nil {
+		return nil, f.gmpADCError(fmt.Errorf("ADC was found, but an initial token could not be minted: %w", err))
+	}
+	return gcpClient.Transport, nil
+}
+
+// mintInitialToken acquires an initial token from ts, bounded by ctx. The
+// oauth2.TokenSource API takes no context, so the call runs in a goroutine
+// bounded by ctx; if ctx expires first, the straggler is left to finish
+// when the token endpoint answers — the client is discarded either way.
+func mintInitialToken(ctx context.Context, ts oauth2.TokenSource) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := ts.Token()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("acquiring initial token: %w", ctx.Err())
+	}
+}
+
+// gmpADCError wraps an authentication failure with the operator guidance for
+// either fixing ADC or switching to explicit bearer-token auth.
+func (f *GateFactory) gmpADCError(err error) error {
+	return fmt.Errorf("prometheus-url %q targets Google Managed Prometheus, "+
+		"which requires GCP Application Default Credentials (e.g. GKE Workload "+
+		"Identity); either configure ADC or set --prometheus-bearer-token-file "+
+		"and --prometheus-ca-cert: %w", f.prometheusURL, err)
 }
 
 // WithSQLQuota sets the store behind sql-quota gates, which share the sql
@@ -757,18 +832,18 @@ func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
 
 // isGMPURL reports whether urlStr targets Google Managed Prometheus's
 // Prometheus HTTP Query API. Detection is host-based (exactly
-// monitoring.googleapis.com — GMP encodes location in the URL path, not the
-// host), so an operator's plain prometheus / mimir / victoria-metrics /
-// grafana URL gets an unauthenticated client, preserving prior behavior. A
-// malformed URL falls back to a substring check so it still gets the auth
-// path, yielding a clearer ADC error than a silent HTTP 401 at query time.
-// The function never panics.
+// monitoring.googleapis.com, ignoring any port — GMP encodes location in the
+// URL path, not the host), so an operator's plain prometheus / mimir /
+// victoria-metrics / grafana URL gets an unauthenticated client, preserving
+// prior behavior. A malformed URL falls back to a substring check so it still
+// gets the auth path, yielding a clearer ADC error than a silent HTTP 401 at
+// query time. The function never panics.
 func isGMPURL(urlStr string) bool {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return strings.Contains(urlStr, "monitoring.googleapis.com")
 	}
-	return strings.EqualFold(u.Host, "monitoring.googleapis.com")
+	return strings.EqualFold(u.Hostname(), "monitoring.googleapis.com")
 }
 
 // paramMapAny extracts a map[string]any from params.

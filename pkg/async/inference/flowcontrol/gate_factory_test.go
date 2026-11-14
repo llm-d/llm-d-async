@@ -33,6 +33,7 @@ import (
 	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 func TestGateFactory_WithCacheTTL(t *testing.T) {
@@ -508,6 +509,9 @@ func TestIsGMPURL(t *testing.T) {
 		want bool
 	}{
 		{"GMP global path", "https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus", true},
+		{"GMP with explicit https port", "https://monitoring.googleapis.com:443/v1/projects/p/location/global/prometheus", true},
+		{"GMP with non-standard https port", "https://monitoring.googleapis.com:8443/v1/projects/p/location/global/prometheus", true},
+		{"GMP over plain http still detected", "http://monitoring.googleapis.com/v1/projects/p/location/global/prometheus", true},
 		{"subdomain is not GMP", "https://prometheus.monitoring.googleapis.com/v1/projects/p/location/global/prometheus", false},
 		{"plain prometheus", "http://prometheus:9090", false},
 		{"grafana mimir", "https://prometheus-prod-us-central1.grafana.net/api/prom", false},
@@ -536,9 +540,9 @@ func TestGateFactory_prometheusConfig(t *testing.T) {
 		wantRT := http.DefaultTransport
 		f.WithPrometheusTransport(wantRT)
 		adcCalled := false
-		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
 			adcCalled = true
-			return &http.Client{}, nil
+			return &http.Client{}, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
 		}
 		cfg, err := f.prometheusConfig()
 		require.NoError(t, err)
@@ -549,8 +553,8 @@ func TestGateFactory_prometheusConfig(t *testing.T) {
 	t.Run("GMP URL with ADC stub wires RoundTripper", func(t *testing.T) {
 		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
 		wantRT := http.DefaultTransport
-		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
-			return &http.Client{Transport: wantRT}, nil
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
+			return &http.Client{Transport: wantRT}, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
 		}
 		cfg, err := f.prometheusConfig()
 		require.NoError(t, err)
@@ -561,8 +565,8 @@ func TestGateFactory_prometheusConfig(t *testing.T) {
 	t.Run("GMP URL with ADC failure fails closed", func(t *testing.T) {
 		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
 		adcErr := errors.New("no ADC available")
-		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
-			return nil, adcErr
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
+			return nil, nil, adcErr
 		}
 		_, err := f.prometheusConfig()
 		require.Error(t, err)
@@ -573,9 +577,9 @@ func TestGateFactory_prometheusConfig(t *testing.T) {
 	t.Run("ADC client is built once and shared across gates", func(t *testing.T) {
 		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
 		var calls int
-		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
 			calls++
-			return &http.Client{Transport: http.DefaultTransport}, nil
+			return &http.Client{Transport: http.DefaultTransport}, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
 		}
 		cfg1, err := f.prometheusConfig()
 		require.NoError(t, err)
@@ -584,7 +588,85 @@ func TestGateFactory_prometheusConfig(t *testing.T) {
 		assert.Equal(t, 1, calls, "ADC client must be built once per factory")
 		assert.Same(t, cfg1.RoundTripper, cfg2.RoundTripper)
 	})
+
+	t.Run("discovery failure is retried on the next call", func(t *testing.T) {
+		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		adcErr := errors.New("adc temporarily unavailable")
+		var calls int
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
+			calls++
+			if calls == 1 {
+				return nil, nil, adcErr
+			}
+			return &http.Client{Transport: http.DefaultTransport}, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
+		}
+		_, err := f.prometheusConfig()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, adcErr)
+		// The failure must NOT be cached: a subsequent call (e.g. the next
+		// config-reload tick) must retry discovery and succeed.
+		cfg, err := f.prometheusConfig()
+		require.NoError(t, err)
+		assert.Equal(t, http.RoundTripper(http.DefaultTransport), cfg.RoundTripper)
+		assert.Equal(t, 2, calls, "discovery must be retried, not cached permanently")
+	})
+
+	t.Run("initial token failure fails closed and is retried", func(t *testing.T) {
+		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		tokenErr := errors.New("refresh token revoked")
+		broken := tokenSourceFunc(func() (*oauth2.Token, error) { return nil, tokenErr })
+		minted := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"})
+		var calls int
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
+			calls++
+			ts := oauth2.TokenSource(broken)
+			if calls > 1 {
+				ts = minted
+			}
+			return &http.Client{Transport: http.DefaultTransport}, ts, nil
+		}
+		_, err := f.prometheusConfig()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, tokenErr)
+		assert.Contains(t, err.Error(), "an initial token could not be minted",
+			"token-mint failure must be reported distinctly from ADC discovery failure")
+		// The failure must NOT be cached either.
+		cfg, err := f.prometheusConfig()
+		require.NoError(t, err)
+		assert.Equal(t, http.RoundTripper(http.DefaultTransport), cfg.RoundTripper)
+		assert.Equal(t, 2, calls, "token mint must be retried after a failure")
+	})
+
+	t.Run("non-https GMP URL fails before ADC discovery", func(t *testing.T) {
+		f := NewGateFactory("http://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
+		adcCalled := false
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
+			adcCalled = true
+			return &http.Client{}, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
+		}
+		_, err := f.prometheusConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to send OAuth access tokens in cleartext")
+		assert.False(t, adcCalled, "ADC discovery must not run for a non-https GMP URL")
+	})
+
+	t.Run("explicit :443 GMP URL still authenticates", func(t *testing.T) {
+		f := NewGateFactory("https://monitoring.googleapis.com:443/v1/projects/p/location/global/prometheus")
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
+			return &http.Client{Transport: http.DefaultTransport}, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
+		}
+		cfg, err := f.prometheusConfig()
+		require.NoError(t, err)
+		assert.Equal(t, http.RoundTripper(http.DefaultTransport), cfg.RoundTripper,
+			"isGMPURL must ignore the explicit default https port")
+	})
 }
+
+// tokenSourceFunc adapts a plain function to oauth2.TokenSource so tests can
+// stub token sources that mint failures or successes on demand.
+type tokenSourceFunc func() (*oauth2.Token, error)
+
+func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
 
 // gmpAuthTestTransport is a stub http.RoundTripper that injects an OAuth-style
 // Authorization header and rewrites the request URL to point at an httptest.Server.
@@ -643,8 +725,9 @@ func TestGateFactory_GMPAuthE2E(t *testing.T) {
 		// Use the real GMP URL form so isGMPURL() -> prometheusConfig() takes the
 		// auth path; the gmpAuthTestTransport rewrites the request to server.URL.
 		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
-		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, error) {
-			return &http.Client{Transport: &gmpAuthTestTransport{serverURL: server.URL, token: "test-token"}}, nil
+		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {
+			return &http.Client{Transport: &gmpAuthTestTransport{serverURL: server.URL, token: "test-token"}},
+				oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
 		}
 		gate, err := f.CreateGate(pipeline.GateConfig{
 			GateType:   "prometheus-query",
