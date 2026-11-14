@@ -211,6 +211,9 @@ All modules are tagged together from one commit (`vX.Y.Z` plus `api/vX.Y.Z`, `pi
 `producer/vX.Y.Z`); see [Releasing](#releasing). A pre-release tag such as `v1.1.0-rc.1` carries no
 compatibility promise beyond the final it precedes.
 
+Which producer library releases work against which processor releases at runtime, and the rules for
+changing the wire format between them, are in [docs/compatibility.md](docs/compatibility.md).
+
 ### Rules
 
 * **No breaking changes**: Once an API/protocol is in GA release, it cannot be removed or behavior changed
