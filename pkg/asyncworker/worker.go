@@ -319,11 +319,41 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 
 					// Apply the request body-transform chain. If a transform handles
 					// the message we send its body and Content-Type; otherwise the
-					// default JSON payload is sent unchanged. A transform error is
-					// fatal/non-retryable.
+					// default JSON payload is sent unchanged. Transforms run under
+					// reqCtx, so their I/O is bounded by the request deadline. A
+					// transform error carrying a retryable InferenceError category is
+					// retried like a retryable send failure; any other error is fatal.
 					sendPayload := payloadBytes
 					sendHeaders := msg.HttpHeaders
-					if body, contentType, handled, terr := transforms.Apply(payloadBytes, msg.PublicRequest.ReqMetadata()); terr != nil {
+					if body, contentType, handled, terr := transforms.ApplyContext(reqCtx, payloadBytes, msg.PublicRequest.ReqMetadata(), msg.RequestURL); terr != nil {
+						// Shutdown interrupted the transform: re-enqueue without
+						// counting an attempt, as for an interrupted send.
+						if requestCtx.Err() != nil {
+							retryChannel <- pipeline.RetryMessage{EmbelishedRequestMessage: msg}
+							return
+						}
+						if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+							metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+							select {
+							case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+						var inferenceErr asyncapi.InferenceError
+						if errors.As(terr, &inferenceErr) && !inferenceErr.Category().Fatal() {
+							span.SetAttributes(
+								attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())),
+								attribute.String(uotel.LegacyAttrErrorCategory, string(inferenceErr.Category())),
+							)
+							var retryAfter time.Duration
+							var clientErr *asyncapi.ClientError
+							if errors.As(terr, &clientErr) {
+								retryAfter = clientErr.RetryAfter
+							}
+							retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{})
+							return
+						}
 						span.RecordError(terr)
 						span.SetStatus(codes.Error, "request transform failed")
 						span.SetAttributes(

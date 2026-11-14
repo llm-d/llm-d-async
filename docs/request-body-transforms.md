@@ -33,6 +33,15 @@ ap:
           providers: ["whisper"]
 ```
 
+## Failures
+
+Transforms run on every dispatch attempt, including retries. A plugin that also implements the optional `ContextTransform` interface gets the request's context (deadline and shutdown) and the dispatch URL through `TransformContext`; other plugins keep using `Transform` unchanged. How a transform failure ends depends on the error it returns:
+
+- An error carrying the `RATE_LIMIT` or `SERVER_ERROR` category (an `api.InferenceError` anywhere in its `%w` chain, such as storage being temporarily unavailable) is retried with backoff until the request deadline.
+- If the request deadline expires while the transform runs, the result is `DEADLINE_EXCEEDED`.
+- If the processor shuts down while the transform runs, the request is re-enqueued and the interrupted attempt is not counted.
+- Any other error fails the request with `INVALID_REQUEST`.
+
 ## `gcs_uri_multipart` plugin
 
 Rewrites a JSON body into `multipart/form-data` for endpoints that take a signed object URL. Because producers can't put raw media bytes on the broker, the queued `payload` carries a signed URL (e.g. a GCS V4 signed URL) in a `gcs_uri` field.
