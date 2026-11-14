@@ -421,6 +421,122 @@ func TestGateFactory_PrometheusQueryGateWithAllParams(t *testing.T) {
 	assert.NotNil(t, gate)
 }
 
+func TestGateFactory_InferencePoolReadyGateParamErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		promURL    string
+		params     map[string]any
+		wantErrSub string
+	}{
+		{
+			name:       "missing prometheus url",
+			params:     map[string]any{"pool": "my-pool"},
+			wantErrSub: "inference-pool-ready gate type requires --prometheus-url flag to be set",
+		},
+		{
+			name:       "missing pool",
+			promURL:    "http://localhost:9090",
+			params:     map[string]any{},
+			wantErrSub: "requires a 'pool' parameter",
+		},
+		{
+			name:       "zero min_ready_endpoints",
+			promURL:    "http://localhost:9090",
+			params:     map[string]any{"pool": "my-pool", "min_ready_endpoints": 0.0},
+			wantErrSub: "'min_ready_endpoints' >= 1",
+		},
+		{
+			name:       "non-numeric min_ready_endpoints",
+			promURL:    "http://localhost:9090",
+			params:     map[string]any{"pool": "my-pool", "min_ready_endpoints": "two"},
+			wantErrSub: "min_ready_endpoints",
+		},
+		{
+			name:       "invalid fail_open",
+			promURL:    "http://localhost:9090",
+			params:     map[string]any{"pool": "my-pool", "fail_open": "sometimes"},
+			wantErrSub: "invalid fail_open value",
+		},
+		{
+			name:       "non-bool fail_open",
+			promURL:    "http://localhost:9090",
+			params:     map[string]any{"pool": "my-pool", "fail_open": 1},
+			wantErrSub: "expected bool, got int",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := NewGateFactory(tt.promURL)
+			gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "inference-pool-ready", GateParams: tt.params})
+			require.Error(t, err)
+			assert.Nil(t, gate)
+			assert.Contains(t, err.Error(), tt.wantErrSub)
+		})
+	}
+}
+
+func TestGateFactory_InferencePoolReadyGate(t *testing.T) {
+	const emptyVector = `{"status":"success","data":{"resultType":"vector","result":[]}}`
+	sample := func(v string) string {
+		return fmt.Sprintf(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1234567,"%s"]}]}}`, v)
+	}
+
+	tests := []struct {
+		name       string
+		params     map[string]any
+		response   string
+		wantQuery  string
+		wantBudget float64
+	}{
+		{
+			name:       "enough ready endpoints opens the gate",
+			params:     map[string]any{"pool": "my-pool"},
+			response:   sample("1"),
+			wantQuery:  `max(llm_d_epp_ready_endpoints{name="my-pool"}) >= bool 1`,
+			wantBudget: 1.0,
+		},
+		{
+			name:       "too few ready endpoints closes the gate",
+			params:     map[string]any{"pool": "my-pool", "namespace": "team-b", "min_ready_endpoints": "2"},
+			response:   sample("0"),
+			wantQuery:  `max(llm_d_epp_ready_endpoints{name="my-pool",namespace="team-b"}) >= bool 2`,
+			wantBudget: 0.0,
+		},
+		{
+			name:       "missing metric fails closed by default",
+			params:     map[string]any{"pool": "my-pool"},
+			response:   emptyVector,
+			wantQuery:  `max(llm_d_epp_ready_endpoints{name="my-pool"}) >= bool 1`,
+			wantBudget: 0.0,
+		},
+		{
+			name:       "missing metric fails open when fail_open is set",
+			params:     map[string]any{"pool": "my-pool", "fail_open": true},
+			response:   emptyVector,
+			wantQuery:  `max(llm_d_epp_ready_endpoints{name="my-pool"}) >= bool 1`,
+			wantBudget: 1.0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotQuery = r.FormValue("query")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, tt.response)
+			}))
+			defer server.Close()
+
+			factory := NewGateFactory(server.URL)
+			gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "inference-pool-ready", GateParams: tt.params})
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantBudget, gate.Budget(context.Background()))
+			assert.Equal(t, tt.wantQuery, gotQuery)
+		})
+	}
+}
+
 // TestGateFactory_StampsOwnerOnMetricGate checks that the owning queue and worker
 // pool reach the gauges a metric gate records, and that the 'pool' param lands on
 // inference_pool instead of overwriting pool_name (issue #369).

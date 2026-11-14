@@ -11,6 +11,7 @@ The available gate types, at a glance:
 | `prometheus-saturation` | budget | Closes when a pool saturation metric reaches a threshold. |
 | `prometheus-budget` | budget | Computes a dispatch budget from a cascade of EPP/vLLM metrics. |
 | `prometheus-query` | budget | Evaluates a user-supplied PromQL expression as the budget. |
+| `inference-pool-ready` | budget | Holds requests while an InferencePool has fewer ready endpoints than required (e.g. scaled to zero). |
 | `endpoint-scrape` | budget | Scrapes a raw `/metrics` endpoint directly — no Prometheus server required. |
 | `local-max-concurrency` | admission | Caps concurrent in-flight requests per queue using in-process state. |
 | `redis-quota` | admission | Per-attribute quota (rate limit or concurrency) via Redis. |
@@ -194,8 +195,9 @@ The available gate types, at a glance:
   `llm_d_epp_ready_endpoints` metric. Source 1 averages over pods, so the `ready_pods` factor
   cancels and no join is needed. That also keeps it honest when the pool drains: EPP's metrics
   refresh [returns early when the pool has no pods](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/v1.2.1/pkg/epp/backend/metrics/logger.go#L89-L91),
-  so `llm_d_epp_ready_endpoints` and `llm_d_epp_average_queue_size` freeze at their last
-  values and a scaled-to-zero pool would read as idle capacity. `llm_d_epp_per_endpoint_queue_size`
+  so `llm_d_epp_average_queue_size` and the other pool averages freeze at their last
+  values and a scaled-to-zero pool would read as idle capacity. Since llm-d-router v0.9.0,
+  `llm_d_epp_ready_endpoints` is recorded before that early return and drops to `0`. `llm_d_epp_per_endpoint_queue_size`
   comes from a scrape-time collector that simply stops reporting, so the source yields no sample
   and the cascade moves on instead.
   The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
@@ -295,6 +297,50 @@ The available gate types, at a glance:
   - `pool` (optional): The InferencePool the query is about. Purely descriptive — it does not
     affect the query, it only sets the `inference_pool` label on `async_gate_metric_value` and
     `async_gate_metric_threshold` so you can tell which pool a gauge is reporting on.
+
+- `inference-pool-ready`: Holds requests while an InferencePool has fewer ready endpoints than
+  `min_ready_endpoints`, for example while its model servers are scaled to zero. It builds this
+  query from its parameters and runs it like `prometheus-query`:
+
+  ```promql
+  max(llm_d_epp_ready_endpoints{name="<pool>",namespace="<namespace>"}) >= bool <min_ready_endpoints>
+  ```
+
+  The budget is `1` when the pool has enough ready endpoints and `0` otherwise. `max` keeps an HA
+  EPP (several replicas reporting the same pool) behaving like a single one. The metric is absent
+  until the EPP has an InferencePool and absent when the EPP is down; both take the fallback.
+
+  - `pool` (**required**): The InferencePool name, matched against the `name` label.
+  - `namespace` (optional): Adds a `namespace` label match, for a Prometheus that holds pools with
+    the same name in several namespaces.
+  - `min_ready_endpoints` (optional): Ready endpoints needed to open the gate. Must be `>= 1`. Default is `1`.
+  - `fail_open` (optional): When `true`, a failed query or missing metric lets requests through.
+    Default is `false` (fail closed).
+
+  Configure it as a **pool-level** gate inside `wait-on-refuse` so held requests park in memory
+  instead of returning to the broker, and combine it with a saturation or budget gate in a
+  `composite` so "is anything there?" and "is there room?" are checked together:
+
+  ```json
+  {
+    "gate_type": "wait-on-refuse",
+    "gate_params": {
+      "gate": {
+        "gate_type": "composite",
+        "gate_params": {
+          "gates": [
+            {"gate_type": "inference-pool-ready", "gate_params": {"pool": "my-pool"}},
+            {"gate_type": "prometheus-budget", "gate_params": {"pool": "my-pool"}}
+          ]
+        }
+      }
+    }
+  }
+  ```
+
+  The gate lags the pool by roughly the EPP metrics refresh (5s by default), the Prometheus
+  scrape interval and the gate cache TTL. Requests dispatched inside that window take the
+  normal retry path. Held requests still expire at their deadline.
 
 - `endpoint-scrape`: Scrapes a raw Prometheus text-format `/metrics` endpoint directly.
   Normalizes the metric to `[0, 1]`, then interprets it as saturation by default or as a direct budget when `value_type` is `budget`. The final budget is `clamp(interpreted_budget - baseline, 0, 1)`. Saturation metrics use `1 - normalized_value`; budget metrics use `normalized_value`.
