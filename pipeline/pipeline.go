@@ -66,8 +66,12 @@ type QueueBacklogStat struct {
 	// ExpiringCounts holds exact cumulative per-bucket counts of queued items
 	// nearing their deadline, ordered as the metric's bucket boundaries (most
 	// urgent first). Nil when the broker cannot expose per-item deadlines
-	// (e.g. Pub/Sub) or the read failed.
+	// (e.g. Pub/Sub); all zeros, with ExpiringCountsFailed set, when the read
+	// failed.
 	ExpiringCounts []ExpiringCount
+	// ExpiringCountsFailed reports a failed deadline read, which the zeroed
+	// ExpiringCounts can't tell apart from an empty queue.
+	ExpiringCountsFailed bool
 }
 
 // BacklogReporter is an optional capability for flows backed by a broker that
