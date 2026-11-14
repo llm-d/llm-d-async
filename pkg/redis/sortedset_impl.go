@@ -14,6 +14,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/deadlinescaling"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
 
 	"github.com/redis/go-redis/extra/redisotel/v9"
@@ -37,7 +38,10 @@ type SortedSetQueueConfig struct {
 	RequestPathURL     string `json:"request_path_url"`
 	IGWBaseURL         string `json:"igw_base_url"`
 	pipeline.GateConfig
-	Labels map[string]string `json:"labels,omitempty"`
+	// DeadlineScaling, when set, makes the backlog poller publish the replicas
+	// this queue needs to meet its deadlines.
+	DeadlineScaling *deadlinescaling.Config `json:"deadline_scaling,omitempty"`
+	Labels          map[string]string       `json:"labels,omitempty"`
 }
 
 type requestChannelData struct {
@@ -207,6 +211,11 @@ func (r *RedisSortedSetFlow) validateSortedSetQueues(queues []SortedSetQueueConf
 		seenQueue[q.QueueName] = true
 		if q.IGWBaseURL == "" {
 			return fmt.Errorf("queue config for queue %q: igw_base_url must be specified", q.QueueName)
+		}
+		if q.DeadlineScaling != nil {
+			if err := q.DeadlineScaling.Validate(); err != nil {
+				return fmt.Errorf("queue config for queue %q: %w", q.QueueName, err)
+			}
 		}
 		found := false
 		for _, pool := range r.workerPools {
@@ -633,6 +642,17 @@ func (r *RedisSortedSetFlow) queueSnapshot() []requestChannelData {
 	return out
 }
 
+// DeadlineScaling returns the deadline_scaling settings of a live queue.
+func (r *RedisSortedSetFlow) DeadlineScaling(queueID string) (deadlinescaling.Config, bool) {
+	r.queueMu.RLock()
+	defer r.queueMu.RUnlock()
+	entry, ok := r.queues[queueID]
+	if !ok || entry.config.DeadlineScaling == nil {
+		return deadlinescaling.Config{}, false
+	}
+	return *entry.config.DeadlineScaling, true
+}
+
 func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
 	snapshot := r.queueSnapshot()
 	stats := make([]pipeline.QueueBacklogStat, 0, len(snapshot))
@@ -667,6 +687,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 			// stale value for this queue after a failed poll. The zeroed
 			// expiring counts clear the deadline-proximity snapshot.
 			stat.ExpiringCounts = zeroExpiringCounts(bucketLabels)
+			stat.ExpiringCountsFailed = true
 			stats = append(stats, stat)
 			continue
 		}
@@ -677,6 +698,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 			// Report 0 rather than skipping so the gauges do not retain a
 			// stale value for this queue after a failed poll.
 			stat.ExpiringCounts = zeroExpiringCounts(bucketLabels)
+			stat.ExpiringCountsFailed = true
 			stats = append(stats, stat)
 			continue
 		}
@@ -697,6 +719,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 				firstErr = fmt.Errorf("deadline reads on queue %q: %w", cd.queueName, secondaryErr)
 			}
 			stat.ExpiringCounts = zeroExpiringCounts(bucketLabels)
+			stat.ExpiringCountsFailed = true
 			stats = append(stats, stat)
 			continue
 		}

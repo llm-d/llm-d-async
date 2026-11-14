@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
+	"github.com/llm-d/llm-d-async/pkg/deadlinescaling"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"go.opentelemetry.io/otel"
@@ -792,6 +793,15 @@ func marshalResult(msg api.ResultMessage) string {
 	return string(bytes)
 }
 
+// DeadlineScaling returns the deadline_scaling settings of a queue.
+func (f *Flow) DeadlineScaling(queueID string) (deadlinescaling.Config, bool) {
+	q, ok := f.queuesByID[queueID]
+	if !ok || q.config.DeadlineScaling == nil {
+		return deadlinescaling.Config{}, false
+	}
+	return *q.config.DeadlineScaling, true
+}
+
 func (f *Flow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
 	buckets := metrics.DeadlineProximityBuckets()
 	labels := metrics.DeadlineProximityBucketLabels()
@@ -811,6 +821,7 @@ func (f *Flow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, e
 			}
 			expiring = make([]int64, len(labels))
 			depth = 0
+			stat.ExpiringCountsFailed = true
 		}
 		stat.Depth = depth
 		stat.ExpiringCounts = make([]pipeline.ExpiringCount, 0, len(labels))
