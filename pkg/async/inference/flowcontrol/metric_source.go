@@ -64,10 +64,14 @@ func NewPromQLMetricSource(clientConfig api.Config, expr string) (*PromQLMetricS
 	}, nil
 }
 
+// gmpScope is the OAuth scope required to read Google Managed Prometheus's
+// Prometheus HTTP Query API via Application Default Credentials.
+const gmpScope = "https://www.googleapis.com/auth/monitoring.read"
+
 // NewGMPPromQLMetricSource creates a PromQL MetricSource for Google Managed Prometheus.
 func NewGMPPromQLMetricSource(projectID string, expr string) (*PromQLMetricSource, error) {
 	ctx := context.Background()
-	gcpClient, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/monitoring.read")
+	gcpClient, err := google.DefaultClient(ctx, gmpScope)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create authenticated GCP client: %w", err)
 	}
