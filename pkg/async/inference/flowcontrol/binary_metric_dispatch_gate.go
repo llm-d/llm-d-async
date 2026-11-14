@@ -18,19 +18,12 @@ package flowcontrol
 
 import (
 	"context"
-	"flag"
 
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
-	promapi "github.com/prometheus/client_golang/api"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
-
-var isGMP = flag.Bool("gate.pmetric.is-gmp", false, "Is this GMP (Google Managed Prometheus).")
-var prometheusURL = flag.String("gate.prometheus.url", "", "Prometheus URL for non GMP metric")
-var gmpProjectID = flag.String("gate.pmetric.gmp.project-id", "", "Project ID for Google Managed Prometheus")
-var prometheusQueryModelName = flag.String("gate.prometheus.model-name", "", "metrics name to use for avg_queue_size")
 
 var _ pipeline.Gate = (*BinaryMetricDispatchGate)(nil)
 
@@ -75,29 +68,4 @@ func (g *BinaryMetricDispatchGate) Apply(ctx context.Context, msg *api.InternalR
 		return pipeline.Refuse(), nil
 	}
 	return pipeline.Continue(), nil
-}
-
-// AverageQueueSizeGate creates a BinaryMetricDispatchGate from command-line flags.
-func AverageQueueSizeGate() *BinaryMetricDispatchGate {
-	expr := buildPromQL("llm_d_epp_average_queue_size",
-		map[string]string{"name": *prometheusQueryModelName})
-
-	var source MetricSource
-	if *isGMP {
-		var err error
-		source, err = NewGMPPromQLMetricSource(*gmpProjectID, expr)
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		var err error
-		source, err = NewPromQLMetricSource(promapi.Config{
-			Address: *prometheusURL,
-		}, expr)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	return NewBinaryMetricDispatchGateWithSource(source)
 }
