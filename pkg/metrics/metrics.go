@@ -2,6 +2,7 @@
 package metrics
 
 import (
+	"context"
 	"strconv"
 	"sync"
 	"time"
@@ -392,9 +393,10 @@ func RecordMessageLatency(millis float64, queueID, queueName, poolName string) {
 	MessageLatencyTime.WithLabelValues(queueID, queueName, poolName).Observe(millis)
 }
 
-// RecordInferenceLatency observes the time spent calling the inference gateway.
-func RecordInferenceLatency(millis float64, queueID, queueName, poolName string) {
-	InferenceLatencyTime.WithLabelValues(queueID, queueName, poolName).Observe(millis)
+// RecordInferenceLatency observes the time spent calling the inference gateway,
+// with the request's trace in ctx as an exemplar.
+func RecordInferenceLatency(ctx context.Context, millis float64, queueID, queueName, poolName string) {
+	observeWithTraceExemplar(ctx, InferenceLatencyTime.WithLabelValues(queueID, queueName, poolName), millis)
 }
 
 // RecordQueueResidenceTime observes the time a message spent buffered in-process

@@ -23,7 +23,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | Metric | Type | Description |
 |--------|------|-------------|
 | `llm_d_async_async_message_latency_time_millis` | Histogram | End-to-end message latency in milliseconds (publish to successful processing). Only registered when the transport supports message latency (GCP Pub/Sub only). |
-| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time in milliseconds spent calling `llm-d-router` (or other inference gateway), measured around each request attempt. Isolates "model time" from "queue time". Always registered. |
+| `llm_d_async_async_inference_latency_time_millis` | Histogram | Time in milliseconds spent calling `llm-d-router` (or other inference gateway), measured around each request attempt. Isolates "model time" from "queue time". Always registered. Carries a trace exemplar; see [Trace exemplars](#trace-exemplars). |
 | `llm_d_async_async_queue_residence_time_millis` | Histogram | Time in milliseconds a message spent buffered in-process, from broker ingestion until a worker pulled it for processing. Measures the async delay introduced by the system (queue time). Always registered. |
 | `llm_d_async_async_deadline_proximity_millis` | Histogram | Snapshot histogram of time in milliseconds remaining until each queued item's deadline, rebuilt once per backlog poll from exact cumulative `ZCOUNT` counts per bucket (`le="0"` holds items past their deadline but still queued; higher buckets are cumulative, so every item counts in each bucket it expires in). Redis sorted-set only; Cloud Pub/Sub cannot expose per-item deadlines. Because each poll replaces the snapshot, the series is not monotonic — `rate()` is meaningless; use `histogram_quantile` per scrape. The `_sum` is estimated from bucket midpoints. |
 
@@ -123,6 +123,24 @@ llm_d_async_async_gate_metric_value - on(queue_id, queue_name, pool_name) llm_d_
 # Throttling rate against the pool it is throttling
 sum by (pool_name) (rate(llm_d_async_async_gate_decisions_total{reason="gate_closed"}[5m]))
 ```
+
+### Trace exemplars
+
+`llm_d_async_async_inference_latency_time_millis` attaches the request's trace to
+each observation as a Prometheus exemplar when the trace is sampled: `trace_id`,
+plus the `span_id` of the request's `process-request` span (see
+[OpenTelemetry Tracing](#opentelemetry-tracing)). Grafana turns it into a link
+from a point on a latency panel to that trace when the Prometheus data source has
+an exemplar link to the traces backend.
+
+- **The scrape must use OpenMetrics.** The metrics endpoint serves it to scrapers
+  that ask for it, and Prometheus does by default; others get the classic text
+  format as before. No series is renamed, since every counter already ends in
+  `_total`. On Prometheus 2.x, an OpenMetrics scrape stores whole-number bucket
+  bounds as `le="10.0"` rather than `le="10"` (Prometheus 3 stores `10.0` either
+  way), which only matters to queries that match `le` exactly.
+- **Prometheus must store exemplars.** It drops them unless it runs with
+  `--enable-feature=exemplar-storage`.
 
 ## OpenTelemetry Tracing
 
