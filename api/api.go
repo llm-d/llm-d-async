@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"unicode/utf8"
 )
 
 // Request is the public interface for submitting requests to the async queue.
@@ -86,18 +89,45 @@ var (
 // ResultMessage is the async inference result returned to callers.
 //
 // Wire-format semantics:
-//   - StatusCode > 0: an HTTP response was received. Payload contains the response body.
+//   - StatusCode > 0: an HTTP response was received. Body returns the response body.
 //   - StatusCode == 0: no HTTP response. ErrorCode/ErrorMessage describe the failure.
 //
 // Routing and Metadata are infrastructure pass-through (json:"-").
 type ResultMessage struct {
-	ID           string            `json:"id"`
-	StatusCode   int               `json:"status_code,omitempty"`
-	Payload      string            `json:"payload"`
-	ErrorCode    string            `json:"error_code,omitempty"`
-	ErrorMessage string            `json:"error_message,omitempty"`
-	Routing      InternalRouting   `json:"-"`
-	Metadata     map[string]string `json:"-"`
+	ID           string `json:"id"`
+	StatusCode   int    `json:"status_code,omitempty"`
+	Payload      string `json:"payload"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	// PayloadEncoding is empty when Payload is the response body itself.
+	PayloadEncoding PayloadEncoding `json:"payload_encoding,omitempty"`
+	ContentType     string          `json:"content_type,omitempty"`
+	// Headers are the forwarded response headers, keyed by lowercase name.
+	Headers  map[string]string `json:"headers,omitempty"`
+	Routing  InternalRouting   `json:"-"`
+	Metadata map[string]string `json:"-"`
+}
+
+// PayloadEncoding says how ResultMessage.Payload encodes the response body.
+type PayloadEncoding string
+
+// PayloadEncodingBase64 is standard base64, used for a body that is not valid UTF-8.
+const PayloadEncodingBase64 PayloadEncoding = "base64"
+
+// Body returns the decoded response body.
+func (r ResultMessage) Body() ([]byte, error) {
+	switch r.PayloadEncoding {
+	case "":
+		return []byte(r.Payload), nil
+	case PayloadEncodingBase64:
+		body, err := base64.StdEncoding.DecodeString(r.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode base64 payload: %w", err)
+		}
+		return body, nil
+	default:
+		return nil, fmt.Errorf("unknown payload encoding %q", r.PayloadEncoding)
+	}
 }
 
 // Error codes for non-HTTP failures surfaced in ResultMessage.ErrorCode.
@@ -155,13 +185,27 @@ func NewErrorResult(req Request, routing InternalRouting, errorCode, errMsg stri
 // NewHTTPResult builds a ResultMessage for any HTTP response (success or error).
 // statusCode is the actual HTTP status code; responseBody is the raw body.
 func NewHTTPResult(req Request, routing InternalRouting, statusCode int, responseBody []byte) ResultMessage {
-	return ResultMessage{
-		ID:         req.ReqID(),
-		StatusCode: statusCode,
-		Payload:    string(responseBody),
-		Routing:    routing,
-		Metadata:   req.ReqMetadata(),
+	return NewResponseResult(req, routing, InferenceResponse{StatusCode: statusCode, Body: responseBody})
+}
+
+// NewResponseResult builds a ResultMessage for any HTTP response (success or error). A body
+// that is not valid UTF-8 is base64-encoded.
+func NewResponseResult(req Request, routing InternalRouting, resp InferenceResponse) ResultMessage {
+	msg := ResultMessage{
+		ID:          req.ReqID(),
+		StatusCode:  resp.StatusCode,
+		ContentType: resp.ContentType,
+		Headers:     resp.Headers,
+		Routing:     routing,
+		Metadata:    req.ReqMetadata(),
 	}
+	if utf8.Valid(resp.Body) {
+		msg.Payload = string(resp.Body)
+	} else {
+		msg.Payload = base64.StdEncoding.EncodeToString(resp.Body)
+		msg.PayloadEncoding = PayloadEncodingBase64
+	}
+	return msg
 }
 
 // NewGateDroppedResult builds a ResultMessage for a gate-dropped request.

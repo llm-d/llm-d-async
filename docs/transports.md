@@ -197,8 +197,13 @@ Results are written to the result queue/topic with the following structure:
 | `id` | string | The originating request's `id` |
 | `status_code` | int | HTTP status code of the inference response. Present (> 0) whenever an HTTP response was received — including error statuses. |
 | `payload` | string | The response body. On non-HTTP failures it carries a JSON `{"error": "<message>"}` object. |
-| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE` |
+| `payload_encoding` | string | Absent when `payload` is the body itself. `base64` when the body was not valid UTF-8 (audio, images) and `payload` holds its standard base64. Go consumers can call `ResultMessage.Body()`. |
+| `content_type` | string | The inference response's `Content-Type` header, when it had one. |
+| `headers` | object | Inference response headers matching `--result-header-prefixes` (chart: `ap.resultHeaderPrefixes`), keyed by lowercase name. Repeated headers are joined with `, `. Absent when none match. |
+| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE`. A response larger than `--max-response-bytes` (chart: `ap.maxResponseBytes`) is not retried and yields `INFERENCE_ERROR`. |
 | `error_message` | string | Human-readable description accompanying `error_code` |
+
+[`examples/speech`](../examples/speech/main.go) submits a `/v1/audio/speech` request and writes the audio from its result to a file.
 
 ### Internal Wire Format
 
