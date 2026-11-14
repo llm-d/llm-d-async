@@ -58,3 +58,11 @@ Both values are explicit producer options, and `ResultDeliveryConfig` reports th
 ## Rollout
 
 Keep existing `Producer.GetResult` consumers on their current routes during migration. A destructive `GetResult` consumer and a durable `ReceiveResult` consumer must never share a route because `BRPOP` bypasses claim state and can still delete a result permanently. Roll out enriched Async publishers first, then switch each configured result route to a consumer that checkpoints and deduplicates by `(ID, RequestToken)` before ACK. The legacy method remains available for staged rollout and rollback.
+
+## SQL transport
+
+The `producer-sql` `Producer` offers the same receive / ack model on `async_results`, without the Redis key layout above. `ReceiveResults` sets `claim_owner` and `claim_expires_ms` on the oldest rows of the route whose claim is empty or lapsed, so pending results and expired claims are picked by one query and need no separate reclaim pass. `AckResult` deletes the row only while the delivery's owner still holds it. A row that is already gone counts as acknowledged, which makes retried acknowledgements safe without tombstones: the dispatcher writes each `(ID, RequestToken)` generation at most once, fenced by its dispatch attempt, so a deleted row is never published again. Unparsable payloads come back as error results carrying the row's `id` and `request_token`, and are acknowledged like any other result.
+
+`producer-sql` does not implement `producer.DurableResultProducer`, because `ResultDelivery`'s ownership fields are private to the Redis producer's package and depending on it would link Redis into SQL-only consumers. It exposes `ReceiveResult`, `ReceiveResults`, and `AckResult` with its own `ResultDelivery` and `ErrResultDeliveryOwnershipLost`, and has no `RenewResult`: size `ResultLeaseTTL` above the consumer's checkpoint time.
+
+The claim columns arrive in migration `0002`, which a processor applies when it starts (see [SQL migrations](../sql-migrations.md)). It adds two columns with constant defaults, so it only touches the catalog, and results written before it stay deliverable. An older processor or `GetResults` consumer keeps working on the migrated schema. Roll the processors out first: a `producer-sql` consumer built with `0002` refuses to start against a database still at version 1.

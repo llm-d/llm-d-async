@@ -218,6 +218,133 @@ func TestGetResultsTurnsUnparsableResultsIntoErrorResults(t *testing.T) {
 	assert.NotEmpty(t, byID["bad"].Routing.RequestToken)
 }
 
+func publish(t *testing.T, p *Producer, store *sqlqueue.Store, ids ...string) []sqlqueue.Request {
+	t.Helper()
+	ctx := context.Background()
+	var reqs []api.Request
+	for _, id := range ids {
+		reqs = append(reqs, message(id))
+	}
+	require.NoError(t, p.SubmitRequests(ctx, reqs))
+	c, rows := dispatchAll(t, store, "requests")
+	require.Len(t, rows, len(ids))
+	var completions []sqlqueue.Completion
+	for _, row := range rows {
+		payload, err := json.Marshal(resultEnvelope{ResultMessage: api.ResultMessage{ID: row.ID, StatusCode: 200, Payload: `{}`}, RequestToken: row.Token})
+		require.NoError(t, err)
+		completions = append(completions, sqlqueue.Completion{Key: row.Key(), Attempt: row.Attempt, Route: "results", Payload: string(payload)})
+	}
+	_, err := c.Ack(ctx, completions)
+	require.NoError(t, err)
+	return rows
+}
+
+func withLease(t *testing.T, store *sqlqueue.Store, lease time.Duration) *Producer {
+	t.Helper()
+	p, err := New(context.Background(), Config{RequestQueueName: "requests", ResultQueueName: "results", PollInterval: 10 * time.Millisecond, ResultLeaseTTL: lease}, WithStore(store))
+	require.NoError(t, err)
+	return p
+}
+
+func TestReceiveResultsKeepResultsUntilAcknowledged(t *testing.T) {
+	p, store := newProducer(t)
+	ctx := context.Background()
+	rows := publish(t, p, store, "r0", "r1", "r2")
+
+	got, err := p.ReceiveResults(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	for i, d := range got {
+		assert.Equal(t, rows[i].ID, d.Result.ID, "deliveries come back in write order")
+		assert.Equal(t, rows[i].Token, d.Result.Routing.RequestToken)
+	}
+	depth, err := store.ResultDepth(ctx, "results")
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, depth, "receiving deletes nothing")
+
+	require.NoError(t, p.AckResult(ctx, got[0]))
+	require.NoError(t, p.AckResult(ctx, got[0]), "a retried acknowledgement succeeds")
+	depth, err = store.ResultDepth(ctx, "results")
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, depth)
+
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err = p.GetResult(waitCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a destructive read cannot take leased results")
+	waitCtx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err = p.ReceiveResult(waitCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "leased results are not delivered twice while the lease holds")
+
+	for _, d := range got[1:] {
+		require.NoError(t, p.AckResult(ctx, d))
+	}
+	depth, err = store.ResultDepth(ctx, "results")
+	require.NoError(t, err)
+	assert.Zero(t, depth)
+
+	_, err = p.ReceiveResults(ctx, 0)
+	require.Error(t, err)
+	require.Error(t, p.AckResult(ctx, nil))
+	require.Error(t, p.AckResult(ctx, &ResultDelivery{}))
+}
+
+// A receiver that dies between receiving a result and checkpointing it leaves the result
+// leased; once the lease lapses a replacement receiver gets the same result, and the dead
+// receiver's late acknowledgement is fenced.
+func TestReceiverFailureBeforeAckRedeliversTheResult(t *testing.T) {
+	_, store := newProducer(t)
+	ctx := context.Background()
+	crashed := withLease(t, store, 100*time.Millisecond)
+	rows := publish(t, crashed, store, "r0")
+
+	lost, err := crashed.ReceiveResult(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "r0", lost.Result.ID)
+
+	replacement := withLease(t, store, time.Minute)
+	recovered, err := replacement.ReceiveResult(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, lost.Result, recovered.Result, "the replacement receives the result inference already produced")
+	assert.Equal(t, rows[0].Token, recovered.Result.Routing.RequestToken, "the deduplication key survives redelivery")
+
+	require.ErrorIs(t, crashed.AckResult(ctx, lost), ErrResultDeliveryOwnershipLost)
+	depth, err := store.ResultDepth(ctx, "results")
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, depth, "the fenced acknowledgement left the result for its new owner")
+
+	require.NoError(t, replacement.AckResult(ctx, recovered))
+	waitCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	_, err = replacement.ReceiveResult(waitCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "an acknowledged result is never delivered again")
+	require.NoError(t, crashed.AckResult(ctx, lost), "after the new owner acknowledges, the result is accounted for")
+}
+
+func TestReceiveResultsTurnsUnparsableResultsIntoErrorResults(t *testing.T) {
+	p, store := newProducer(t)
+	ctx := context.Background()
+	require.NoError(t, p.SubmitRequests(ctx, []api.Request{message("bad")}))
+	c, rows := dispatchAll(t, store, "requests")
+	require.Len(t, rows, 1)
+	_, err := c.Ack(ctx, []sqlqueue.Completion{{Key: rows[0].Key(), Attempt: rows[0].Attempt, Route: "results", Payload: `not json`}})
+	require.NoError(t, err)
+
+	d, err := p.ReceiveResult(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "bad", d.Result.ID)
+	assert.Equal(t, rows[0].Token, d.Result.Routing.RequestToken)
+	assert.Equal(t, api.ErrCodeInferenceError, d.Result.ErrorCode)
+	require.NoError(t, p.AckResult(ctx, d), "an unparsable result is acknowledged like any other")
+}
+
+func TestResultLeaseTTLDefaultsToFiveMinutes(t *testing.T) {
+	p, store := newProducer(t)
+	assert.Equal(t, 5*time.Minute, p.resultLeaseTTL)
+	assert.Equal(t, time.Second, withLease(t, store, time.Second).resultLeaseTTL)
+}
+
 func TestCancelRequestsFlagsQueuedRequests(t *testing.T) {
 	p, store := newProducer(t)
 	ctx := context.Background()
