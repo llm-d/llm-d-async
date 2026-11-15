@@ -155,6 +155,7 @@ The processor needs a Redis that never evicts keys; see [Redis requirements](../
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm install redis bitnami/redis -n redis --create-namespace --set auth.enabled=false \
+    --set master.resources.requests.memory=1Gi --set master.resources.limits.memory=1Gi \
     --set-json 'master.extraFlags=["--maxmemory 512mb","--maxmemory-policy noeviction"]'
 export REDIS_HOST=redis-master.redis.svc.cluster.local
 ```
@@ -164,6 +165,7 @@ export REDIS_HOST=redis-master.redis.svc.cluster.local
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled=false \
+    --set primary.resources.requests.memory=1Gi --set primary.resources.limits.memory=1Gi \
     --set-json 'primary.extraFlags=["--maxmemory 512mb","--maxmemory-policy noeviction"]'
 export REDIS_HOST=redis-valkey-primary.redis.svc.cluster.local
 ```

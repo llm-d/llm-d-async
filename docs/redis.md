@@ -27,10 +27,13 @@ A queued request takes about the length of its JSON plus 140 bytes (measured on 
 
 ## Reference install
 
+The Bitnami charts default to the `nano` resources preset, a 192Mi memory limit, which is below a 512mb `maxmemory`. The examples set the container limit to 1Gi, twice `maxmemory`, to leave room for the pages an AOF rewrite copies.
+
 Redis, Bitnami chart:
 
 ```bash
 helm install redis bitnami/redis -n redis --create-namespace --set auth.enabled=false \
+    --set master.resources.requests.memory=1Gi --set master.resources.limits.memory=1Gi \
     --set-json 'master.extraFlags=["--maxmemory 512mb","--maxmemory-policy noeviction"]'
 kubectl exec -n redis redis-master-0 -- redis-cli CONFIG GET 'maxmemory*'
 ```
@@ -39,6 +42,7 @@ Valkey, Bitnami chart. The chart prefixes its names with `<release>-valkey` when
 
 ```bash
 helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled=false \
+    --set primary.resources.requests.memory=1Gi --set primary.resources.limits.memory=1Gi \
     --set-json 'primary.extraFlags=["--maxmemory 512mb","--maxmemory-policy noeviction"]'
 kubectl exec -n redis redis-valkey-primary-0 -- valkey-cli CONFIG GET 'maxmemory*'
 ```
