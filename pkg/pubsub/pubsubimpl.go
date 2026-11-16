@@ -29,7 +29,18 @@ var pubSubClient *pubsub.Client
 
 var resultChannels sync.Map
 
+// quotaExceededNackDelay is how long a refused request waits before Nack.
+// The callback returns immediately, so the message does not occupy an
+// outstanding-message slot. Nack returns it to the backlog.
 const quotaExceededNackDelay = 10 * time.Second
+
+// refusedDeliveryTTL is how long a pre-admission Nack is remembered.
+// The subscription retry backoff tops out at 10 minutes, so half an hour
+// covers a later delivery to this process. After that the note is dropped.
+const refusedDeliveryTTL = 30 * time.Minute
+
+// refusalSweepEvery bounds how often expired refusal notes are deleted.
+const refusalSweepEvery = time.Minute
 
 type TopicConfig struct {
 	SubscriberID       string `json:"subscriber_id"`
@@ -69,6 +80,16 @@ type PubSubMQFlow struct {
 	// reads in HealthCheck race-free against per-entry updates guarded by
 	// subHealth's own mutex.
 	consumeHealth map[string]*subHealth
+	// refusedDelivery records message IDs this process Nacked before admission,
+	// keyed to the time of the latest such Nack. RetryCount still comes from
+	// DeliveryAttempt, so a redelivery on another replica keeps the broker's
+	// backoff and is not counted again. The note only lets the first admission
+	// on this process increment async_request_total after those Nacks.
+	// Expired notes are deleted, so an ack, dead letter, or expiry elsewhere
+	// cannot retain the ID.
+	refusedDelivery sync.Map
+	refusalSweepMu  sync.Mutex
+	refusalSweep    time.Time
 }
 
 // subHealth records the most recent broker interaction observed by the consume
@@ -483,7 +504,7 @@ func resultWorker(ctx context.Context, client *pubsub.Client, defaultTopicID str
 			} else {
 				msgBytes = bytes
 			}
-			res := publishPubSub(ctx, publisher, msgBytes, map[string]string{})
+			res := publishPubSub(ctx, publisher, msgBytes, resultPublishAttributes(msg))
 
 			// Wait for the server's answer off the loop so publishes keep
 			// batching. The wait is detached from ctx: on shutdown Stop flushes
@@ -500,6 +521,16 @@ func resultWorker(ctx context.Context, client *pubsub.Client, defaultTopicID str
 			}(msg.ID)
 		}
 	}
+}
+
+// resultPublishAttributes returns the Pub/Sub attributes stamped on a result
+// publication. Only result_route is copied; caller metadata is not echoed.
+func resultPublishAttributes(msg api.ResultMessage) map[string]string {
+	route := msg.Metadata[api.ResultRouteAttribute]
+	if route == "" {
+		return map[string]string{}
+	}
+	return map[string]string{api.ResultRouteAttribute: route}
 }
 
 // signalPublished tells the receive callback waiting on correlationID whether
@@ -646,7 +677,11 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		if resultTopicID != "" {
 			irout.ResultQueueName = resultTopicID
 		}
-		if msg.DeliveryAttempt != nil {
+		// DeliveryAttempt counts every Nack, including a refusal on another
+		// replica. It is the backoff attempt. A per-process seen-set must not
+		// zero it: a redelivery would restart the ladder at attempt 1 and
+		// RecordAsyncReq would count the request twice.
+		if msg.DeliveryAttempt != nil && *msg.DeliveryAttempt > 1 {
 			irout.RetryCount = *msg.DeliveryAttempt - 1
 		}
 		if len(labels) > 0 {
@@ -677,6 +712,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
 			metrics.RecordGateDecision(metrics.ReasonError, "", subscriberID, poolID)
+			r.noteRefusal(msg.ID)
 			msg.Nack()
 			return
 		}
@@ -688,6 +724,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			}
 			metrics.RecordGateDecision(reason, "", subscriberID, poolID)
 			logger.V(logutil.DEBUG).Info("Quota exceeded or capacity full, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)
+			r.noteRefusal(msg.ID)
 			go func() {
 				select {
 				case <-time.After(quotaExceededNackDelay):
@@ -701,18 +738,13 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 
 		if verdict.Action == pipeline.ActionDrop {
 			metrics.RecordGateDecision(metrics.ReasonDropped, "", subscriberID, poolID)
-			var resultMsg api.ResultMessage
-			if verdict.Result != nil {
-				resultMsg = *verdict.Result
-				resultMsg.Routing = ir.InternalRouting
-			} else {
-				resultMsg = api.NewGateDroppedResult(&body, ir.InternalRouting)
-			}
+			resultMsg := api.NewDroppedResult(&body, ir.InternalRouting, verdict.Result)
 			r.resultChannel <- resultMsg
 
 			// Wait for the result worker to finish publishing and signal true
 			result := <-resultsChannel
 			if !result {
+				r.noteRefusal(msg.ID)
 				msg.Nack()
 			} else {
 				msg.Ack()
@@ -724,6 +756,13 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		// worker can record queue residence time when it pulls the message.
 		ir.IngestionTime = time.Now()
 
+		// A refusal on this process raised DeliveryAttempt without an admission,
+		// so the worker will not call RecordAsyncReq. Count that first admission
+		// here. A redelivery this process did not refuse has no note, and
+		// RetryCount > 0 keeps the worker from counting it again.
+		if r.takeRefusal(msg.ID) && irout.RetryCount > 0 {
+			metrics.RecordAsyncReq("", subscriberID, poolID)
+		}
 		ch <- ir
 
 		result := <-resultsChannel
@@ -734,4 +773,39 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			msg.Ack()
 		}
 	})
+}
+
+func (r *PubSubMQFlow) noteRefusal(id string) {
+	now := time.Now()
+	r.refusedDelivery.Store(id, now)
+	r.sweepRefusals(now)
+}
+
+func (r *PubSubMQFlow) sweepRefusals(now time.Time) {
+	r.refusalSweepMu.Lock()
+	if !r.refusalSweep.IsZero() && now.Sub(r.refusalSweep) < refusalSweepEvery {
+		r.refusalSweepMu.Unlock()
+		return
+	}
+	r.refusalSweep = now
+	r.refusalSweepMu.Unlock()
+
+	r.refusedDelivery.Range(func(key, value any) bool {
+		at, ok := value.(time.Time)
+		if !ok || now.Sub(at) > refusedDeliveryTTL {
+			r.refusedDelivery.Delete(key)
+		}
+		return true
+	})
+}
+
+// takeRefusal reports whether this process Nacked id before admitting it.
+// The note is dropped either way.
+func (r *PubSubMQFlow) takeRefusal(id string) bool {
+	value, ok := r.refusedDelivery.LoadAndDelete(id)
+	if !ok {
+		return false
+	}
+	at, ok := value.(time.Time)
+	return ok && time.Since(at) <= refusedDeliveryTTL
 }

@@ -116,7 +116,7 @@ package integration_test
 
 ## Releasing
 
-This repository is a multi-module Go repo. The lightweight sub-modules (`api`, `pipeline`, `producer`, `producer-sql`) each have their own `go.mod` so that external consumers can depend on them without pulling in the heavyweight root module.
+This repository is a multi-module Go repo. The lightweight sub-modules (`api`, `pipeline`, `producer`, `producer-gcp`, `producer-sql`) each have their own `go.mod` so that external consumers can depend on them without pulling in the heavyweight root module.
 
 ### Preparing a release
 
@@ -135,9 +135,19 @@ git tag v0.8.0
 git push origin v0.8.0
 ```
 
-3. The `CI - Tag Go Submodules` workflow automatically creates the prefixed tags required by Go modules (e.g. `api/v0.8.0`, `pipeline/v0.8.0`, `producer/v0.8.0`, `producer-sql/v0.8.0`).
+3. The `CI - Tag Go Submodules` workflow automatically creates the prefixed tags required by Go modules (e.g. `api/v0.8.0`, `pipeline/v0.8.0`, `producer/v0.8.0`, `producer-gcp/v0.8.0`, `producer-sql/v0.8.0`).
 
-Go requires sub-module tags to carry the directory prefix — see [Managing module source](https://go.dev/doc/modules/managing-source) for details.
+`producer`, `producer-gcp`, and the root module require `api` at pseudo-version `v1.0.1-0.20261027063923-75f85ab81c04`.
+That commit added `Producer`, `ResultRouteAttribute`, and `ErrCodeDeadLettered`.
+The published `api/v1.0.0` tag does not contain those symbols, and a consumer does not see the `replace` directives in this repo.
+The pseudo-version is a branch commit.
+After a squash merge it is reachable only through `refs/pull/447/head`, so `go` cannot fetch it from `main`.
+Before this pull request merges, tag `api` from the squash commit, or point the three requires at that merge commit.
+`make set-version` does not do that. It only rewrites requires once a release version already exists.
+Do not tag `producer` or `producer-gcp` against `api/v1.0.0`.
+
+Go requires sub-module tags to carry the directory prefix.
+See [Managing module source](https://go.dev/doc/modules/managing-source) for details.
 
 ## Release notes
 

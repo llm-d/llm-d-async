@@ -193,14 +193,27 @@ func popPubSubResult(ctx context.Context, client *pubsub.Client, subName string)
 	return result
 }
 
-func recreatePubSubSubscription(ctx context.Context, client *pubsub.Client, projectID, subID, topicID string) {
+func deletePubSubSubscription(ctx context.Context, client *pubsub.Client, projectID, subID string) {
 	subName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
-	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)
 	err := client.SubscriptionAdminClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subName})
 	if err != nil && status.Code(err) != codes.NotFound {
 		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	}
-	_, err = client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+}
+
+func deletePubSubTopic(ctx context.Context, client *pubsub.Client, projectID, topicID string) {
+	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)
+	err := client.TopicAdminClient.DeleteTopic(ctx, &pubsubpb.DeleteTopicRequest{Topic: topicName})
+	if err != nil && status.Code(err) != codes.NotFound {
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	}
+}
+
+func recreatePubSubSubscription(ctx context.Context, client *pubsub.Client, projectID, subID, topicID string) {
+	deletePubSubSubscription(ctx, client, projectID, subID)
+	subName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)
+	_, err := client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
 		Name:  subName,
 		Topic: topicName,
 	})

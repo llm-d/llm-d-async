@@ -177,6 +177,9 @@ The async processor expects request messages to have the following format:
 ```
 
 Producers handle wrapping these into the internal wire format used for persistence and routing.
+The GCP Pub/Sub producer publishes a plain `RequestMessage` as message data.
+Caller metadata stays in that body.
+Only `result_route` is set as a message attribute.
 
 ### Result Messages
 
@@ -197,12 +200,13 @@ Results are written to the result queue/topic with the following structure:
 | `id` | string | The originating request's `id` |
 | `status_code` | int | HTTP status code of the inference response. Present (> 0) whenever an HTTP response was received — including error statuses. |
 | `payload` | string | The response body. On non-HTTP failures it carries a JSON `{"error": "<message>"}` object. |
-| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE` |
+| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE`, `DEAD_LETTERED` |
 | `error_message` | string | Human-readable description accompanying `error_code` |
 
 ### Internal Wire Format
 
-On the broker itself, messages travel in a tagged envelope carrying the request kind and internal routing (producers create this automatically):
+On the broker itself, messages travel in a tagged envelope carrying the request kind and internal routing (producers create this automatically).
+The GCP Pub/Sub producer does not use that envelope:
 
 ```json
 {"request_kind": "plain", "data": { "id": "...", "deadline": 1764045130, "payload": {} }}
@@ -313,8 +317,11 @@ The GCP PubSub implementation requires the user to configure the following:
     - Retries with exponential backoff.
     - Dead Letter Queue (DLQ).
 - Results Topic.
+- Per-producer result subscriptions filtered on the `result_route` attribute, if you use [`producer-gcp`](#producer-libraries).
 
 <u>Note:</u> If DLQ is NOT configured for the request topic, retried messages will be counted multiple times in the #_of_requests metric.
+The Pub/Sub service agent (`service-{project-number}@gcp-sa-pubsub.iam.gserviceaccount.com`) needs `pubsub.subscriber` on the request subscription and `pubsub.publisher` on the DLQ topic.
+`producer-gcp` creates the DLQ topic and subscription but does not grant these IAM roles.
 
 ![Async Processor - GCP PubSub Architecture](/docs/images/gcp_pubsub_architecture.png "AP - GCP PubSub")
 
@@ -330,3 +337,65 @@ The GCP PubSub implementation requires the user to configure the following:
 - `pubsub.result-topic-id`: The results topic ID.
 - `pubsub.batch-size`: Number of inflight messages. Default is <u>10</u>.
 - `pubsub.topics-config-file`: The configuration file name when using multiple topics — a JSON array of [topic entries](#queue-and-topic-entry-fields). <br> Mutually exclusive with `pubsub.request-subscriber-id`, `pubsub.request-path-url` and `pubsub.inference-objective` flags.
+
+### Producer libraries
+
+Callers enqueue work through a `Producer` implementation rather than speaking the broker wire format themselves.
+The interface lives in `github.com/llm-d/llm-d-async/api`.
+Redis, SQL, and GCP clients are separate modules so a GCP-only caller never imports `go-redis`.
+
+| Module | Transport | Notes |
+| --- | --- | --- |
+| `github.com/llm-d/llm-d-async/producer` | Redis sorted set | Wraps requests in the [internal wire format](#internal-wire-format). Supports `CancelRequests` and durable result delivery. |
+| `github.com/llm-d/llm-d-async/producer-sql` | SQL (Postgres) | Submits against the same database as the `sql` transport. `SubmitRequests` writes a batch in one transaction. |
+| `github.com/llm-d/llm-d-async/producer-gcp` | GCP Pub/Sub | Publishes a plain `RequestMessage`. Only `result_route` is a message attribute. `CancelRequests` returns `api.ErrNotSupported`. Durable results are not in v1. |
+
+`producer-gcp` stamps a `result_route` attribute on each request.
+The processor echoes that same attribute onto result publications.
+Each producer attaches a filtered result subscription so it only sees its own results.
+`RequestSubscriptionID` must match the processor's `subscriber_id`.
+`ResultRoute` has to be a Pub/Sub resource ID, even when `ResultSubscriptionID` is set.
+The filter is `attributes.result_route = "<route>"`, and a character outside that charset is not valid filter syntax.
+`RequestTopicID`, `ResultTopicID`, and `DeadLetterTopicID` must be three different topics.
+The three subscription IDs must differ as well.
+An injected Pub/Sub client must already be for `ProjectID`.
+
+By default `NewProducer` idempotently creates the request topic, the request subscription (exactly-once, exponential backoff, DLQ, never-expire), the result topic, this producer's filtered result subscription (never-expire), and a DLQ topic plus a filtered DLQ subscription.
+The DLQ subscription defaults to `<DeadLetterTopicID>-<ResultRoute>`, so producers on one dead-letter topic do not share a subscription.
+`GetResult` reads that subscription and returns a dead-lettered request as an error result with `error_code` `DEAD_LETTERED`.
+`AlreadyExists` is success after checking that an existing subscription is attached to the expected topic, that a required filter matches, and that a dead-letter topic matches when one is set.
+It does not change the expiration policy, the dead-letter attempt count, or the dead-letter topic.
+A subscription created with an inactivity TTL keeps that TTL.
+A subscription created with fewer delivery attempts keeps that limit.
+An existing result or DLQ subscription whose filter does not match is an error.
+An existing request subscription that dead-letters to a different topic is an error.
+A request subscription with no dead-letter policy is left as it is, and `NewProducer` logs that.
+Delete a mismatched subscription once so the next `NewProducer` creates it with the route filter, the configured dead-letter topic, no expiry, and the configured attempt count.
+The request subscription is shared by every publisher on that topic.
+Exactly-once delivery and the dead-letter policy apply to those publishers too.
+A legacy publisher that does not set `result_route` still has poison requests copied onto the dead-letter topic.
+The only DLQ subscriptions are filtered on `result_route`, so a message with no route matches none of them.
+The request subscription dead-letters after `MaxDeliveryAttempts` deliveries.
+The default is 100, which is the Pub/Sub maximum, and the allowed range is 5-100.
+The processor Nacks on gate refusal and on retry, and each Nack counts, so the minimum of 5 drops a live request while a pool stays saturated and never publishes a result.
+A refusal waits 10 seconds, then Nacks.
+The receive callback returns immediately, so the refusal does not hold an outstanding-message slot.
+A result or dead letter that `GetResult` has not taken within 60 minutes is redelivered.
+That is the Pub/Sub lease extension, and the producer sets it explicitly.
+A result or dead letter that cannot be decoded is acknowledged and skipped.
+`GetResult` returns the next decodable message, so one poison message does not stop the caller.
+After a receive error, the next `GetResult` reuses that error for one second before opening another pair of StreamingPulls.
+On a gate drop, `api.NewDroppedResult` copies request metadata onto the result and then applies the gate's keys.
+That runs for the Pub/Sub flow gate, the worker pool gate, the Redis sorted-set flow, and the SQL flow, so `result_route` is still published when the gate built its own result.
+Use `WithoutCreateResources` for a publish-only identity.
+See [the GCP Pub/Sub producer proposal](proposals/gcp-pubsub-producer.md).
+
+```go
+p, err := producergcp.NewProducer(ctx, producergcp.Config{
+    ProjectID:             "my-project",
+    RequestTopicID:        "requests",
+    RequestSubscriptionID: "llm-d-async-requests",
+    ResultTopicID:         "results",
+    ResultRoute:           "batch-job-42",
+})
+```
