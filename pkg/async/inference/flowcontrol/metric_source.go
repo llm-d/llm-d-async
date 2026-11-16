@@ -24,7 +24,6 @@ import (
 	"github.com/prometheus/client_golang/api"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
-	"golang.org/x/oauth2/google"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
 )
@@ -67,21 +66,6 @@ func NewPromQLMetricSource(clientConfig api.Config, expr string) (*PromQLMetricS
 // gmpScope is the OAuth scope required to read Google Managed Prometheus's
 // Prometheus HTTP Query API via Application Default Credentials.
 const gmpScope = "https://www.googleapis.com/auth/monitoring.read"
-
-// NewGMPPromQLMetricSource creates a PromQL MetricSource for Google Managed Prometheus.
-func NewGMPPromQLMetricSource(projectID string, expr string) (*PromQLMetricSource, error) {
-	ctx := context.Background()
-	gcpClient, err := google.DefaultClient(ctx, gmpScope)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create authenticated GCP client: %w", err)
-	}
-
-	promURL := fmt.Sprintf("https://monitoring.googleapis.com/v1/projects/%s/location/global/prometheus", projectID)
-	return NewPromQLMetricSource(api.Config{
-		Address:      promURL,
-		RoundTripper: gcpClient.Transport,
-	}, expr)
-}
 
 func (s *PromQLMetricSource) Expr() string {
 	return s.expr
