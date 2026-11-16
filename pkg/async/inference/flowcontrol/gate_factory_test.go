@@ -521,7 +521,7 @@ func TestIsGMPURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isGMPURL(tt.url))
+			assert.Equal(t, tt.want, IsGMPURL(tt.url))
 		})
 	}
 }
@@ -658,7 +658,7 @@ func TestGateFactory_prometheusConfig(t *testing.T) {
 		cfg, err := f.prometheusConfig()
 		require.NoError(t, err)
 		assert.Equal(t, http.RoundTripper(http.DefaultTransport), cfg.RoundTripper,
-			"isGMPURL must ignore the explicit default https port")
+			"IsGMPURL must ignore the explicit default https port")
 	})
 }
 
@@ -722,7 +722,7 @@ func TestGateFactory_GMPAuthE2E(t *testing.T) {
 	defer server.Close()
 
 	t.Run("authed via GMP RoundTripper reads real sample", func(t *testing.T) {
-		// Use the real GMP URL form so isGMPURL() -> prometheusConfig() takes the
+		// Use the real GMP URL form so IsGMPURL() -> prometheusConfig() takes the
 		// auth path; the gmpAuthTestTransport rewrites the request to server.URL.
 		f := NewGateFactory("https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus")
 		f.gmpClientFn = func(_ context.Context, _ ...string) (*http.Client, oauth2.TokenSource, error) {

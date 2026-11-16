@@ -131,7 +131,7 @@ func (f *GateFactory) WithPrometheusTransport(rt http.RoundTripper) *GateFactory
 // transport.
 func (f *GateFactory) prometheusConfig() (promapi.Config, error) {
 	cfg := promapi.Config{Address: f.prometheusURL, RoundTripper: f.prometheusTransport}
-	if cfg.RoundTripper != nil || !isGMPURL(f.prometheusURL) {
+	if cfg.RoundTripper != nil || !IsGMPURL(f.prometheusURL) {
 		return cfg, nil
 	}
 	f.gmpMu.Lock()
@@ -830,7 +830,7 @@ func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
 	return s
 }
 
-// isGMPURL reports whether urlStr targets Google Managed Prometheus's
+// IsGMPURL reports whether urlStr targets Google Managed Prometheus's
 // Prometheus HTTP Query API. Detection is host-based (exactly
 // monitoring.googleapis.com, ignoring any port — GMP encodes location in the
 // URL path, not the host), so an operator's plain prometheus / mimir /
@@ -838,7 +838,7 @@ func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
 // prior behavior. A malformed URL falls back to a substring check so it still
 // gets the auth path, yielding a clearer ADC error than a silent HTTP 401 at
 // query time. The function never panics.
-func isGMPURL(urlStr string) bool {
+func IsGMPURL(urlStr string) bool {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return strings.Contains(urlStr, "monitoring.googleapis.com")
