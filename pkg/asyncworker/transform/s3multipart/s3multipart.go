@@ -8,6 +8,12 @@
 // sends its bytes as the multipart file part; the remaining fields become form
 // fields.
 //
+// vllm-omni's /v1/images/edits also accepts only multipart, but fetches input
+// images itself from `url` form fields. For that endpoint the plugin maps the
+// OpenAI-style `images: [{image_url}]` to `url` fields, presigning s3://
+// references so vllm-omni needs no storage credentials and the worker never
+// downloads the image.
+//
 // The plugin picks requests by the path of the URL they are dispatched to and
 // leaves every other request untouched. s3:// references are only resolved for
 // buckets in the configured allowlist. Storage credentials come from the AWS SDK
@@ -180,6 +186,8 @@ func (p *Plugin) TransformContext(ctx context.Context, payload []byte, _ map[str
 	switch {
 	case strings.HasSuffix(u.Path, "/v1/audio/transcriptions"), strings.HasSuffix(u.Path, "/v1/audio/translations"):
 		return p.transformAudio(ctx, payload)
+	case strings.HasSuffix(u.Path, "/v1/images/edits"):
+		return p.transformImageEdit(ctx, payload)
 	default:
 		return nil, "", false, nil
 	}
