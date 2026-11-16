@@ -213,7 +213,7 @@ func TestTransform_LeavesOtherRequestsAlone(t *testing.T) {
 	p := newTestPlugin(t, store.URL, 0)
 	payload := []byte(`{"model":"whisper","file":"s3://audio/a.wav"}`)
 
-	for _, u := range []string{"http://gw/v1/chat/completions", "http://gw/v1/audio/speech", "", "::bad"} {
+	for _, u := range []string{"http://gw/v1/chat/completions", "http://gw/v1/audio/speech", "http://gw/v1/images/generations", "", "::bad"} {
 		_, _, handled, err := p.TransformContext(context.Background(), payload, nil, u)
 		if handled || err != nil {
 			t.Errorf("TransformContext(%q) = handled %v err %v, want false/nil", u, handled, err)
