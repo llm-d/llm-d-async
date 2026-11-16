@@ -230,6 +230,29 @@ func TestExpireResultsDrainsMoreThanOneBatch(t *testing.T) {
 	assert.Zero(t, left)
 }
 
+func TestQueueBacklogSetsSourceAvailable(t *testing.T) {
+	store := cancelTestStore(t)
+	ctx := context.Background()
+	f, err := NewWithStore(ctx, store, Config{Queues: []QueueConfig{{ID: "q", QueueName: "q", WorkerPoolID: "default"}}}, []pipeline.WorkerPoolConfig{{ID: "default"}}, nil)
+	require.NoError(t, err)
+	t.Cleanup(f.cancelChecks.stop)
+	t.Cleanup(f.quota.Close)
+	require.NoError(t, store.Enqueue(ctx, sqlqueue.Request{ID: "r1", Token: "t", Queue: "q", Deadline: time.Now().Add(time.Hour).Unix(), Envelope: "{}", Payload: []byte("{}")}))
+
+	stats, err := f.QueueBacklog(ctx)
+	require.NoError(t, err)
+	require.Len(t, stats, 1)
+	assert.EqualValues(t, 1, stats[0].Depth)
+	assert.True(t, stats[0].SourceAvailable, "a successful read")
+
+	failed, cancel := context.WithCancel(ctx)
+	cancel()
+	stats, err = f.QueueBacklog(failed)
+	require.Error(t, err)
+	require.Len(t, stats, 1)
+	assert.False(t, stats[0].SourceAvailable, "a failed read")
+}
+
 type refuseTenant struct{ tenant string }
 
 func (g refuseTenant) Budget(context.Context) float64 { return 1 }

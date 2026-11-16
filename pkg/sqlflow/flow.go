@@ -813,6 +813,7 @@ func (f *Flow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, e
 			depth = 0
 		}
 		stat.Depth = depth
+		stat.SourceAvailable = err == nil
 		stat.ExpiringCounts = make([]pipeline.ExpiringCount, 0, len(labels))
 		for i, l := range labels {
 			stat.ExpiringCounts = append(stat.ExpiringCounts, pipeline.ExpiringCount{Window: l, Count: expiring[i]})
