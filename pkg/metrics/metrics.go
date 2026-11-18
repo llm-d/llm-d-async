@@ -121,6 +121,10 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_broker_backlog",
 		Help: "Number of undelivered/pending messages held by the broker queue.",
 	}, queueLabels)
+	DeadlineRequiredReplicas = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_deadline_required_replicas",
+		Help: "Replicas needed to finish the queue's queued items before their deadlines, from the latest deadline-proximity snapshot and the queue's deadline_scaling settings: the maximum over horizons t of B(t) / (throughput_rps * (t - cold_start_seconds) * safety_factor), where B(t) leaves out expired items, rounded up and capped at max_replicas. Only set for queues with deadline_scaling, on brokers that expose per-item deadlines, and not after a failed deadline read.",
+	}, queueLabels)
 	BrokerBacklogSourceAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_broker_backlog_source_available",
 		Help: "1 when the most recent broker-backlog read for the queue succeeded; 0 when the source was unavailable or returned an error.",
@@ -457,6 +461,17 @@ func SetBrokerBacklog(queueID, queueName, poolName string, n float64) {
 	BrokerBacklog.WithLabelValues(queueID, queueName, poolName).Set(n)
 }
 
+// SetDeadlineRequiredReplicas sets the replicas a queue needs to meet its deadlines.
+func SetDeadlineRequiredReplicas(queueID, queueName, poolName string, replicas int) {
+	DeadlineRequiredReplicas.WithLabelValues(queueID, queueName, poolName).Set(float64(replicas))
+}
+
+// RemoveDeadlineRequiredReplicas deletes the series of a queue whose
+// deadline_scaling settings were removed.
+func RemoveDeadlineRequiredReplicas(queueID, queueName, poolName string) {
+	DeadlineRequiredReplicas.DeleteLabelValues(queueID, queueName, poolName)
+}
+
 // SetBrokerBacklogSourceAvailable records whether the most recent broker-side
 // backlog read produced a trustworthy value for a queue.
 func SetBrokerBacklogSourceAvailable(queueID, queueName, poolName string, available bool) {
@@ -479,6 +494,7 @@ func RemoveQueueSnapshots(queueID, queueName, poolName string) {
 	BrokerBacklogSourceAvailable.DeleteLabelValues(queueID, queueName, poolName)
 	DispatchBudget.DeleteLabelValues(queueID, queueName, poolName)
 	DeadlineProximity.Delete(queueID, queueName, poolName)
+	DeadlineRequiredReplicas.DeleteLabelValues(queueID, queueName, poolName)
 }
 
 // SetPoolWorkerLimit sets the configured worker concurrency limit for a pool.
@@ -548,7 +564,7 @@ func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Colle
 	collectors := []prometheus.Collector{
 		Retries, AsyncReqs, DispatchedReqs, GateWaitRequeues, ExceededDeadlineReqs, FailedReqs, SuccessfulReqs, SheddedRequests, Tokens,
 		QueueDepth, GateWaitingRequests, InflightRequests, BrokerBacklog, BrokerBacklogSourceAvailable, InferenceLatencyTime, QueueResidenceTime,
-		DeadlineProximity,
+		DeadlineProximity, DeadlineRequiredReplicas,
 		DispatchBudget, PoolWorkerLimit, QueueConfigReloads, QueueConfigLastSuccess,
 		DrainLimitRPS, DrainLimitLeaseValid, DrainLimitValidUntil, GateDecisions,
 		GateMetricValue, GateMetricThreshold, GateMetricSourceAvailable,
