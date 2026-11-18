@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
 
 var _ RequestTransform = (*fakeTransform)(nil)
+var _ ContextRequestTransform = (*fakeTransform)(nil)
 
 // fakeTransform is a configurable RequestTransform for tests.
 type fakeTransform struct {
@@ -21,6 +23,7 @@ type fakeTransform struct {
 	body        []byte
 	contentType string
 	transformer error
+	contextErr  error
 
 	validateCalls *int
 	transformLog  *[]string
@@ -37,6 +40,10 @@ func (f *fakeTransform) Validate(_ []byte, _ map[string]string, _ int64) error {
 	return f.validateErr
 }
 
+func (f *fakeTransform) ValidateWithContext(payload []byte, metadata map[string]string, _ string, deadline int64) error {
+	return f.Validate(payload, metadata, deadline)
+}
+
 func (f *fakeTransform) Transform(_ []byte, _ map[string]string) ([]byte, string, bool, error) {
 	if f.transformLog != nil {
 		*f.transformLog = append(*f.transformLog, f.name)
@@ -50,6 +57,13 @@ func (f *fakeTransform) Transform(_ []byte, _ map[string]string) ([]byte, string
 	return f.body, f.contentType, true, nil
 }
 
+func (f *fakeTransform) TransformWithContext(_ context.Context, _ []byte, _ map[string]string, _ string) ([]byte, string, bool, error) {
+	if f.contextErr != nil {
+		return nil, "", false, f.contextErr
+	}
+	return f.Transform(nil, nil)
+}
+
 func TestChain_NilIsNoOp(t *testing.T) {
 	var c *Chain
 	if c.Len() != 0 {
@@ -61,6 +75,39 @@ func TestChain_NilIsNoOp(t *testing.T) {
 	body, ct, handled, err := c.Apply([]byte(`{}`), nil)
 	if handled || err != nil || body != nil || ct != "" {
 		t.Errorf("nil chain Apply = (%q,%q,%v,%v), want all zero/false/nil", body, ct, handled, err)
+	}
+}
+
+func TestChain_ApplyContextUsesContextTransform(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := NewChain([]RequestTransform{&fakeTransform{name: "context", contextErr: ctx.Err()}})
+
+	_, _, handled, err := c.ApplyContext(ctx, []byte(`{}`), nil, "https://gateway.example/v1/audio/transcriptions")
+	if handled {
+		t.Error("handled = true, want false on context error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("ApplyContext err = %v, want context.Canceled", err)
+	}
+}
+
+func TestChain_ApplyContextFallsBackToTransform(t *testing.T) {
+	c := NewChain([]RequestTransform{&legacyFakeTransform{}})
+
+	body, contentType, handled, err := c.ApplyContext(context.Background(), []byte(`{}`), nil, "https://gateway.example/v1/audio/transcriptions")
+	if err != nil || !handled || string(body) != "LEGACY" || contentType != "text/plain" {
+		t.Fatalf("ApplyContext = (%q,%q,%v,%v), want LEGACY/text/plain/true/nil", body, contentType, handled, err)
+	}
+}
+
+func TestChain_ValidateContextUsesContextTransform(t *testing.T) {
+	wantErr := errors.New("invalid signed URL")
+	c := NewChain([]RequestTransform{&fakeTransform{name: "context", validateErr: wantErr}})
+
+	err := c.ValidateContext([]byte(`{}`), nil, "https://gateway.example/v1/audio/transcriptions", time.Now().Add(time.Minute).Unix())
+	if !errors.Is(err, wantErr) {
+		t.Errorf("ValidateContext err = %v, want %v", err, wantErr)
 	}
 }
 
@@ -226,6 +273,18 @@ func TestBuildChain_NotARequestTransform(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for plugin that does not implement RequestTransform")
 	}
+}
+
+type legacyFakeTransform struct{}
+
+func (l *legacyFakeTransform) TypedName() plugins.TypedName {
+	return plugins.TypedName{Type: "legacy", Name: "legacy"}
+}
+
+func (l *legacyFakeTransform) Validate([]byte, map[string]string, int64) error { return nil }
+
+func (l *legacyFakeTransform) Transform([]byte, map[string]string) ([]byte, string, bool, error) {
+	return []byte("LEGACY"), "text/plain", true, nil
 }
 
 func TestBuildChain_Empty(t *testing.T) {

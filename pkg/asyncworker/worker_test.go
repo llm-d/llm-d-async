@@ -306,6 +306,34 @@ func (t *blockingTransform) Transform(payload []byte, metadata map[string]string
 	return nil, "", false, nil
 }
 
+type blockingContextTransform struct {
+	started chan struct{}
+}
+
+var _ transform.ContextRequestTransform = (*blockingContextTransform)(nil)
+
+func (b *blockingContextTransform) TypedName() plugins.TypedName {
+	return plugins.TypedName{Type: "blocking-context", Name: "blocking-context"}
+}
+
+func (b *blockingContextTransform) Validate([]byte, map[string]string, int64) error {
+	return nil
+}
+
+func (b *blockingContextTransform) ValidateWithContext([]byte, map[string]string, string, int64) error {
+	return nil
+}
+
+func (b *blockingContextTransform) Transform([]byte, map[string]string) ([]byte, string, bool, error) {
+	return nil, "", false, nil
+}
+
+func (b *blockingContextTransform) TransformWithContext(ctx context.Context, _ []byte, _ map[string]string, _ string) ([]byte, string, bool, error) {
+	close(b.started)
+	<-ctx.Done()
+	return nil, "", false, ctx.Err()
+}
+
 func TestWorker_CancelledRequestSkipsInference(t *testing.T) {
 	msgID := "cancelled-before-send"
 	var called atomic.Int32
@@ -942,9 +970,9 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, ok := parseRetryAfter(tt.value)
+			d, ok := transform.ParseRetryAfter(tt.value)
 			if ok != tt.wantOK {
-				t.Fatalf("parseRetryAfter(%q): ok = %v, want %v", tt.value, ok, tt.wantOK)
+				t.Fatalf("ParseRetryAfter(%q): ok = %v, want %v", tt.value, ok, tt.wantOK)
 			}
 			if !tt.wantOK {
 				return

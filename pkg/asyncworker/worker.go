@@ -319,17 +319,56 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 
 					// Apply the request body-transform chain. If a transform handles
 					// the message we send its body and Content-Type; otherwise the
-					// default JSON payload is sent unchanged. A transform error is
-					// fatal/non-retryable.
+					// default JSON payload is sent unchanged.
 					sendPayload := payloadBytes
 					sendHeaders := msg.HttpHeaders
-					if body, contentType, handled, terr := transforms.Apply(payloadBytes, msg.PublicRequest.ReqMetadata()); terr != nil {
+					transformCtx, stopTransformCancellationWatch := watchInflightCancellation(reqCtx, logger, msg)
+					body, contentType, handled, terr := transforms.ApplyContext(transformCtx, payloadBytes, msg.PublicRequest.ReqMetadata(), msg.RequestURL)
+					cancelledDuringTransform := stopTransformCancellationWatch()
+					if terr != nil {
+						category := asyncapi.ErrCategoryInvalidReq
+						var transformErr asyncapi.InferenceError
+						if errors.As(terr, &transformErr) {
+							category = transformErr.Category()
+						}
 						span.RecordError(terr)
 						span.SetStatus(codes.Error, "request transform failed")
 						span.SetAttributes(
-							attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
-							attribute.String(uotel.LegacyAttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
+							attribute.String(uotel.AttrErrorCategory, string(category)),
+							attribute.String(uotel.LegacyAttrErrorCategory, string(category)),
 						)
+
+						if cancelledDuringTransform {
+							select {
+							case resultChannel <- asyncapi.NewCancelledResult(msg.PublicRequest, msg.InternalRouting):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+						if requestCtx.Err() != nil {
+							retryChannel <- pipeline.RetryMessage{
+								EmbelishedRequestMessage: msg,
+								BackoffDurationSeconds:   0,
+							}
+							return
+						}
+						if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+							metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+							select {
+							case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+						if !category.Fatal() {
+							var retryAfter time.Duration
+							var clientErr *asyncapi.ClientError
+							if errors.As(terr, &clientErr) {
+								retryAfter = clientErr.RetryAfter
+							}
+							retryMessage(reqCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{})
+							return
+						}
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 						select {
 						case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to transform request body: %s", terr.Error())):
@@ -513,7 +552,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	// Pre-dispatch transform validation (e.g. signed object URL expiry). A
 	// validation failure is fatal/non-retryable, so we surface an error result
 	// rather than re-enqueue. A nil chain validates successfully.
-	if err := transforms.Validate(payloadBytes, r.ReqMetadata(), deadline); err != nil {
+	if err := transforms.ValidateContext(payloadBytes, r.ReqMetadata(), msg.RequestURL, deadline); err != nil {
 		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 		select {
 		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to validate request for transform: %s", err.Error())):

@@ -8,11 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"syscall"
-	"time"
 
 	asyncapi "github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
 )
 
 var _ asyncapi.InferenceClient = (*HTTPInferenceClient)(nil)
@@ -55,7 +54,7 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	// Read the rejection context once: the headers are available on every path
 	// below, including the one where the body read fails.
 	droppedReason := result.Header.Get(asyncapi.DroppedReasonHeader)
-	retryAfter, _ := parseRetryAfter(result.Header.Get("Retry-After"))
+	retryAfter, _ := transform.ParseRetryAfter(result.Header.Get("Retry-After"))
 
 	body, err := io.ReadAll(result.Body)
 	if err != nil {
@@ -121,26 +120,4 @@ func transportErrorCategory(err error) asyncapi.ErrorCategory {
 	default:
 		return asyncapi.ErrCategoryUnknown
 	}
-}
-
-// parseRetryAfter parses a Retry-After header value, which can be either
-// a number of seconds (e.g. "120") or an HTTP-date (e.g. "Thu, 01 Dec 1994 16:00:00 GMT").
-// Returns the parsed duration and true if successful, or (0, false) if empty or unparsable.
-func parseRetryAfter(value string) (time.Duration, bool) {
-	if value == "" {
-		return 0, false
-	}
-	// Try integer seconds first
-	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
-		return time.Duration(seconds) * time.Second, true
-	}
-	// Try HTTP-date formats (IMF-fixdate, RFC 850, asctime)
-	if t, err := http.ParseTime(value); err == nil {
-		d := time.Until(t)
-		if d < 0 {
-			d = 0
-		}
-		return d, true
-	}
-	return 0, false
 }
