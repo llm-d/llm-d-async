@@ -54,28 +54,10 @@ func TestNewGateFactoryAppliesPrometheusAuth(t *testing.T) {
 	}
 }
 
-// capturingSink collects log lines per level so tests can assert on what the
-// startup path reported and at which level.
-type capturingSink struct {
-	infoMessages  []string
-	errorMessages []string
-}
-
-func (s *capturingSink) Init(_ logr.RuntimeInfo) {}
-func (s *capturingSink) Enabled(_ int) bool      { return true }
-func (s *capturingSink) Info(_ int, msg string, _ ...any) {
-	s.infoMessages = append(s.infoMessages, msg)
-}
-func (s *capturingSink) Error(_ error, msg string, _ ...any) {
-	s.errorMessages = append(s.errorMessages, msg)
-}
-func (s *capturingSink) WithValues(_ ...any) logr.LogSink { return s }
-func (s *capturingSink) WithName(_ string) logr.LogSink   { return s }
-
 // A CA certificate alone cannot authenticate GMP requests, so the startup
-// path has to log an error for operators instead of leaving them with silent
-// 401s.
-func TestNewGateFactoryLogsErrorOnCACertOnlyGMP(t *testing.T) {
+// path fails closed instead of running gates that always HTTP 401 and fall
+// back.
+func TestNewGateFactoryFailsOnCACertOnlyGMP(t *testing.T) {
 	gmpURL := "https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus"
 	// A real PEM so the transport construction accepts the file.
 	pemSrv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -97,26 +79,26 @@ func TestNewGateFactoryLogsErrorOnCACertOnlyGMP(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		url         string
-		caCertFile  bool
-		tokenFile   bool
-		wantWarning bool
+		name       string
+		url        string
+		caCertFile bool
+		tokenFile  bool
+		wantErr    bool
 	}{
 		{
-			name:        "ca cert only on GMP warns",
-			url:         gmpURL,
-			caCertFile:  true,
-			wantWarning: true,
+			name:       "ca cert only on GMP fails",
+			url:        gmpURL,
+			caCertFile: true,
+			wantErr:    true,
 		},
 		{
-			name:       "ca cert with bearer token does not warn",
+			name:       "ca cert with bearer token succeeds",
 			url:        gmpURL,
 			caCertFile: true,
 			tokenFile:  true,
 		},
 		{
-			name:       "ca cert only on a non-GMP URL does not warn",
+			name:       "ca cert only on a non-GMP URL succeeds",
 			url:        "https://prom.example.com/query",
 			caCertFile: true,
 		},
@@ -131,27 +113,22 @@ func TestNewGateFactoryLogsErrorOnCACertOnlyGMP(t *testing.T) {
 			if tc.tokenFile {
 				cfg.BearerTokenFile = writeTempCert("token")
 			}
-			sink := &capturingSink{}
-			if _, err := newGateFactory(cfg, logr.New(sink)); err != nil {
+			factory, err := newGateFactory(cfg, logr.Discard())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("newGateFactory succeeded, want error (CA cert alone cannot authenticate GMP)")
+				}
+				if !strings.Contains(err.Error(), "does not authenticate to Google Managed Prometheus") ||
+					!strings.Contains(err.Error(), "prometheus-bearer-token-file") {
+					t.Fatalf("error = %q, want it to name the misconfiguration and the bearer-token-file remedy", err)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("newGateFactory: %v", err)
 			}
-			gotInfo := false
-			for _, msg := range sink.infoMessages {
-				if strings.Contains(msg, "does not authenticate to Google Managed Prometheus") {
-					gotInfo = true
-				}
-			}
-			gotError := false
-			for _, msg := range sink.errorMessages {
-				if strings.Contains(msg, "does not authenticate to Google Managed Prometheus") {
-					gotError = true
-				}
-			}
-			if gotInfo {
-				t.Fatalf("misconfiguration reported at info level, want only error (info: %v)", sink.infoMessages)
-			}
-			if gotError != tc.wantWarning {
-				t.Fatalf("error = %v, want %v (error logs: %v)", gotError, tc.wantWarning, sink.errorMessages)
+			if factory == nil {
+				t.Fatal("factory is nil, want a working GateFactory")
 			}
 		})
 	}
