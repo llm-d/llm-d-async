@@ -181,7 +181,7 @@ func requestURL(chMeta pipeline.RequestChannel, ir *api.InternalRequest) string 
 	if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
 		requestPath = ep
 	}
-	u, _ := url.JoinPath(chMeta.IGWBaseURL, requestPath)
+	u, _ := url.JoinPath(chMeta.IGWBaseURL, requestPath) // #nosec G125 -- requestPath is an intentional HTTP route
 	return u
 }
 
