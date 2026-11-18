@@ -319,7 +319,7 @@ ENVTEST_VERSION := $(ENVTEST_VERSION)
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 ENVTEST_K8S_VERSION := $(ENVTEST_K8S_VERSION)
-GOLANGCI_LINT_VERSION ?= v2.11.4
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -347,7 +347,7 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 GOIMPORTS_VERSION ?= v0.34.0
-GOSEC_VERSION ?= v2.22.4
+GOSEC_VERSION ?= v2.30.0
 
 .PHONY: install-pre-commit-tools
 install-pre-commit-tools: golangci-lint ## Install tools required by pre-commit hooks.

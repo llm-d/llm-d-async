@@ -1,6 +1,6 @@
 module github.com/llm-d/llm-d-async/producer-sql
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/exaring/otelpgx v0.13.0

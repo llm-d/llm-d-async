@@ -449,6 +449,7 @@ func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec
 
 	if cfg.InsecureSkipVerify {
+		// #nosec G402 -- explicitly requested by the server TLS setting
 		tlsConfig.InsecureSkipVerify = true //nolint:gosec
 	}
 

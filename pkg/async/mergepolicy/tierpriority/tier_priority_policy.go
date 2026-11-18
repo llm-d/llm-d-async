@@ -440,7 +440,7 @@ func (p *TierPriorityPolicy) MergeRequestChannels(channels []pipeline.RequestCha
 				if ep := ir.PublicRequest.ReqEndpoint(); ep != "" {
 					requestPath = ep
 				}
-				requestURL, _ := url.JoinPath(chMeta.IGWBaseURL, requestPath)
+				requestURL, _ := url.JoinPath(chMeta.IGWBaseURL, requestPath) // #nosec G125 -- requestPath is an intentional HTTP route
 				headers := map[string]string{
 					"Content-Type": "application/json",
 				}
