@@ -54,22 +54,28 @@ func TestNewGateFactoryAppliesPrometheusAuth(t *testing.T) {
 	}
 }
 
-// capturingSink collects Info log lines so tests can assert on what the
-// startup path reported.
-type capturingSink struct{ messages []string }
+// capturingSink collects log lines per level so tests can assert on what the
+// startup path reported and at which level.
+type capturingSink struct {
+	infoMessages  []string
+	errorMessages []string
+}
 
 func (s *capturingSink) Init(_ logr.RuntimeInfo) {}
 func (s *capturingSink) Enabled(_ int) bool      { return true }
 func (s *capturingSink) Info(_ int, msg string, _ ...any) {
-	s.messages = append(s.messages, msg)
+	s.infoMessages = append(s.infoMessages, msg)
 }
-func (s *capturingSink) Error(_ error, _ string, _ ...any) {}
-func (s *capturingSink) WithValues(_ ...any) logr.LogSink  { return s }
-func (s *capturingSink) WithName(_ string) logr.LogSink    { return s }
+func (s *capturingSink) Error(_ error, msg string, _ ...any) {
+	s.errorMessages = append(s.errorMessages, msg)
+}
+func (s *capturingSink) WithValues(_ ...any) logr.LogSink { return s }
+func (s *capturingSink) WithName(_ string) logr.LogSink   { return s }
 
-// A CA certificate alone does not authenticate GMP requests, so the startup
-// path has to warn operators instead of leaving them with silent 401s.
-func TestNewGateFactoryWarnsOnCACertOnlyGMP(t *testing.T) {
+// A CA certificate alone cannot authenticate GMP requests, so the startup
+// path has to log an error for operators instead of leaving them with silent
+// 401s.
+func TestNewGateFactoryLogsErrorOnCACertOnlyGMP(t *testing.T) {
 	gmpURL := "https://monitoring.googleapis.com/v1/projects/p/location/global/prometheus"
 	// A real PEM so the transport construction accepts the file.
 	pemSrv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -129,14 +135,23 @@ func TestNewGateFactoryWarnsOnCACertOnlyGMP(t *testing.T) {
 			if _, err := newGateFactory(cfg, logr.New(sink)); err != nil {
 				t.Fatalf("newGateFactory: %v", err)
 			}
-			gotWarning := false
-			for _, msg := range sink.messages {
+			gotInfo := false
+			for _, msg := range sink.infoMessages {
 				if strings.Contains(msg, "does not authenticate to Google Managed Prometheus") {
-					gotWarning = true
+					gotInfo = true
 				}
 			}
-			if gotWarning != tc.wantWarning {
-				t.Fatalf("warning = %v, want %v (logs: %v)", gotWarning, tc.wantWarning, sink.messages)
+			gotError := false
+			for _, msg := range sink.errorMessages {
+				if strings.Contains(msg, "does not authenticate to Google Managed Prometheus") {
+					gotError = true
+				}
+			}
+			if gotInfo {
+				t.Fatalf("misconfiguration reported at info level, want only error (info: %v)", sink.infoMessages)
+			}
+			if gotError != tc.wantWarning {
+				t.Fatalf("error = %v, want %v (error logs: %v)", gotError, tc.wantWarning, sink.errorMessages)
 			}
 		})
 	}

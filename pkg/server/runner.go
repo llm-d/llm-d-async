@@ -425,10 +425,11 @@ func newGateFactory(cfg PrometheusConfig, logger logr.Logger) (*flowcontrol.Gate
 		// The explicit transport takes precedence over GMP's Application
 		// Default Credentials, so this combination bypasses ADC but provides
 		// no credentials of its own; queries will get HTTP 401 and the gates
-		// will fall back instead of failing closed.
-		logger.Info("prometheus-ca-cert alone does not authenticate to Google Managed " +
-			"Prometheus; gate queries will likely get HTTP 401 and fall back. Either " +
-			"omit both prometheus flags to let gates use Application Default " +
+		// will fall back instead of failing closed. This configuration can
+		// never succeed, so it is logged at error level.
+		logger.Error(nil, "prometheus-ca-cert alone does not authenticate to Google Managed "+
+			"Prometheus; gate queries will likely get HTTP 401 and fall back. Either "+
+			"omit both prometheus flags to let gates use Application Default "+
 			"Credentials, or also set prometheus-bearer-token-file")
 	}
 	return flowcontrol.NewGateFactoryWithCacheTTL(cfg.URL, cfg.CacheTTL).
