@@ -9,7 +9,11 @@
 // are separate plugins that register a factory under their own type.
 package transform
 
-import "github.com/llm-d/llm-d-async/pkg/plugins"
+import (
+	"context"
+
+	"github.com/llm-d/llm-d-async/pkg/plugins"
+)
 
 // RequestTransform is a dispatch-time body-transform plugin. The worker invokes
 // the configured chain after marshalling the request payload and before sending
@@ -30,5 +34,22 @@ type RequestTransform interface {
 	// message it returns the new body, the Content-Type to set on the request,
 	// and handled=true. Otherwise it returns handled=false and the default JSON
 	// body is used unchanged.
+	//
+	// An error whose chain contains an api.InferenceError with a retryable
+	// category (RATE_LIMIT, SERVER_ERROR) makes the worker retry the message
+	// with backoff. Any other error fails it as an invalid request.
 	Transform(payload []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error)
+}
+
+// ContextTransform is an optional interface a RequestTransform may also
+// implement, like the ...Context interfaces in database/sql/driver. When a
+// plugin implements it, the chain calls TransformContext instead of Transform,
+// so existing plugins keep working unchanged.
+type ContextTransform interface {
+	// TransformContext behaves like Transform, with two additions. ctx carries
+	// the request deadline and is cancelled on shutdown; any I/O the transform
+	// does (e.g. fetching an object) must honor it. requestURL is the full URL
+	// the request will be sent to, so a transform can recognize messages by
+	// endpoint path.
+	TransformContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string) (body []byte, contentType string, handled bool, err error)
 }
