@@ -1,0 +1,920 @@
+/*
+Copyright 2026 The llm-d Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package flowcontrol
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/go-logr/logr"
+	"github.com/llm-d/llm-d-async/pipeline"
+	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
+	promapi "github.com/prometheus/client_golang/api"
+	goredis "github.com/redis/go-redis/v9"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+)
+
+// DefaultCacheTTL is the default TTL for cached Prometheus metric sources.
+const DefaultCacheTTL = 5 * time.Second
+
+var _ pipeline.GateFactory = (*GateFactory)(nil)
+
+var _ redisgate.RedisClientRegistrar = (*GateFactory)(nil)
+
+var _ QuotaStore = (*redisgate.QuotaStore)(nil)
+
+// GateFactory creates DispatchGate instances based on configuration.
+type GateFactory struct {
+	prometheusURL string
+	// prometheusTransport carries the CA and bearer token for Prometheus
+	// queries; nil uses the Prometheus client's default transport.
+	prometheusTransport http.RoundTripper
+	cacheTTL            time.Duration
+	redisClients        map[string]*goredis.Client
+	// transportClients maps the Redis transport's primary address to its
+	// client, which the transport owns; Redis gates at that address reuse it.
+	transportClients map[string]goredis.UniversalClient
+	sqlQuota         QuotaStore
+	logger           logr.Logger
+	// gmpClientFn returns an authenticated HTTP client for GMP's Prometheus
+	// HTTP Query API plus the token source that backs it, so callers can
+	// prove the credentials actually mint tokens before using the client.
+	// Defaults to newGMPClient (Application Default Credentials / Workload
+	// Identity); overridable in same-package tests to avoid requiring live
+	// ADC in CI.
+	gmpClientFn func(ctx context.Context, scopes ...string) (*http.Client, oauth2.TokenSource, error)
+	// gmpTokenTimeout bounds the initial token acquisition so an unreachable
+	// token endpoint cannot hang gate creation.
+	gmpTokenTimeout time.Duration
+	// gmpMu guards gmpRT. A successfully built transport is cached so every
+	// Prometheus gate shares one ADC client; failures are not cached, so a
+	// later CreateGate — config reloads retry gate creation on each tick —
+	// can succeed once credentials are fixed, without a process restart.
+	gmpMu sync.Mutex
+	gmpRT http.RoundTripper
+}
+
+// NewGateFactory creates a new GateFactory with an optional Prometheus URL.
+// If prometheusURL is empty, Prometheus gates will fail at creation time.
+// Prometheus metric sources are cached with DefaultCacheTTL; use
+// NewGateFactoryWithCacheTTL to override.
+func NewGateFactory(prometheusURL string) *GateFactory {
+	return NewGateFactoryWithCacheTTL(prometheusURL, DefaultCacheTTL)
+}
+
+// NewGateFactoryWithCacheTTL creates a GateFactory with a custom cache TTL
+// for Prometheus metric sources. A TTL of 0 disables caching.
+func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *GateFactory {
+	return &GateFactory{
+		prometheusURL:    prometheusURL,
+		cacheTTL:         cacheTTL,
+		redisClients:     make(map[string]*goredis.Client),
+		transportClients: make(map[string]goredis.UniversalClient),
+		logger:           logr.Discard(),
+		gmpClientFn:      newGMPClient,
+		gmpTokenTimeout:  defaultGMPTokenTimeout,
+	}
+}
+
+// WithLogger sets the logger the factory uses to report the PromQL each Prometheus
+// gate resolved to. Gates build their queries from gate_params rather than taking
+// them verbatim, so without this the only way to find out what is actually being
+// asked of Prometheus is to read the source.
+func (f *GateFactory) WithLogger(logger logr.Logger) *GateFactory {
+	f.logger = logger
+	return f
+}
+
+// WithPrometheusTransport sets the HTTP transport Prometheus gates use, for
+// example one from NewPrometheusRoundTripper that adds a CA bundle and a
+// bearer token.
+func (f *GateFactory) WithPrometheusTransport(rt http.RoundTripper) *GateFactory {
+	f.prometheusTransport = rt
+	return f
+}
+
+// prometheusConfig is the client config every Prometheus gate uses. An
+// explicitly configured transport (bearer token and/or CA, see
+// NewPrometheusRoundTripper) takes precedence; otherwise a Google Managed
+// Prometheus URL gets GCP Application Default Credentials (e.g. GKE Workload
+// Identity). GMP URLs authenticate eagerly and fail closed at construction —
+// the scheme must be https, ADC discovery must succeed, and an initial token
+// must be mintable — rather than silently HTTP 401'ing on every query and
+// falling back to the configured fallback value (default 0.0, gate
+// perpetually closed). A successful transport is cached; authentication
+// failures are not, so the config reload path (which retries gate creation
+// every tick) can succeed once credentials are corrected. Plain prometheus /
+// mimir / victoria-metrics URLs keep the Prometheus client's default
+// transport.
+func (f *GateFactory) prometheusConfig() (promapi.Config, error) {
+	cfg := promapi.Config{Address: f.prometheusURL, RoundTripper: f.prometheusTransport}
+	if cfg.RoundTripper != nil || !IsGMPURL(f.prometheusURL) {
+		return cfg, nil
+	}
+	f.gmpMu.Lock()
+	defer f.gmpMu.Unlock()
+	if f.gmpRT == nil {
+		rt, err := f.newAuthedPrometheusClient(context.Background())
+		if err != nil {
+			return cfg, err
+		}
+		f.gmpRT = rt
+	}
+	cfg.RoundTripper = f.gmpRT
+	return cfg, nil
+}
+
+// defaultGMPTokenTimeout bounds the initial GMP token acquisition so an
+// unreachable token endpoint cannot hang gate creation.
+const defaultGMPTokenTimeout = 10 * time.Second
+
+// newGMPClient builds an HTTP client authenticated with GCP Application
+// Default Credentials for the given scopes, and returns the token source
+// backing it so callers can verify the credentials can actually mint tokens
+// before using the client. The credentials are built with a non-cancelling
+// context: x/oauth2 captures this context into the returned token source and
+// reuses it for every token refresh for the life of the client, so it must
+// not carry the caller's deadline or cancellation.
+func newGMPClient(ctx context.Context, scopes ...string) (*http.Client, oauth2.TokenSource, error) {
+	longCtx := context.WithoutCancel(ctx)
+	creds, err := google.FindDefaultCredentials(longCtx, scopes...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("finding GCP Application Default Credentials: %w", err)
+	}
+	return oauth2.NewClient(longCtx, creds.TokenSource), creds.TokenSource, nil
+}
+
+// newAuthedPrometheusClient builds the authenticated GMP RoundTripper that
+// prometheusConfig caches. It fails closed on non-https GMP URLs (the OAuth
+// access token would otherwise be sent in cleartext), on ADC discovery
+// failure, and on initial token-acquisition failure; none of those outcomes
+// are cached, so a later CreateGate retries them.
+func (f *GateFactory) newAuthedPrometheusClient(ctx context.Context) (http.RoundTripper, error) {
+	u, err := url.Parse(f.prometheusURL)
+	if err != nil || u.Scheme != "https" {
+		return nil, fmt.Errorf("prometheus-url %q targets Google Managed Prometheus but is "+
+			"not an https:// URL; refusing to send OAuth access tokens in cleartext",
+			f.prometheusURL)
+	}
+	ctx, cancel := context.WithTimeout(ctx, f.gmpTokenTimeout)
+	defer cancel()
+	gcpClient, tokenSource, err := f.gmpClientFn(ctx, gmpScope)
+	if err != nil {
+		return nil, f.gmpADCError(err)
+	}
+	if err := mintInitialToken(ctx, tokenSource); err != nil {
+		return nil, f.gmpADCError(fmt.Errorf("ADC was found, but an initial token could not be minted: %w", err))
+	}
+	return gcpClient.Transport, nil
+}
+
+// mintInitialToken acquires an initial token from ts, bounded by ctx. The
+// oauth2.TokenSource API takes no context, so the call runs in a goroutine
+// bounded by ctx; if ctx expires first, the straggler is left to finish
+// when the token endpoint answers — the client is discarded either way.
+func mintInitialToken(ctx context.Context, ts oauth2.TokenSource) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := ts.Token()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("acquiring initial token: %w", ctx.Err())
+	}
+}
+
+// gmpADCError wraps an authentication failure with the operator guidance for
+// either fixing ADC or switching to explicit bearer-token auth.
+func (f *GateFactory) gmpADCError(err error) error {
+	return fmt.Errorf("prometheus-url %q targets Google Managed Prometheus, "+
+		"which requires GCP Application Default Credentials (e.g. GKE Workload "+
+		"Identity); either configure ADC or set --prometheus-bearer-token-file "+
+		"and --prometheus-ca-cert: %w", f.prometheusURL, err)
+}
+
+// WithSQLQuota sets the store behind sql-quota gates, which share the sql
+// transport's database.
+func (f *GateFactory) WithSQLQuota(store QuotaStore) *GateFactory {
+	f.sqlQuota = store
+	return f
+}
+
+// RegisterRedisClient registers the Redis transport's client for Redis gates
+// at its primary address. Those gates use the transport's credentials, TLS
+// settings and database. The transport keeps ownership of client.
+func (f *GateFactory) RegisterRedisClient(client goredis.UniversalClient, options *goredis.UniversalOptions) {
+	f.transportClients[options.Addrs[0]] = client
+}
+
+// redisClient returns the transport's client when addr matches its primary
+// address, otherwise a standalone client this factory owns, shared per address.
+func (f *GateFactory) redisClient(addr string) goredis.UniversalClient {
+	if client, ok := f.transportClients[addr]; ok {
+		return client
+	}
+	client, ok := f.redisClients[addr]
+	if !ok {
+		client = goredis.NewClient(&goredis.Options{Addr: addr})
+		f.redisClients[addr] = client
+	}
+	return client
+}
+
+// Close closes the standalone Redis clients created by this factory and
+// forgets every client, so a second Close is a no-op.
+func (f *GateFactory) Close() error {
+	var firstErr error
+	for addr, client := range f.redisClients {
+		if err := client.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to close Redis client for %s: %w", addr, err)
+		}
+	}
+	clear(f.redisClients)
+	clear(f.transportClients)
+	return firstErr
+}
+
+// CreateGate creates a DispatchGate based on the gate type and parameters.
+// Supported gate types:
+//   - "constant": Always returns budget 1.0 (fully open)
+//   - "redis": Queries Redis for dispatch budget
+//   - "redis-quota": Limits requests per value of a metadata attribute, counted in Redis.
+//     Params: address (required), attribute (default userid), mode (rate-limit or
+//     concurrency), limit (required), window (default 1m), prefix (default quota:),
+//     gating_mode (blocking or classifying, default blocking)
+//   - "sql-quota": redis-quota counted in the sql transport's Postgres database.
+//     Takes the same params without address; window is unused in concurrency mode.
+//   - "redis-leased-rate": Enforces a fail-closed, externally leased absolute
+//     dispatch-rate ceiling shared through Redis.
+//   - "prometheus-saturation": Queries Prometheus for pool saturation metric.
+//     Params: pool (required), threshold (default 0.8), fallback (default 0.0)
+//   - "composite": Combines multiple gates. Params: gates (JSON array of gate configurations)
+//   - "prometheus-budget": Cascades three Prometheus metric sources to compute dispatch budget D,
+//     using the first that returns a sample.
+//     [0] D = 1 − (queue_size / max_SYS) via llm_d_epp_flow_control_queue_size.
+//     Requires llm-d's flow control plugin, which the llm-d router does not enable.
+//     [1] D = 1 − (mean per-pod queue depth / max_concurrency) via llm_d_epp_per_endpoint_queue_size.
+//     Part of EPP's base metric set, so this is the source a stock install lands on.
+//     [2] D = 1 − (vllm_running / max_SYS). Filters vLLM metrics by inference_pool label,
+//     which vLLM does not emit natively — model server pods must carry this label and
+//     Prometheus must be configured with metric relabeling to propagate it
+//     (see docs/guides/e2e-deploy.md).
+//     Sources [0] and [2] compute max_SYS = ready_pods × max_concurrency dynamically; [1] averages
+//     over pods, in which the ready_pods factor cancels.
+//     Gate closes when D ≤ B (baseline); returns D − B when open, so callers compute
+//     N = max_SYS × (D − B). Params: pool (required),
+//     max_concurrency (default 100), baseline (default 0.05), fallback (default 0.0)
+//     max_concurrency is per ready pod, not for the pool as a whole: the gate closes
+//     once the observed load reaches max_concurrency × (1 − baseline) per ready pod.
+//     Set it too high for the pool's real capacity and the gate never closes; the
+//     resolved closing point is logged at gate creation so this is visible.
+//   - "prometheus-query": Evaluates an arbitrary user-supplied PromQL expression as the dispatch
+//     budget. The expression must resolve to an instant vector with a single sample whose value
+//     is in [0, 1]. Unlike prometheus-saturation and prometheus-budget, this gate does not
+//     construct queries internally — the user provides the complete PromQL expression.
+//     Params: query (required), fallback (default 0.0)
+//   - "endpoint-scrape": Scrapes a metric endpoint and interprets the normalized value as
+//     saturation (default) or a direct budget. Params: url and metric (required),
+//     value_type (saturation or budget), fallback (default 0.0)
+//
+// For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
+func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error) {
+	params := cfg.GateParams
+	if params == nil {
+		params = map[string]any{}
+	}
+
+	switch cfg.GateType {
+	case "composite":
+		configs, err := paramGateConfigs(params, "gates")
+		if err != nil {
+			return nil, err
+		}
+
+		var innerGates []pipeline.Gate
+		for _, innerCfg := range configs {
+			innerCfg.Owner = cfg.Owner
+			gate, err := f.CreateGate(innerCfg)
+			if err != nil {
+				return nil, fmt.Errorf("composite gate failed to create inner gate %q: %w", innerCfg.GateType, err)
+			}
+			innerGates = append(innerGates, gate)
+		}
+
+		return NewCompositeGate(innerGates...), nil
+
+	case "wait-on-refuse":
+		innerCfg, err := paramGateConfig(params, "gate")
+		if err != nil {
+			return nil, err
+		}
+
+		innerCfg.Owner = cfg.Owner
+		innerGate, err := f.CreateGate(innerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("wait-on-refuse gate failed to create inner gate %q: %w", innerCfg.GateType, err)
+		}
+
+		return NewWaitOnRefuseGate(innerGate), nil
+
+	case "tier-priority-admission":
+		satGateType := paramString(params, "saturation_gate", "")
+		if satGateType == "" {
+			return nil, fmt.Errorf("tier-priority-admission gate requires a 'saturation_gate' parameter")
+		}
+		satGateParams, err := paramMapAny(params, "saturation_gate_params")
+		if err != nil {
+			return nil, fmt.Errorf("tier-priority-admission gate failed to parse 'saturation_gate_params': %w", err)
+		}
+
+		satGate, err := f.CreateGate(pipeline.GateConfig{
+			GateType:   satGateType,
+			GateParams: satGateParams,
+			Owner:      cfg.Owner,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("tier-priority-admission gate failed to create saturation gate %q: %w", satGateType, err)
+		}
+
+		tierLabel := paramString(params, "tier_label", "tier")
+		return NewTierPriorityAdmissionGate(satGate, tierLabel), nil
+
+	case "constant":
+		return ConstOpenGate(), nil
+
+	case "redis":
+		addr := paramString(params, "address", "")
+		if addr == "" {
+			return nil, fmt.Errorf("redis gate requires an 'address' in gate_params")
+		}
+		budgetKey := paramString(params, "budget_key", "dispatch-gate-budget")
+		return redisgate.NewRedisDispatchGate(f.redisClient(addr), budgetKey), nil
+
+	case "redis-leased-rate":
+		addr := paramString(params, "address", "")
+		if addr == "" {
+			return nil, fmt.Errorf("redis-leased-rate gate requires an 'address' in gate_params")
+		}
+		poolID := paramString(params, "pool_id", cfg.Owner.WorkerPoolID)
+		if poolID == "" {
+			return nil, fmt.Errorf("redis-leased-rate gate requires a 'pool_id' in gate_params or a worker-pool owner")
+		}
+		controlKey := paramString(params, "control_key", "")
+		if controlKey == "" {
+			return nil, fmt.Errorf("redis-leased-rate gate requires a 'control_key' in gate_params")
+		}
+		burstSeconds, err := paramFloat(params, "burst_seconds", 1.0)
+		if err != nil {
+			return nil, fmt.Errorf("redis-leased-rate gate requires a valid 'burst_seconds': %w", err)
+		}
+		if math.IsNaN(burstSeconds) || math.IsInf(burstSeconds, 0) || burstSeconds <= 0 {
+			return nil, fmt.Errorf("redis-leased-rate burst_seconds must be finite and positive, got %g", burstSeconds)
+		}
+		stateKey := paramString(params, "state_key", "")
+		return redisgate.NewRedisLeasedRateGate(f.redisClient(addr), controlKey, stateKey, poolID, burstSeconds), nil
+
+	case "redis-quota":
+		addr := paramString(params, "address", "")
+		if addr == "" {
+			return nil, fmt.Errorf("redis-quota gate requires an 'address' in gate_params")
+		}
+		q, err := quotaParams(cfg.GateType, params)
+		if err != nil {
+			return nil, err
+		}
+		return q.gate(redisgate.NewQuotaStore(f.redisClient(addr), q.window)), nil
+
+	case "sql-quota":
+		if f.sqlQuota == nil {
+			return nil, fmt.Errorf("sql-quota gate requires the sql transport")
+		}
+		q, err := quotaParams(cfg.GateType, params)
+		if err != nil {
+			return nil, err
+		}
+		return q.gate(f.sqlQuota), nil
+
+	case "prometheus-saturation":
+		if f.prometheusURL == "" {
+			return nil, fmt.Errorf("prometheus-saturation gate type requires --prometheus-url flag to be set")
+		}
+
+		threshold, err := paramFloat(params, "threshold", 0.8)
+		if err != nil {
+			return nil, err
+		}
+		fallback, err := paramFloat(params, "fallback", 0.0)
+		if err != nil {
+			return nil, err
+		}
+
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
+		source, err := NewSaturationPromQLSourceFromConfig(promConfig, params)
+		if err != nil {
+			return nil, err
+		}
+		f.logger.Info("prometheus-saturation metric source",
+			"pool", paramString(params, "pool", ""), "query", source.Expr())
+		var ms MetricSource = source
+		if f.cacheTTL > 0 {
+			ms = NewCachedMetricSource(source, f.cacheTTL)
+		}
+		return NewSaturationDispatchGate(ms, threshold, fallback).
+			WithOwner(cfg.Owner).
+			WithInferencePool(paramString(params, "pool", "")), nil
+
+	case "prometheus-budget":
+		if f.prometheusURL == "" {
+			return nil, fmt.Errorf("prometheus-budget gate type requires --prometheus-url flag to be set")
+		}
+
+		pool := paramString(params, "pool", "")
+		if pool == "" {
+			return nil, fmt.Errorf("inference pool name is required for prometheus-budget gate")
+		}
+		maxConcurrency, err := paramFloat(params, "max_concurrency", 100.0)
+		if err != nil {
+			return nil, err
+		}
+		if maxConcurrency <= 0 {
+			return nil, fmt.Errorf("max_concurrency must be positive, got %g", maxConcurrency)
+		}
+		baseline, err := paramFloat(params, "baseline", 0.05)
+		if err != nil {
+			return nil, err
+		}
+		if baseline < 0 || baseline >= 1 {
+			return nil, fmt.Errorf("baseline must be in [0, 1), got %g", baseline)
+		}
+		fallback, err := paramFloat(params, "fallback", 0.0)
+		if err != nil {
+			return nil, err
+		}
+
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
+		namespace := paramString(params, "namespace", "")
+
+		flowControlSource, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxConcurrency, namespace)
+		if err != nil {
+			return nil, err
+		}
+		poolQueueSource, err := NewPoolQueueSizePromQL(promConfig, pool, maxConcurrency, namespace)
+		if err != nil {
+			return nil, err
+		}
+		vllmSource, err := NewVLLMSaturationPromQL(promConfig, pool, maxConcurrency, namespace)
+		if err != nil {
+			return nil, err
+		}
+
+		sources := []*PromQLMetricSource{flowControlSource, poolQueueSource, vllmSource}
+		cascaded := make([]MetricSource, 0, len(sources))
+		for i, s := range sources {
+			f.logger.Info("prometheus-budget metric source",
+				"pool", pool, "sourceIndex", i, "query", s.Expr())
+			cascaded = append(cascaded, cachedSource(s, f.cacheTTL))
+		}
+
+		var ms MetricSource = NewCascadeMetricSource(cascaded...)
+
+		// Report the resolved closing point. Every source in the cascade divides
+		// by max_concurrency per pod, so a value the pool can never reach leaves
+		// the gate permanently open with nothing in the logs or metrics to say so.
+		// Surfacing it here makes a mis-sized max_concurrency visible at startup.
+		f.logger.Info("prometheus-budget gate configured",
+			"pool", pool,
+			"maxConcurrency", maxConcurrency,
+			"baseline", baseline,
+			"closesAtLoadPerReadyPod", maxConcurrency*(1-baseline),
+		)
+
+		return NewBudgetDispatchGate(ms, baseline, fallback).
+			WithOwner(cfg.Owner).
+			WithInferencePool(pool), nil
+
+	case "prometheus-query":
+		if f.prometheusURL == "" {
+			return nil, fmt.Errorf("prometheus-query gate type requires --prometheus-url flag to be set")
+		}
+
+		query := paramString(params, "query", "")
+		if query == "" {
+			return nil, fmt.Errorf("prometheus-query gate requires a 'query' parameter with a PromQL expression")
+		}
+
+		fallback, err := paramFloat(params, "fallback", 0.0)
+		if err != nil {
+			return nil, err
+		}
+
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
+		source, err := NewPromQLMetricSource(promConfig, query)
+		if err != nil {
+			return nil, err
+		}
+		// Optional 'pool' param records which InferencePool the query is about, as
+		// the inference_pool label on async_gate_metric_value; it does not affect
+		// the query. pool_name comes from the queue or pool that owns the gate.
+		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback).
+			WithOwner(cfg.Owner).
+			WithInferencePool(paramString(params, "pool", "")), nil
+
+	case "endpoint-scrape":
+		url := paramString(params, "url", "")
+		if url == "" {
+			return nil, fmt.Errorf("endpoint-scrape gate requires a 'url' parameter")
+		}
+		metric := paramString(params, "metric", "")
+		if metric == "" {
+			return nil, fmt.Errorf("endpoint-scrape gate requires a 'metric' parameter")
+		}
+
+		labels, err := paramStringMap(params, "labels")
+		if err != nil {
+			return nil, fmt.Errorf("endpoint-scrape gate failed to parse 'labels': %w", err)
+		}
+
+		maxCountPerPod, err := paramFloat(params, "max_count_per_pod", 0)
+		if err != nil {
+			return nil, err
+		}
+		valueType := paramString(params, "value_type", "saturation")
+		if valueType != "saturation" && valueType != "budget" {
+			return nil, fmt.Errorf("endpoint-scrape value_type must be either 'saturation' or 'budget', got %q", valueType)
+		}
+		baseline, err := paramFloat(params, "baseline", 0.0)
+		if err != nil {
+			return nil, err
+		}
+		fallback, err := paramFloat(params, "fallback", 0.0)
+		if err != nil {
+			return nil, err
+		}
+
+		podsLabels, err := paramStringMap(params, "pods_labels")
+		if err != nil {
+			return nil, fmt.Errorf("endpoint-scrape gate failed to parse 'pods_labels': %w", err)
+		}
+
+		scrapeCfg := ScrapeConfig{
+			URL:            url,
+			MetricName:     metric,
+			Labels:         labels,
+			MaxCountPerPod: maxCountPerPod,
+			DirectBudget:   valueType == "budget",
+			PodsURL:        paramString(params, "pods_url", ""),
+			PodsMetric:     paramString(params, "pods_metric", ""),
+			PodsLabels:     podsLabels,
+		}
+
+		var ms MetricSource = NewScrapeMetricSource(scrapeCfg)
+		ms = cachedSource(ms, f.cacheTTL)
+		return NewMetricDispatchGate(ms, baseline, fallback), nil
+
+	case "local-max-concurrency":
+		limit, err := paramInt(params, "limit", 0)
+		if err != nil {
+			return nil, fmt.Errorf("local-max-concurrency gate requires a valid integer 'limit': %w", err)
+		}
+		if limit <= 0 {
+			return nil, fmt.Errorf("local-max-concurrency limit must be greater than 0, got %d", limit)
+		}
+		gate := NewLocalConcurrencyGate(limit)
+		gatingMode := paramString(params, "gating_mode", "")
+		if gatingMode != "" {
+			if gatingMode != string(GatingModeBlocking) && gatingMode != string(GatingModeClassifying) {
+				return nil, fmt.Errorf("local-max-concurrency gating_mode must be either 'blocking' or 'classifying', got %q", gatingMode)
+			}
+			gate.WithGatingMode(GatingMode(gatingMode))
+		}
+		return gate, nil
+
+	default:
+		// Unknown gate types default to open gate
+		return ConstOpenGate(), nil
+	}
+}
+
+// paramString extracts a string value from params, returning defaultVal if the key is absent or nil.
+// Scalar types (string, float64, bool) are accepted; non-scalar types return defaultVal.
+func paramString(params map[string]any, key, defaultVal string) string {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return defaultVal
+	}
+	switch val := v.(type) {
+	case string:
+		if val == "" {
+			return defaultVal
+		}
+		return val
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(val)
+	default:
+		return defaultVal
+	}
+}
+
+// paramFloat extracts a float64 value from params. Accepts float64, int, or string representations.
+func paramFloat(params map[string]any, key string, defaultVal float64) (float64, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return defaultVal, nil
+	}
+	switch val := v.(type) {
+	case float64:
+		return val, nil
+	case int:
+		return float64(val), nil
+	case string:
+		if val == "" {
+			return defaultVal, nil
+		}
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid %s value '%s': %w", key, val, err)
+		}
+		return f, nil
+	default:
+		return 0, fmt.Errorf("invalid %s value: unsupported type %T", key, v)
+	}
+}
+
+// paramInt extracts an int value from params. Accepts float64, int, or string representations.
+func paramInt(params map[string]any, key string, defaultVal int) (int, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return defaultVal, nil
+	}
+	switch val := v.(type) {
+	case float64:
+		if val != float64(int(val)) {
+			return 0, fmt.Errorf("invalid %s value: %g is not an integer", key, val)
+		}
+		return int(val), nil
+	case int:
+		return val, nil
+	case string:
+		if val == "" {
+			return defaultVal, nil
+		}
+		i, err := strconv.Atoi(val)
+		if err != nil {
+			return 0, fmt.Errorf("invalid %s value '%s': %w", key, val, err)
+		}
+		return i, nil
+	default:
+		return 0, fmt.Errorf("invalid %s value: unsupported type %T", key, v)
+	}
+}
+
+// paramDuration extracts a time.Duration from params. Accepts a string parseable by time.ParseDuration.
+func paramDuration(params map[string]any, key string, defaultVal time.Duration) (time.Duration, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return defaultVal, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		s = fmt.Sprintf("%v", v)
+	}
+	if s == "" {
+		return defaultVal, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s value '%s': %w", key, s, err)
+	}
+	return d, nil
+}
+
+// paramStringMap extracts a map[string]string from params. Handles both
+// a JSON-encoded string value and a map[string]any value (from structured config).
+func paramStringMap(params map[string]any, key string) (map[string]string, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	switch val := v.(type) {
+	case string:
+		if val == "" {
+			return nil, nil
+		}
+		var m map[string]string
+		if err := json.Unmarshal([]byte(val), &m); err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", key, err)
+		}
+		return m, nil
+	case map[string]any:
+		m := make(map[string]string, len(val))
+		for k, v := range val {
+			m[k] = fmt.Sprintf("%v", v)
+		}
+		return m, nil
+	case map[string]string:
+		return val, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %T for key %q", v, key)
+	}
+}
+
+// paramGateConfigs extracts a []pipeline.GateConfig from params for the composite gate.
+// Handles both a JSON-encoded string and a pre-parsed []any (from structured config).
+func paramGateConfigs(params map[string]any, key string) ([]pipeline.GateConfig, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return nil, fmt.Errorf("composite gate requires 'gates' parameter with JSON array of gate configurations")
+	}
+	switch val := v.(type) {
+	case string:
+		if val == "" {
+			return nil, fmt.Errorf("composite gate requires 'gates' parameter with JSON array of gate configurations")
+		}
+		var configs []pipeline.GateConfig
+		if err := json.Unmarshal([]byte(val), &configs); err != nil {
+			return nil, fmt.Errorf("composite gate failed to parse 'gates' parameter: %w", err)
+		}
+		return configs, nil
+	case []any:
+		data, err := json.Marshal(val)
+		if err != nil {
+			return nil, fmt.Errorf("composite gate failed to marshal 'gates' parameter: %w", err)
+		}
+		var configs []pipeline.GateConfig
+		if err := json.Unmarshal(data, &configs); err != nil {
+			return nil, fmt.Errorf("composite gate failed to parse 'gates' parameter: %w", err)
+		}
+		return configs, nil
+	case []pipeline.GateConfig:
+		return val, nil
+	default:
+		return nil, fmt.Errorf("composite gate: unsupported type %T for 'gates' parameter", v)
+	}
+}
+
+// paramGateConfig extracts a single pipeline.GateConfig from params for the wait-on-refuse gate.
+// Handles both a JSON-encoded string and a pre-parsed map[string]any (from structured config).
+func paramGateConfig(params map[string]any, key string) (pipeline.GateConfig, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return pipeline.GateConfig{}, fmt.Errorf("wait-on-refuse gate requires a 'gate' parameter with the inner gate configuration")
+	}
+	switch val := v.(type) {
+	case string:
+		if val == "" {
+			return pipeline.GateConfig{}, fmt.Errorf("wait-on-refuse gate requires a 'gate' parameter with the inner gate configuration")
+		}
+		var cfg pipeline.GateConfig
+		if err := json.Unmarshal([]byte(val), &cfg); err != nil {
+			return pipeline.GateConfig{}, fmt.Errorf("wait-on-refuse gate failed to parse 'gate' parameter: %w", err)
+		}
+		return cfg, nil
+	case map[string]any:
+		data, err := json.Marshal(val)
+		if err != nil {
+			return pipeline.GateConfig{}, fmt.Errorf("wait-on-refuse gate failed to marshal 'gate' parameter: %w", err)
+		}
+		var cfg pipeline.GateConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return pipeline.GateConfig{}, fmt.Errorf("wait-on-refuse gate failed to parse 'gate' parameter: %w", err)
+		}
+		return cfg, nil
+	case pipeline.GateConfig:
+		return val, nil
+	default:
+		return pipeline.GateConfig{}, fmt.Errorf("wait-on-refuse gate: unsupported type %T for 'gate' parameter", v)
+	}
+}
+
+func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
+	if ttl > 0 {
+		return NewCachedMetricSource(s, ttl)
+	}
+	return s
+}
+
+// IsGMPURL reports whether urlStr targets Google Managed Prometheus's
+// Prometheus HTTP Query API. Detection is host-based (exactly
+// monitoring.googleapis.com, ignoring any port — GMP encodes location in the
+// URL path, not the host), so an operator's plain prometheus / mimir /
+// victoria-metrics / grafana URL gets an unauthenticated client, preserving
+// prior behavior. A malformed URL falls back to a substring check so it still
+// gets the auth path, yielding a clearer ADC error than a silent HTTP 401 at
+// query time. The function never panics.
+func IsGMPURL(urlStr string) bool {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return strings.Contains(urlStr, "monitoring.googleapis.com")
+	}
+	return strings.EqualFold(u.Hostname(), "monitoring.googleapis.com")
+}
+
+// paramMapAny extracts a map[string]any from params.
+func paramMapAny(params map[string]any, key string) (map[string]any, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	switch val := v.(type) {
+	case string:
+		if val == "" {
+			return nil, nil
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(val), &m); err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", key, err)
+		}
+		return m, nil
+	case map[string]any:
+		return val, nil
+	case map[string]string:
+		m := make(map[string]any, len(val))
+		for k, valStr := range val {
+			m[k] = valStr
+		}
+		return m, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %T for key %q", v, key)
+	}
+}
+
+type quotaConfig struct {
+	attribute  string
+	mode       QuotaMode
+	gatingMode GatingMode
+	limit      int
+	window     time.Duration
+	prefix     string
+}
+
+func quotaParams(gateType string, params map[string]any) (quotaConfig, error) {
+	q := quotaConfig{
+		attribute:  paramString(params, "attribute", "userid"),
+		mode:       QuotaMode(paramString(params, "mode", string(QuotaModeRateLimit))),
+		gatingMode: GatingMode(paramString(params, "gating_mode", string(GatingModeBlocking))),
+		prefix:     paramString(params, "prefix", "quota:"),
+	}
+	if q.mode != QuotaModeRateLimit && q.mode != QuotaModeConcurrency {
+		return q, fmt.Errorf("%s gate: mode must be %q or %q, got %q", gateType, QuotaModeRateLimit, QuotaModeConcurrency, q.mode)
+	}
+	if q.gatingMode != GatingModeBlocking && q.gatingMode != GatingModeClassifying {
+		return q, fmt.Errorf("%s gate: gating_mode must be %q or %q, got %q", gateType, GatingModeBlocking, GatingModeClassifying, q.gatingMode)
+	}
+	var err error
+	q.limit, err = paramInt(params, "limit", 0)
+	if err != nil {
+		return q, fmt.Errorf("%s gate requires a valid 'limit': %w", gateType, err)
+	}
+	if q.limit <= 0 {
+		return q, fmt.Errorf("%s gate requires a positive 'limit', got %d", gateType, q.limit)
+	}
+	q.window, err = paramDuration(params, "window", 1*time.Minute)
+	if err != nil {
+		return q, fmt.Errorf("%s gate requires a valid 'window' duration: %w", gateType, err)
+	}
+	if q.mode == QuotaModeRateLimit && q.window <= 0 {
+		return q, fmt.Errorf("%s gate requires a positive 'window' in rate-limit mode, got %s", gateType, q.window)
+	}
+	return q, nil
+}
+
+func (q quotaConfig) gate(store QuotaStore) *QuotaGate {
+	return NewQuotaGate(store, q.attribute, q.mode, q.limit, q.window, q.prefix).WithGatingMode(q.gatingMode)
+}

@@ -1,0 +1,27 @@
+ap:
+  imagePullPolicy: Never
+  concurrency: 1
+  prometheusCacheTTL: "0s"
+  otel:
+    endpoint: "http://jaeger.e2e-integration.svc.cluster.local:4317"
+    insecure: true
+    sampler: "always_on"
+    samplerArg: "1.0"
+  transport: gcp-pubsub
+  transportConfig:
+    project_id: "test-project"
+    result_topic_id: "pubsub-e2e-result-topic"
+    batch_size: 10
+    topics:
+      - subscriber_id: "pubsub-e2e-request-sub"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  env:
+    - name: PUBSUB_EMULATOR_HOST
+      value: "pubsub-emulator.e2e-integration.svc.cluster.local:8085"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  modelServerMonitor:
+    enabled: false

@@ -1,0 +1,747 @@
+package asyncworker
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"math/rand"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/go-logr/logr"
+	asyncapi "github.com/llm-d/llm-d-async/api"
+	uotel "github.com/llm-d/llm-d-async/internal/otel"
+	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+)
+
+const (
+	baseDelaySeconds = 2
+	maxDelaySeconds  = 60
+
+	// DefaultGateWaitTimeout bounds how long one worker parks a message at a
+	// pool gate before recoverably returning it to the broker. It is deliberately
+	// independent of the timeout for a downstream inference attempt.
+	DefaultGateWaitTimeout            = 5 * time.Minute
+	gateWaitInitialBackoff            = 100 * time.Millisecond
+	gateWaitMaxBackoff                = 1 * time.Second
+	cancellationCheckPollInterval     = 1 * time.Second
+	cancellationCheckRetryAfterSecond = 1.0
+)
+
+func Worker(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
+	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain) {
+	WorkerWithGate(consumeCtx, requestCtx, characteristics, client, requestChannel, retryChannel, resultChannel, requestTimeout, transforms, nil)
+}
+
+func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
+	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout time.Duration, transforms *transform.Chain, poolGate pipeline.Gate) {
+	WorkerWithGateTimeout(consumeCtx, requestCtx, characteristics, client, requestChannel, retryChannel, resultChannel, requestTimeout, DefaultGateWaitTimeout, transforms, poolGate)
+}
+
+// WorkerWithGateTimeout runs a worker with separate downstream-request and
+// pool-gate wait timeouts. Expiring gateWaitTimeout requeues the message; only
+// the request's own deadline produces a terminal deadline result.
+func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristics pipeline.Characteristics, client asyncapi.InferenceClient, requestChannel chan pipeline.EmbelishedRequestMessage,
+	retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, requestTimeout, gateWaitTimeout time.Duration, transforms *transform.Chain, poolGate pipeline.Gate) {
+
+	logger := log.FromContext(requestCtx)
+	for {
+		select {
+		case <-consumeCtx.Done():
+			logger.V(logutil.DEFAULT).Info("Worker finishing, draining request channel.")
+			idle := time.NewTimer(100 * time.Millisecond)
+			defer idle.Stop()
+			for {
+				select {
+				case msg, ok := <-requestChannel:
+					if !ok {
+						return
+					}
+					if msg.InternalRequest == nil || msg.PublicRequest == nil {
+						continue
+					}
+					metrics.DecQueueDepth(msg.QueueID, msg.RequestQueueName, msg.WorkerPoolID)
+					retryMsg := pipeline.RetryMessage{
+						EmbelishedRequestMessage: msg,
+						BackoffDurationSeconds:   0,
+					}
+					// Safe to block: retryWorker is guaranteed to outlive Workers
+					// (impl.Shutdown runs after wg.Wait in cmd/main.go).
+					retryChannel <- retryMsg
+					if !idle.Stop() {
+						<-idle.C
+					}
+					idle.Reset(100 * time.Millisecond)
+				case <-idle.C:
+					return
+				}
+			}
+		case msg := <-requestChannel:
+			if msg.InternalRequest == nil || msg.PublicRequest == nil {
+				continue
+			}
+			queueID := msg.QueueID
+			queueName := msg.RequestQueueName
+			metrics.DecQueueDepth(queueID, queueName, msg.WorkerPoolID)
+			if !msg.IngestionTime.IsZero() {
+				metrics.RecordQueueResidenceTime(float64(time.Since(msg.IngestionTime).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
+			}
+
+			processMessage := func() {
+				if msg.RetryCount == 0 {
+					metrics.RecordAsyncReq(queueID, queueName, msg.WorkerPoolID)
+				}
+
+				var nextCancellationCheck time.Time
+
+				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
+					return
+				}
+
+				payloadBytes := validateAndMarshal(requestCtx, resultChannel, msg, transforms)
+				if payloadBytes == nil {
+					return
+				}
+
+				var poolReleases []pipeline.GateReleaseFunc
+				defer func() {
+					pipeline.ReleaseGateReleases(poolReleases)
+				}()
+
+				if poolGate != nil {
+					var gateDeadline time.Time
+					if gateWaitTimeout > 0 {
+						gateDeadline = time.Now().Add(gateWaitTimeout)
+					}
+					if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
+						if msgDeadline := time.Unix(dline, 0); gateDeadline.IsZero() || msgDeadline.Before(gateDeadline) {
+							gateDeadline = msgDeadline
+						}
+					}
+					var gateCtx context.Context
+					var cancelGate context.CancelFunc
+					if gateDeadline.IsZero() {
+						gateCtx, cancelGate = context.WithCancel(requestCtx)
+					} else {
+						gateCtx, cancelGate = context.WithDeadline(requestCtx, gateDeadline)
+					}
+					defer cancelGate()
+
+					// Track gate-wait occupancy for autoscaler visibility.
+					gateWaiting := false
+					defer func() {
+						if gateWaiting {
+							metrics.DecGateWaiting(queueID, queueName, msg.WorkerPoolID)
+						}
+					}()
+
+					finishGateContext := func() {
+						// Shutdown/drain cancellation and the operational gate-wait
+						// timeout are recoverable. Only the request's public deadline
+						// is a terminal condition.
+						if requestCtx.Err() == nil && requestDeadlineReached(msg.PublicRequest, time.Now()) {
+							metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+							select {
+							case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+						if requestCtx.Err() == nil && errors.Is(gateCtx.Err(), context.DeadlineExceeded) {
+							metrics.RecordGateWaitRequeue(queueID, queueName, msg.WorkerPoolID)
+						}
+						select {
+						case retryChannel <- pipeline.RetryMessage{
+							EmbelishedRequestMessage: msg,
+							BackoffDurationSeconds:   0,
+						}:
+						case <-requestCtx.Done():
+							// retryWorker outlives workers during normal shutdown, so
+							// preserve the message even after requestCtx is cancelled.
+							retryChannel <- pipeline.RetryMessage{
+								EmbelishedRequestMessage: msg,
+								BackoffDurationSeconds:   0,
+							}
+						}
+					}
+
+					var verdict pipeline.Verdict
+					var err error
+					var waitRecorded bool
+					gateWaitBackoff := gateWaitInitialBackoff
+					for {
+						if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
+							return
+						}
+
+						verdict, err = poolGate.Apply(gateCtx, msg.InternalRequest, &poolReleases)
+						if err != nil {
+							if errors.Is(err, context.DeadlineExceeded) || gateCtx.Err() != nil {
+								finishGateContext()
+								return
+							}
+							metrics.RecordGateDecision(metrics.ReasonError, "", "", msg.WorkerPoolID)
+							select {
+							case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeGateError, fmt.Sprintf("Pool gating error: %s", err.Error())):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+
+						if verdict.Action == pipeline.ActionContinue {
+							if gateWaiting {
+								metrics.DecGateWaiting(queueID, queueName, msg.WorkerPoolID)
+								gateWaiting = false
+							}
+							break
+						}
+
+						if verdict.Action == pipeline.ActionDrop {
+							metrics.RecordGateDecision(metrics.ReasonDropped, "", "", msg.WorkerPoolID)
+							var resultMsg asyncapi.ResultMessage
+							if verdict.Result != nil {
+								resultMsg = *verdict.Result
+							} else {
+								resultMsg = asyncapi.NewGateDroppedResult(msg.PublicRequest, msg.InternalRouting)
+							}
+							select {
+							case resultChannel <- resultMsg:
+							case <-requestCtx.Done():
+							}
+							return
+						}
+
+						if verdict.Action == pipeline.ActionRefuse {
+							metrics.RecordGateDecision(gateDecisionReason(verdict), "", "", msg.WorkerPoolID)
+							select {
+							case retryChannel <- pipeline.RetryMessage{
+								EmbelishedRequestMessage: msg,
+								BackoffDurationSeconds:   0,
+							}:
+							case <-requestCtx.Done():
+							}
+							return
+						}
+
+						// ActionWait: park/wait and retry in-memory
+						if verdict.Action == pipeline.ActionWait {
+							if !waitRecorded {
+								metrics.RecordGateDecision(gateDecisionReason(verdict), "", "", msg.WorkerPoolID)
+								waitRecorded = true
+							}
+							if !gateWaiting {
+								metrics.IncGateWaiting(queueID, queueName, msg.WorkerPoolID)
+								gateWaiting = true
+							}
+							waitTimer := time.NewTimer(jitteredGateWait(gateWaitBackoff))
+							select {
+							case <-gateCtx.Done():
+								if !waitTimer.Stop() {
+									select {
+									case <-waitTimer.C:
+									default:
+									}
+								}
+								finishGateContext()
+								return
+							case <-waitTimer.C:
+								gateWaitBackoff = nextGateWaitBackoff(gateWaitBackoff)
+							}
+						}
+					}
+				}
+
+				if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
+					return
+				}
+
+				metrics.IncInflight(queueID, queueName, msg.WorkerPoolID)
+				defer metrics.DecInflight(queueID, queueName, msg.WorkerPoolID)
+
+				sendInferenceRequest := func() {
+					reqCtx := requestCtx
+					if md := msg.PublicRequest.ReqMetadata(); len(md) > 0 {
+						reqCtx = otel.GetTextMapPropagator().Extract(reqCtx, propagation.MapCarrier(md))
+					}
+
+					spanAttrs := []attribute.KeyValue{
+						attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
+						attribute.String(uotel.LegacyAttrRequestID, msg.PublicRequest.ReqID()),
+						attribute.Int(uotel.AttrRetryCount, msg.RetryCount),
+						attribute.Int(uotel.LegacyAttrRetryCount, msg.RetryCount),
+					}
+					model := msg.PublicRequest.ReqModel()
+					if model != "" {
+						spanAttrs = append(spanAttrs, attribute.String(uotel.AttrRequestModel, model))
+					}
+					if queueID != "" {
+						spanAttrs = append(spanAttrs,
+							attribute.String(uotel.AttrQueueID, queueID),
+							attribute.String(uotel.LegacyAttrQueueID, queueID),
+						)
+					}
+					if queueName != "" {
+						spanAttrs = append(spanAttrs,
+							attribute.String(uotel.AttrQueueName, queueName),
+							attribute.String(uotel.LegacyAttrQueueName, queueName),
+						)
+					}
+					reqCtx, span := uotel.StartSpan(reqCtx, "process-request",
+						trace.WithAttributes(spanAttrs...),
+					)
+					defer span.End()
+					if model == "" && span.IsRecording() {
+						if fromPayload := payloadModel(msg.PublicRequest.ReqPayload()); fromPayload != "" {
+							span.SetAttributes(attribute.String(uotel.AttrRequestModel, fromPayload))
+						}
+					}
+
+					reqDeadline := time.Now().Add(requestTimeout)
+					if dline := msg.PublicRequest.ReqDeadline(); dline > 0 {
+						if msgDeadline := time.Unix(dline, 0); msgDeadline.Before(reqDeadline) {
+							reqDeadline = msgDeadline
+						}
+					}
+					reqCtx, cancel := context.WithDeadline(reqCtx, reqDeadline)
+					defer cancel()
+
+					// Apply the request body-transform chain. If a transform handles
+					// the message we send its body and Content-Type; otherwise the
+					// default JSON payload is sent unchanged. A transform error is
+					// fatal/non-retryable.
+					sendPayload := payloadBytes
+					sendHeaders := msg.HttpHeaders
+					if body, contentType, handled, terr := transforms.Apply(payloadBytes, msg.PublicRequest.ReqMetadata()); terr != nil {
+						span.RecordError(terr)
+						span.SetStatus(codes.Error, "request transform failed")
+						span.SetAttributes(
+							attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
+							attribute.String(uotel.LegacyAttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
+						)
+						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
+						select {
+						case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to transform request body: %s", terr.Error())):
+						case <-requestCtx.Done():
+						}
+						return
+					} else if handled {
+						sendPayload = body
+						sendHeaders = headersWithContentType(msg.HttpHeaders, contentType)
+					}
+
+					if emitCancelledResultIfNeeded(requestCtx, logger, retryChannel, resultChannel, msg, &nextCancellationCheck) {
+						return
+					}
+
+					logger.V(logutil.DEBUG).Info("Sending inference request", "url", msg.RequestURL)
+					metrics.RecordDispatchedReq(queueID, queueName, msg.WorkerPoolID)
+					inferenceStart := time.Now()
+					sendCtx, stopCancellationWatch := watchInflightCancellation(reqCtx, logger, msg)
+					resp, err := client.SendRequest(sendCtx, msg.RequestURL, sendHeaders, sendPayload)
+					cancelledInFlight := stopCancellationWatch()
+					metrics.RecordInferenceLatency(float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
+
+					if err == nil {
+						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)
+						// SendRequest treats 3xx as success too, so token
+						// recording is gated on a strict 2xx: usage is only
+						// meaningful for real completions.
+						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							if input, output, ok := ParseUsage(resp.Body, msg.RequestURL); ok {
+								metrics.RecordTokens(input, output, queueID, queueName, msg.WorkerPoolID)
+							}
+						}
+						select {
+						case resultChannel <- asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, resp.StatusCode, resp.Body):
+						case <-requestCtx.Done():
+						}
+						return
+					}
+
+					if requestCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+						_, bgSpan := uotel.DetachedContext(reqCtx, "re-enqueue")
+						bgSpan.SetAttributes(
+							attribute.String(uotel.AttrRequestID, msg.PublicRequest.ReqID()),
+							attribute.String(uotel.LegacyAttrRequestID, msg.PublicRequest.ReqID()),
+						)
+						defer bgSpan.End()
+						retryChannel <- pipeline.RetryMessage{
+							EmbelishedRequestMessage: msg,
+							BackoffDurationSeconds:   0,
+						}
+						return
+					}
+
+					// The request was cancelled by its producer while inference was
+					// executing. A terminal response that arrived first was already
+					// returned above; otherwise surface CANCELLED and do not retry.
+					if cancelledInFlight {
+						select {
+						case resultChannel <- asyncapi.NewCancelledResult(msg.PublicRequest, msg.InternalRouting):
+						case <-requestCtx.Done():
+						}
+						return
+					}
+
+					// The send was aborted by the per-request deadline (not a
+					// process shutdown): surface DEADLINE_EXCEEDED so callers
+					// can distinguish a timed-out request from an inference
+					// failure. This happens whenever the deadline expires
+					// while the request is queued or executing downstream.
+					if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+						metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+						select {
+						case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+						case <-requestCtx.Done():
+						}
+						return
+					}
+
+					var inferenceErr asyncapi.InferenceError
+					if !errors.As(err, &inferenceErr) || inferenceErr.Category().Fatal() {
+						span.RecordError(err)
+						span.SetStatus(codes.Error, "inference request failed")
+						span.SetAttributes(
+							attribute.String(uotel.AttrErrorCategory, inferenceErrorCategory(err)),
+							attribute.String(uotel.LegacyAttrErrorCategory, inferenceErrorCategory(err)),
+						)
+						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
+
+						var resultMsg asyncapi.ResultMessage
+						if resp != nil && resp.StatusCode > 0 {
+							resultMsg = asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, resp.StatusCode, resp.Body)
+						} else {
+							resultMsg = asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting,
+								asyncapi.ErrCodeInferenceError,
+								fmt.Sprintf("Failed to send request to inference: %s", err.Error()))
+						}
+						select {
+						case resultChannel <- resultMsg:
+						case <-requestCtx.Done():
+						}
+						return
+					}
+
+					if inferenceErr.Category().Sheddable() {
+						metrics.RecordSheddedReq(queueID, queueName, msg.WorkerPoolID)
+					}
+					span.SetAttributes(
+						attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())),
+						attribute.String(uotel.LegacyAttrErrorCategory, string(inferenceErr.Category())),
+					)
+					var retryAfter time.Duration
+					var clientErr *asyncapi.ClientError
+					if errors.As(err, &clientErr) {
+						retryAfter = clientErr.RetryAfter
+					}
+					var lastResp asyncapi.InferenceResponse
+					if resp != nil {
+						lastResp = *resp
+					}
+					retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, lastResp)
+				}
+				sendInferenceRequest()
+			}
+			processMessage()
+		}
+	}
+}
+
+func requestDeadlineReached(request asyncapi.Request, now time.Time) bool {
+	if request == nil || request.ReqDeadline() <= 0 {
+		return false
+	}
+	return !now.Before(time.Unix(request.ReqDeadline(), 0))
+}
+
+func nextGateWaitBackoff(current time.Duration) time.Duration {
+	if current >= gateWaitMaxBackoff/2 {
+		return gateWaitMaxBackoff
+	}
+	return current * 2
+}
+
+func jitteredGateWait(backoff time.Duration) time.Duration {
+	half := backoff / 2
+	return half + time.Duration(rand.Float64()*float64(backoff-half)) // #nosec G404 -- non-security jitter, crypto/rand unnecessary
+}
+
+// parsing and validating payload. On failure puts an error msg on the result-channel and returns nil
+func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultMessage, msg pipeline.EmbelishedRequestMessage, transforms *transform.Chain) []byte {
+	if msg.PublicRequest == nil {
+		return nil
+	}
+	queueID := msg.QueueID
+	queueName := msg.RequestQueueName
+	r := msg.PublicRequest
+	deadline := r.ReqDeadline()
+	if deadline <= 0 {
+		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
+		select {
+		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, "Failed: deadline is missing or invalid (Unix seconds)."):
+		case <-ctx.Done():
+		}
+		return nil
+	}
+
+	if deadline < time.Now().Unix() {
+		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+		select {
+		case resultChannel <- asyncapi.NewDeadlineExceededResult(r, msg.InternalRouting):
+		case <-ctx.Done():
+		}
+		return nil
+	}
+
+	payloadBytes := []byte(r.ReqPayload())
+	if len(payloadBytes) == 0 {
+		payloadBytes = []byte("null")
+	}
+
+	// Pre-dispatch transform validation (e.g. signed object URL expiry). A
+	// validation failure is fatal/non-retryable, so we surface an error result
+	// rather than re-enqueue. A nil chain validates successfully.
+	if err := transforms.Validate(payloadBytes, r.ReqMetadata(), deadline); err != nil {
+		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
+		select {
+		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to validate request for transform: %s", err.Error())):
+		case <-ctx.Done():
+		}
+		return nil
+	}
+
+	return payloadBytes
+}
+
+// retryMessage re-enqueues the request for another attempt, or emits a final
+// result if the deadline cannot accommodate another retry.
+//
+// lastResp carries the most recent HTTP response (if any) so that when retries
+// are exhausted the actual HTTP status/body is surfaced rather than a generic
+// "deadline exceeded" non-HTTP error.
+func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastResp asyncapi.InferenceResponse) {
+	if msg.PublicRequest == nil {
+		return
+	}
+	queueID := msg.QueueID
+	queueName := msg.RequestQueueName
+	deadline := msg.PublicRequest.ReqDeadline()
+	secondsToDeadline := deadline - time.Now().Unix()
+	if secondsToDeadline <= 0 {
+		metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+		select {
+		case resultChannel <- deadlineExhaustedResult(msg, lastResp):
+		case <-ctx.Done():
+		}
+		return
+	}
+
+	finalDuration := expBackoffDuration(msg.RetryCount+1, int(secondsToDeadline))
+	// Honor server-specified Retry-After when it exceeds the computed backoff,
+	// clamped to half the remaining deadline: the server's estimate must not
+	// decide a message's fate on its own, so a wrong projection costs at most
+	// half the budget and the backoff ladder keeps the rest.
+	if retryAfterSec := retryAfter.Seconds(); retryAfterSec > finalDuration {
+		clamped := math.Min(retryAfterSec, float64(secondsToDeadline)/2)
+		// Max keeps the backoff floor when the deadline is nearly spent;
+		// jitter de-synchronizes messages rejected by the same event.
+		finalDuration = math.Max(finalDuration, clamped*(1+rand.Float64()/4)) // #nosec G404 -- non-security jitter, crypto/rand unnecessary
+	}
+	// Both arms keep finalDuration strictly under secondsToDeadline — the
+	// backoff arm jitters below min(maxDelaySeconds, secondsToDeadline), and
+	// the Retry-After arm is at most 0.625×secondsToDeadline (half the
+	// deadline, jittered up by <25%) — so the retry always lands before the
+	// deadline. The expiry check at the top of this function is therefore the
+	// only path that gives up on a message.
+
+	msg.RetryCount++
+	metrics.RecordRetry(queueID, queueName, msg.WorkerPoolID)
+	select {
+	case retryChannel <- pipeline.RetryMessage{
+		EmbelishedRequestMessage: msg,
+		BackoffDurationSeconds:   finalDuration,
+	}:
+	case <-ctx.Done():
+	}
+}
+
+// deadlineExhaustedResult returns the appropriate result message when retries
+// are exhausted. If we have a last HTTP response, surface it (preserving the
+// actual status/body). Otherwise emit a non-HTTP deadline-exceeded error.
+func deadlineExhaustedResult(msg pipeline.EmbelishedRequestMessage, lastResp asyncapi.InferenceResponse) asyncapi.ResultMessage {
+	if lastResp.StatusCode > 0 {
+		return asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, lastResp.StatusCode, lastResp.Body)
+	}
+	return asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting)
+}
+
+// headersWithContentType returns a copy of headers with Content-Type set to
+// contentType, replacing all case-insensitive spellings of the header. The
+// original map is not mutated, so the per-message headers stay intact across
+// retries.
+func headersWithContentType(headers map[string]string, contentType string) map[string]string {
+	out := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		if !strings.EqualFold(k, "Content-Type") {
+			out[k] = v
+		}
+	}
+	out["Content-Type"] = contentType
+	return out
+}
+
+func inferenceErrorCategory(err error) string {
+	var inferenceErr asyncapi.InferenceError
+	if errors.As(err, &inferenceErr) {
+		return string(inferenceErr.Category())
+	}
+	return string(asyncapi.ErrCategoryUnknown)
+}
+
+func emitCancelledResultIfNeeded(
+	ctx context.Context,
+	logger logr.Logger,
+	retryChannel chan pipeline.RetryMessage,
+	resultChannel chan asyncapi.ResultMessage,
+	msg pipeline.EmbelishedRequestMessage,
+	nextCheck *time.Time,
+) bool {
+	if msg.PublicRequest == nil {
+		return false
+	}
+	now := time.Now()
+	if nextCheck != nil && !nextCheck.IsZero() && now.Before(*nextCheck) {
+		return false
+	}
+	checker := cancellationCheckerFromContext(ctx)
+	if checker == nil {
+		return false
+	}
+	cancelled, err := checker.IsCancelled(ctx, msg.PublicRequest.ReqID(), msg.RequestToken)
+	if nextCheck != nil {
+		*nextCheck = now.Add(cancellationCheckPollInterval)
+	}
+	if err != nil {
+		logger.Error(err, "Failed to check request cancellation", "id", msg.PublicRequest.ReqID())
+		select {
+		case retryChannel <- pipeline.RetryMessage{
+			EmbelishedRequestMessage: msg,
+			BackoffDurationSeconds:   cancellationCheckRetryAfterSecond,
+		}:
+		case <-ctx.Done():
+		}
+		return true
+	}
+	if !cancelled {
+		return false
+	}
+	select {
+	case resultChannel <- asyncapi.NewCancelledResult(msg.PublicRequest, msg.InternalRouting):
+	case <-ctx.Done():
+	}
+	return true
+}
+
+// watchInflightCancellation polls the request's cancellation marker while
+// inference is executing and cancels the returned context once the marker for
+// this request generation appears. The returned stop function ends polling and
+// reports whether the watcher cancelled the send; it must be called once the
+// send returns. Without a cancellation checker, ctx is returned unchanged.
+func watchInflightCancellation(ctx context.Context, logger logr.Logger, msg pipeline.EmbelishedRequestMessage) (context.Context, func() bool) {
+	checker := cancellationCheckerFromContext(ctx)
+	if checker == nil || msg.PublicRequest == nil {
+		return ctx, func() bool { return false }
+	}
+	sendCtx, cancel := context.WithCancel(ctx)
+	var cancelled atomic.Bool
+	go func() {
+		ticker := time.NewTicker(cancellationCheckPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sendCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			isCancelled, err := checker.IsCancelled(sendCtx, msg.PublicRequest.ReqID(), msg.RequestToken)
+			if sendCtx.Err() != nil {
+				// The send already finished or was aborted while the lookup
+				// ran, so its answer no longer matters.
+				return
+			}
+			if err != nil {
+				// Fail open: a lookup error must not abort a request that may
+				// still complete. The next tick checks again.
+				logger.V(logutil.DEBUG).Info("Failed to check in-flight request cancellation", "id", msg.PublicRequest.ReqID(), "err", err)
+				continue
+			}
+			if isCancelled {
+				cancelled.Store(true)
+				cancel()
+				return
+			}
+		}
+	}()
+	// Stop does not wait for a lookup still in flight: the Redis client does
+	// not abort a command on context cancellation by default, so waiting would
+	// let a slow Redis delay the result of a send that already finished. The
+	// flag is set before the watcher cancels the send, so it is reliable here.
+	return sendCtx, func() bool {
+		cancel()
+		return cancelled.Load()
+	}
+}
+
+// https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+func expBackoffDuration(retryCount int, secondsToDeadline int) float64 {
+	if secondsToDeadline <= 0 {
+		return 0
+	}
+
+	capLevel := math.Min(float64(maxDelaySeconds), float64(secondsToDeadline))
+
+	// exponential growth with cap
+	backoff := float64(baseDelaySeconds) * math.Pow(2, float64(retryCount))
+	temp := math.Min(capLevel, backoff)
+
+	if temp <= 0 {
+		return 0
+	}
+
+	// equal jitter: [temp/2, temp)
+	half := temp / 2
+	return half + rand.Float64()*half // #nosec G404 -- non-security jitter, crypto/rand unnecessary
+}
+
+func payloadModel(payload json.RawMessage) string {
+	var p struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.Model
+}
+
+// gateDecisionReason maps a Refuse or Wait verdict to the reason label of
+// async_gate_decisions_total: the reason the gate set, or gate_closed when the
+// gate did not say. The message's classification plays no part: an overflow
+// request refused by a saturation gate is a closed gate, not an exhausted quota.
+func gateDecisionReason(verdict pipeline.Verdict) string {
+	if verdict.Reason != "" {
+		return verdict.Reason
+	}
+	return metrics.ReasonGateClosed
+}

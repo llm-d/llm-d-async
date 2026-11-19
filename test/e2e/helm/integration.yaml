@@ -1,0 +1,27 @@
+ap:
+  imagePullPolicy: Never
+  concurrency: 1
+  prometheusCacheTTL: "0s"
+  otel:
+    endpoint: "http://jaeger.e2e-integration.svc.cluster.local:4317"
+    insecure: true
+    sampler: "always_on"
+    samplerArg: "1.0"
+    redisTracing: false
+  transport: redis-sortedset
+  transportConfig:
+    result_queue_name: "integration-result-list"
+    poll_interval_ms: 500
+    batch_size: 10
+    queues:
+      - queue_name: "integration-request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
+  modelServerMonitor:
+    enabled: false

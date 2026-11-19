@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hey-loadtest
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: hey
+          image: williamyeh/hey
+          command:
+            - /hey
+            - "-z"
+            - "3600s"
+            - "-c"
+            - "200"
+            - "-m"
+            - "POST"
+            - "-H"
+            - "Content-Type: application/json"
+            - "-d"
+            - '{"model":"Qwen/Qwen3-0.6B","prompt":"Write a very long and detailed essay about the history of computing from the earliest mechanical calculators through modern quantum computers. Cover every major milestone, every important person, and every significant invention.","max_tokens":512,"temperature":0.7}'
+            - "http://llm-d-inference-gateway-istio/v1/completions"

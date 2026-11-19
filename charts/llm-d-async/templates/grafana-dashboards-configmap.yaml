@@ -1,0 +1,12 @@
+{{- if .Values.ap.grafana.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "llm-d-async.fullname" . }}-dashboards
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-async.labels" . | nindent 4 }}
+    {{ .Values.ap.grafana.dashboards.label }}: {{ .Values.ap.grafana.dashboards.labelValue | quote }}
+data:
+  {{- (.Files.Glob "dashboards/*.json").AsConfig | nindent 2 }}
+{{- end }}

@@ -1,0 +1,559 @@
+suite: deployment
+templates:
+  - templates/ap-deployments.yaml
+# Suite-level defaults use the recommended transport surface (ap.transport +
+# ap.transportConfig) and a Redis connection Secret so REDIS_URL is injected.
+# Individual tests override these to exercise other backends and the guards.
+set:
+  ap.transport: redis-pubsub
+  ap.transportConfig:
+    queues:
+      - queue_name: request-queue
+        igw_base_url: "http://igw:80"
+  ap.redis.secretName: "redis-creds"
+tests:
+  - it: should render a Deployment
+    asserts:
+      - isKind:
+          of: Deployment
+
+  - it: should set pod-level security context
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: should set container-level security context defaults
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value:
+            - ALL
+
+  - it: should allow overriding container security context
+    set:
+      ap.securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: false
+        runAsUser: 1000
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 1000
+
+  - it: should set default resource requests and limits
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 256Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 500m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 512Mi
+
+  - it: should allow overriding resources
+    set:
+      ap.resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 200m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+
+  - it: should allow setting only requests without limits
+    set:
+      ap.resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 128Mi
+
+  - it: should expose metrics port
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9090
+            protocol: TCP
+
+  - it: should use custom metrics port
+    set:
+      ap.metrics.port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 8080
+            protocol: TCP
+
+  - it: should pass default metrics port to binary args
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-port=9090
+
+  - it: should pass custom metrics port to binary args
+    set:
+      ap.metrics.port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-port=8080
+
+  - it: should pass the default gate wait timeout to binary args
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --gate-wait-timeout=5m
+
+  - it: should pass a custom gate wait timeout to binary args
+    set:
+      ap.gateWaitTimeout: "90s"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --gate-wait-timeout=90s
+
+  - it: should allow disabling the operational gate wait timeout
+    set:
+      ap.gateWaitTimeout: "0"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --gate-wait-timeout=0
+
+  # --- Transport surface (ap.transport + ap.transportConfig) ---------------
+  - it: should select the configured transport
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=redis-pubsub
+
+  - it: should pass the transport config document as an inline arg
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport-config
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"queue_name":"request-queue"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"igw_base_url":"http://igw:80"'
+
+  - it: should not emit any deprecated per-backend flags
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --message-queue-impl=redis-pubsub
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --redis.igw-base-url=http://igw:80
+
+  - it: should select redis-sortedset
+    set:
+      ap.transport: redis-sortedset
+      ap.transportConfig:
+        poll_interval_ms: 500
+        queues:
+          - queue_name: request-sortedset
+            igw_base_url: "http://igw:80"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=redis-sortedset
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"poll_interval_ms":500'
+
+  - it: should select gcp-pubsub and pass its config
+    set:
+      ap.redis.secretName: ""
+      ap.transport: gcp-pubsub
+      ap.transportConfig:
+        project_id: my-project
+        result_topic_id: results
+        topics:
+          - subscriber_id: sub-1
+            igw_base_url: "http://igw:80"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=gcp-pubsub
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: '"project_id":"my-project"'
+
+  - it: should inject REDIS_URL from the created Secret when redis.url is set
+    set:
+      ap.redis.secretName: ""
+      ap.redis.url: "redis://redis-master.redis.svc:6379"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-llm-d-async-redis
+                key: url
+          any: true
+
+  - it: should inject REDIS_URL from transportConfig.urlSecret and strip it from the config
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+      ap.transportConfig.urlSecret.key: conn
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: conn
+          any: true
+      # urlSecret is a chart directive; it must not leak into --transport-config
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: urlSecret
+
+  - it: should default urlSecret key to url when omitted
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: url
+          any: true
+
+  - it: should default urlSecret key to url when explicitly empty
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.name: my-redis
+      ap.transportConfig.urlSecret.key: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: my-redis
+                key: url
+          any: true
+
+  - it: should inject REDIS_URL from the chart-created Secret when urlSecret.url is set
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig.urlSecret.url: "redis://inline-secret:6379"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-llm-d-async-redis
+                key: url
+          any: true
+      # the literal URL must not leak into --transport-config args
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: inline-secret
+
+  - it: should not inject REDIS_URL for a gcp-pubsub transport
+    set:
+      ap.redis.secretName: ""
+      ap.transport: gcp-pubsub
+      ap.transportConfig:
+        project_id: my-project
+        result_topic_id: results
+        topics:
+          - subscriber_id: sub-1
+            igw_base_url: "http://igw:80"
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+          any: true
+
+  - it: should default the image to the published repo with the appVersion tag
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/llm-d/llm-d-async:0.7.0
+
+  - it: should honor an explicit image tag override
+    set:
+      ap.image.tag: "v1.2.3"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/llm-d/llm-d-async:v1.2.3
+
+  - it: should not require a Secret when url is inline in transportConfig
+    set:
+      ap.redis.secretName: ""
+      ap.transportConfig:
+        url: "redis://inline:6379"
+        queues:
+          - queue_name: request-queue
+            igw_base_url: "http://igw:80"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=redis-pubsub
+
+  - it: should inject OTel env vars when endpoint is set
+    set:
+      ap.otel.endpoint: "http://otel:4317"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: "http://otel:4317"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_SERVICE_NAME
+            value: "llm-d-async"
+          any: true
+
+  - it: should not inject OTel env vars when endpoint is empty
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+          any: true
+
+  - it: should mount TLS volume when secretName is set
+    set:
+      ap.tls.secretName: my-tls-secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tls-certs
+            mountPath: /etc/tls
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tls-certs
+            secret:
+              secretName: my-tls-secret
+
+  - it: should not mount any volume by default
+    asserts:
+      - isNull:
+          path: spec.template.spec.containers[0].volumeMounts
+      - isNull:
+          path: spec.template.spec.volumes
+
+  - it: should mount config volume and pass pool-config-file when workerPools are set
+    set:
+      ap.workerPools:
+        - id: default
+          workers: 8
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pool-config-file=/etc/llm-d-async/config/worker-pools.json
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ap-config
+            mountPath: /etc/llm-d-async/config
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ap-config
+            configMap:
+              name: RELEASE-NAME-llm-d-async-config
+
+  - it: should pass transform-config-file and mount the config when transformConfig is set
+    set:
+      ap.transformConfig:
+        requestTransforms:
+          - name: "gcs-whisper"
+            type: "gcs_uri_multipart"
+            parameters:
+              providers: ["whisper"]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transform-config-file=/etc/llm-d-async/config/transform-config.json
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ap-config
+            mountPath: /etc/llm-d-async/config
+            readOnly: true
+
+  - it: should not pass transform-config-file when transformConfig is empty
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --transform-config-file=/etc/llm-d-async/config/transform-config.json
+
+  - it: should not render affinity by default
+    asserts:
+      - isNull:
+          path: spec.template.spec.affinity
+
+  - it: should render affinity when set
+    set:
+      ap.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/infra
+                    operator: Exists
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: node-role.kubernetes.io/infra
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator
+          value: Exists
+      - notExists:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values
+
+  - it: should pass the renamed request-merge-policy-config-file flag
+    set:
+      ap.requestMergePolicyConfig:
+        type: random-robin
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --request-merge-policy-config-file=/etc/llm-d-async/config/request-merge-policy.json
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --request-merge-policy-config=/etc/llm-d-async/config/request-merge-policy.json
+
+  - it: should render extra env vars when ap.env is set
+    set:
+      ap.env:
+        - name: PUBSUB_EMULATOR_HOST
+          value: "pubsub-emulator:8085"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PUBSUB_EMULATOR_HOST
+            value: "pubsub-emulator:8085"
+
+  - it: should not render extra env vars when ap.env is empty
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PUBSUB_EMULATOR_HOST
+            value: "pubsub-emulator:8085"
+
+  - it: should inject SQL_URL from transportConfig.urlSecret for the sql transport
+    set:
+      ap.redis.secretName: ""
+      ap.transport: sql
+      ap.transportConfig.urlSecret.name: batch-gateway-secrets
+      ap.transportConfig.urlSecret.key: postgresql-url
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --transport=sql
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SQL_URL
+            valueFrom:
+              secretKeyRef:
+                name: batch-gateway-secrets
+                key: postgresql-url
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+          any: true
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[2]
+          pattern: urlSecret
+
+  - it: should create the URL Secret and inject SQL_URL from it for the sql transport
+    set:
+      ap.redis.secretName: ""
+      ap.transport: sql
+      ap.transportConfig.urlSecret.url: postgres://u:p@db:5432/async
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SQL_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-llm-d-async-sql
+                key: url
+          any: true
+
+  - it: should pass the Prometheus bearer token and CA files when set
+    set:
+      ap.prometheusURL: https://thanos-querier.openshift-monitoring.svc:9091
+      ap.prometheusAuth.bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      ap.prometheusAuth.caCertFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --prometheus-bearer-token-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --prometheus-ca-cert=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt

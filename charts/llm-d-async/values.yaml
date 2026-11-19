@@ -1,0 +1,342 @@
+ap:
+  # Inference gateway base URL (REQUIRED for single-queue / single-topic mode).
+  # Results are dispatched here; an empty or wrong value silently consumes
+  # requests without producing results, so it is validated at install time.
+  # For multi-queue/multi-topic setups, set per-entry igw_base_url in
+  # redis.queuesConfig / gcpPubSub.topicsConfig instead of this global value.
+  igwBaseURL: ""
+  # affinity defines optional pod affinity/anti-affinity/nodeAffinity rules
+  # for the Async Processor deployment, e.g. to pin the dispatcher onto
+  # non-GPU infra nodes:
+  #   affinity:
+  #     nodeAffinity:
+  #       requiredDuringSchedulingIgnoredDuringExecution:
+  #         nodeSelectorTerms:
+  #           - matchExpressions:
+  #               - key: node-role.kubernetes.io/infra
+  #                 operator: Exists
+  affinity: {}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  image:
+    repository: ghcr.io/llm-d/llm-d-async
+    # Image tag. Leave empty to track the chart's appVersion (recommended so the
+    # image stays in sync with the chart). Set explicitly to pin a different tag.
+    tag: ""
+  imagePullPolicy: Always
+  # imagePullSecrets is a list of references to secrets for pulling container
+  # images from private registries. Takes precedence over imagePullSecret.
+  # Example:
+  #   imagePullSecrets:
+  #     - name: registry-creds
+  #     - name: ghcr-token
+  imagePullSecrets: []
+  # Global worker concurrency (in-flight requests per pool). The processor is
+  # I/O-bound, so by Little's Law this caps throughput; the default of 8 left
+  # real inference pools mostly idle. Tune to your backend's latency/throughput
+  # target — see the Async Processor Operations Guide.
+  concurrency: 64
+  # Maximum time a worker parks one request at a pool gate before recoverably
+  # re-enqueueing it. Independent of the downstream request timeout; 0 waits
+  # until the request's own deadline.
+  gateWaitTimeout: "5m"
+  drainTimeout: "2m"
+  prometheusURL: ""
+  prometheusCacheTTL: ""
+  # Authentication for metric gates whose Prometheus API needs it, such as
+  # OpenShift's Thanos Querier (https://thanos-querier.openshift-monitoring.svc:9091),
+  # which also requires the service account to hold cluster-monitoring-view.
+  # Paths are inside the container; on OpenShift the default service account
+  # mount provides both:
+  #   bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  #   caCertFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+  prometheusAuth:
+    bearerTokenFile: ""
+    caCertFile: ""
+  # Extra environment variables to inject into the processor container.
+  # Useful for passing backend-specific configuration like PUBSUB_EMULATOR_HOST.
+  # Note: Avoid setting NAMESPACE or POD_NAME here as it will override the downward
+  # API and break downstream $(NAMESPACE) / $(POD_NAME) OTel resource expansion.
+  # env:
+  #   - name: PUBSUB_EMULATOR_HOST
+  #     value: "pubsub-emulator:8085"
+  env: []
+  # Named worker pools configuration. When specified, overrides the global concurrency option.
+  # workerPools:
+  #   - id: "default"
+  #     workers: 8
+  #   - id: "premium"
+  #     workers: 16
+  workerPools: []
+  # Request body-transform plugins. When set, rendered to a config file and passed
+  # via --transform-config-file. Object with a requestTransforms array; each entry
+  # has a unique name, a registered plugin type, and opaque parameters. Empty
+  # disables transforms (default JSON dispatch is unchanged).
+  # transformConfig:
+  #   requestTransforms:
+  #     - name: "gcs-whisper"
+  #       type: "gcs_uri_multipart"
+  #       parameters:
+  #         providers: ["whisper"]
+  transformConfig: {}
+  # Request merge policy configuration. When set, rendered to a config file and passed
+  # via --request-merge-policy-config-file.
+  requestMergePolicyConfig: {}
+  otel:
+    # OTLP gRPC endpoint for trace collection. Examples:
+    #   Dev (Jaeger all-in-one):     "http://jaeger.default.svc.cluster.local:4317"
+    #   OpenShift TempoStack:        "http://tempo-distributor.openshift-tempo-operator.svc:4317"
+    #   OpenShift OTEL Collector:    "http://otel-collector.openshift-distributed-tracing.svc:4317"
+    #   Grafana Alloy/Agent:         "http://alloy.monitoring.svc.cluster.local:4317"
+    # Leave empty to disable tracing.
+    endpoint: ""
+    # Use insecure (plaintext) gRPC connection to the collector.
+    insecure: true
+    # Sampling configuration (maps to standard OTel env vars).
+    # Options: "always_on", "always_off", "traceidratio", "parentbased_traceidratio"
+    # Default is "parentbased_traceidratio" (recommended for production).
+    sampler: "parentbased_traceidratio"
+    # Sampling ratio (0.0 to 1.0), used when sampler is "*traceidratio".
+    # 1.0 = 100% (dev), 0.1 = 10% (production).
+    samplerArg: "1.0"
+    # Enable per-command Redis/Valkey tracing spans. Can produce high span volume —
+    # leave disabled unless actively debugging Redis/Valkey.
+    redisTracing: false
+  health:
+    port: 8081
+    livenessProbe:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readinessProbe:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+    startupProbe:
+      initialDelaySeconds: 0
+      periodSeconds: 2
+      timeoutSeconds: 3
+      failureThreshold: 30
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  # --- Transport configuration (recommended) --------------------------------
+  # Select the message-queue backend and configure it with a single JSON document,
+  # mirroring the processor's --transport / --transport-config flags. When set,
+  # ap.transport takes precedence over the deprecated per-backend values below
+  # (ap.messageQueueImpl, ap.redis.* / ap.gcpPubSub.* request/queue fields,
+  # ap.otel.redisTracing).
+  #
+  # transport: one of redis-pubsub (deprecated; prefer redis-sortedset),
+  # redis-sortedset, gcp-pubsub, sql.
+  # transportConfig: the transport-specific document. See the project README
+  #   "Transport Configuration" section for the schema.
+  #   Redis/Valkey or SQL connection: DO NOT put a credentialed "url" directly in
+  #   transportConfig -- inline values are rendered into the pod args (visible via
+  #   `kubectl get pod` / `helm get values`). Use transportConfig.urlSecret instead;
+  #   the chart injects it as the REDIS_URL (redis-*) or SQL_URL (sql) env var and
+  #   keeps it out of the args.
+  #   urlSecret is a chart-only directive, stripped before the config reaches the
+  #   processor. Two forms:
+  #     urlSecret: {name: <secret>, key: url}  # reference an existing Secret
+  #     urlSecret: {url: "redis://..."}        # chart creates the Secret for you
+  # Example (redis-sortedset):
+  #   transport: redis-sortedset
+  #   transportConfig:
+  #     urlSecret:
+  #       name: my-redis-secret   # existing Secret holding the connection URL
+  #       key: url                # key within that Secret (default: url)
+  #     result_queue_name: result-list
+  #     poll_interval_ms: 1000
+  #     batch_size: 10
+  #     queues:
+  #       - queue_name: request-sortedset
+  #         request_path_url: /v1/completions
+  #         igw_base_url: http://igw:80
+  #         gate_type: prometheus-budget
+  #         gate_params:
+  #           pool: my-pool
+  #           max_concurrency: "100"
+  #           baseline: "0.05"
+  # Example (sql, sharing the batch gateway's Postgres):
+  #   transport: sql
+  #   transportConfig:
+  #     urlSecret:
+  #       name: batch-gateway-secrets
+  #       key: postgresql-url
+  #     result_queue_name: result-sql
+  #     queues:
+  #       - queue_name: request-sql
+  #         igw_base_url: http://igw:80
+  transport: ""
+  transportConfig: {}
+
+  # DEPRECATED: prefer ap.transport + ap.transportConfig above. Retained so
+  # existing values keep working -- the chart translates them into the transport
+  # config and the install notes print a migration warning. Message queue
+  # implementation. Supported: "redis-sortedset", "redis-pubsub", "gcp-pubsub",
+  # "gcp-pubsub-gated" ("gcp-pubsub-gated" is treated as "gcp-pubsub"; a per-topic
+  # gate_type now gates natively). Empty selects redis-pubsub (deprecated).
+  messageQueueImpl: ""
+  gcpPubSub:
+    # DEPRECATED selector: prefer ap.transport: gcp-pubsub with ap.transportConfig.
+    # The request/topic fields below are translated into the transport config.
+    enabled: false
+    # GCP project ID for the Pub/Sub client. Required for the gcp-pubsub backends:
+    # the process panics on startup ("projectID string is empty") if unset.
+    projectId: ""
+    requestSubscriberId: ""
+    resultTopicId: ""
+    requestPathURL: "/v1/completions"
+    # Full multi-topic configuration (overrides single-topic fields above).
+    # Each entry supports its own subscriber_id, worker_pool_id, inference_objective,
+    # request_path_url, igw_base_url, result_topic_id, gate_type and gate_params.
+    # topicsConfig:
+    #   - subscriber_id: "projects/my-project/subscriptions/sub-1"
+    #     worker_pool_id: "default"
+    #     inference_objective: "latency"
+    #     request_path_url: "/v1/completions"
+    #     igw_base_url: "http://igw:80"
+    #     gate_type: "prometheus-saturation"
+    #     gate_params:
+    #       pool: "pool-1"
+    #       threshold: 0.7
+    topicsConfig: []
+  tls:
+    secretName: ""
+    insecureSkipVerify: false
+    caCertKey: ""
+    certKey: ""
+    keyKey: ""
+  redis:
+    # DEPRECATED (whole block): prefer ap.transport + ap.transportConfig. The
+    # request/queue fields are translated into the transport config; the connection
+    # fields (url/secretName/secretKey) are superseded by ap.transportConfig.urlSecret.
+    # All still work for backwards compatibility and emit a migration warning.
+    enabled: false
+    # Compatible with any Redis-protocol server including Valkey.
+    # All redis.* fields work unchanged when pointed at a Valkey endpoint.
+    # Option 1: provide the URL directly — chart creates the Secret automatically.
+    # WARNING: Helm values are retrievable via `helm get values` and may expose credentials.
+    # For production or credentialed URLs, prefer Option 2 (secretName/secretKey).
+    # url: "redis://redis-master.redis.svc.cluster.local:6379"
+    # Option 2: reference a pre-existing Secret (used when url is not set).
+    # Empty by default so an unconfigured Redis connection fails fast at install
+    # time instead of referencing a Secret that may not exist.
+    secretName: ""
+    secretKey: "url"
+    requestPathURL: "/v1/completions"
+    # For redis-sortedset
+    requestQueueName: "request-sortedset"
+    resultQueueName: "result-list"
+    pollIntervalMs: 1000
+    batchSize: 10
+    gateType: ""
+    gateParams: {}
+    # Full multi-queue configuration (overrides single-queue fields above).
+    # For redis-sortedset, each entry supports its own gate_type and gate_params.
+    # For redis-pubsub, only queue_name, inference_objective, request_path_url, igw_base_url are used.
+    # queuesConfig:
+    #   - queue_name: "queue-1"
+    #     inference_objective: ""
+    #     request_path_url: "/v1/completions"
+    #     igw_base_url: "http://igw:80"
+    #     gate_type: "prometheus-saturation"
+    #     gate_params:
+    #       pool: "pool-1"
+    #       threshold: 0.7
+    #   - queue_name: "queue-2"
+    #     request_path_url: "/v1/completions"
+    #     igw_base_url: "http://igw:80"
+    #     gate_type: "redis-quota"
+    #     gate_params:
+    #       address: "redis:6379"
+    #       limit: "5"
+    queuesConfig: []
+  # PodMonitor for llm-d-async metrics scraping.
+  podMonitor:
+    enabled: false
+    interval: "30s"
+    labels: {}
+  prometheusRule:
+    enabled: false
+    labels: {}
+    rules:
+      highRetryRate:
+        enabled: true
+        threshold: 0.5
+        for: "15m"
+      highDeadlineExceededRate:
+        enabled: true
+        threshold: 0.1
+        for: "10m"
+      lowSuccessRate:
+        enabled: true
+        threshold: 0.9
+        for: "10m"
+      highShedRate:
+        enabled: true
+        threshold: 0.1
+        for: "10m"
+  grafana:
+    dashboards:
+      enabled: false
+      label: grafana_dashboard
+      labelValue: "1"
+  # PodMonitor for model server metrics relabeling.
+  # Creates a PodMonitor that scrapes vLLM metrics and relabels
+  # the inference_pool pod label into scraped metrics.
+  # Required when using prometheus-budget or prometheus-saturation gates
+  # without llm-d's flow control plugin enabled.
+  #
+  # The selector below matches model server pods in the release namespace only.
+  # If the model server runs in a different namespace than llm-d-async -- as in
+  # the llm-d guides, which deploy the model server to llm-d-optimized-baseline
+  # and llm-d-async to llm-d-async -- the monitor matches zero pods and scrapes
+  # nothing, with no error reported. Set namespaceSelector in that case.
+  #
+  # The inference_pool pod label is likewise absent from the llm-d guide overlays,
+  # which label decode pods with llm-d.ai/* only. Scraping those pods leaves the
+  # metrics unlabelled, so the gate's PromQL matches nothing, reads NaN, and never
+  # opens. Set inferencePool unless your own overlay adds the pod label, as
+  # docs/guides/e2e-deploy/modelserver/kustomization.yaml does.
+  modelServerMonitor:
+    enabled: false
+    selector:
+      llm-d.ai/role: decode
+    port: modelserver
+    path: /metrics
+    interval: 15s
+    labels: {}
+    # Namespaces to search for model server pods. Empty means the release
+    # namespace only (prometheus-operator's default). Either list namespaces
+    # explicitly or search all of them:
+    #   namespaceSelector:
+    #     matchNames:
+    #       - llm-d-optimized-baseline
+    # or:
+    #   namespaceSelector:
+    #     any: true
+    namespaceSelector: {}
+    # Pool name written into the inference_pool metric label for pods that do not
+    # carry an inference_pool pod label. Must match the gate_params.pool of the
+    # subscriber whose gate consumes these metrics (redis.queuesConfig or
+    # gcpPubSub.topicsConfig). Pods that do carry the label keep their own value,
+    # so a single monitor can span pools that set it and pools that do not.
+    # Empty disables the fallback and preserves pod-label-only behavior.
+    inferencePool: ""

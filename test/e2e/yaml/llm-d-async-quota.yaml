@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-d-async-quota
+  namespace: e2e-test
+  labels:
+    app: llm-d-async-quota
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-d-async-quota
+  template:
+    metadata:
+      labels:
+        app: llm-d-async-quota
+    spec:
+      serviceAccountName: llm-d-async
+      containers:
+      - name: llm-d-async
+        image: ${AP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - --transport=redis-sortedset
+        - --transport-config={"url":"redis://redis.e2e-test.svc.cluster.local:6379","queues":[{"queue_name":"quota-request-sortedset","igw_base_url":"http://igw-mock.e2e-test.svc.cluster.local:80","request_path_url":"/v1/completions","gate_type":"redis-quota","gate_params":{"address":"redis.e2e-test.svc.cluster.local:6379","attribute":"userid","mode":"concurrency","limit":"1"}}]}
+        - --metrics-endpoint-auth=false

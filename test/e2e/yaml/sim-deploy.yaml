@@ -1,0 +1,50 @@
+# Sim deployment with instant responses (default for most tests).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-sim
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-sim
+  template:
+    metadata:
+      labels:
+        app: llm-sim
+        inference.networking.k8s.io/engine-type: vllm
+        inference_pool: e2e-pool
+    spec:
+      containers:
+        - name: sim
+          image: ${SIM_IMAGE}
+          imagePullPolicy: Never
+          args:
+            - --model
+            - test-model
+            - --port
+            - "8000"
+            - --fake-metrics
+            - '{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}'
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m

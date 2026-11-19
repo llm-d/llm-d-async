@@ -1,0 +1,283 @@
+suite: observability
+# A minimal transport is required for the chart to render (the Deployment
+# fail-fasts otherwise); these suites assert on the monitoring templates only.
+set:
+  ap.transport: redis-pubsub
+  ap.transportConfig:
+    queues:
+      - queue_name: request-queue
+        igw_base_url: "http://igw:80"
+  ap.redis.secretName: "redis-creds"
+tests:
+  # -- PodMonitor --
+  - it: should not render PodMonitor by default
+    templates:
+      - templates/ap-podmonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render PodMonitor when enabled
+    templates:
+      - templates/ap-podmonitor.yaml
+    set:
+      ap.podMonitor.enabled: true
+    asserts:
+      - isKind:
+          of: PodMonitor
+      - equal:
+          path: spec.podMetricsEndpoints[0].port
+          value: metrics
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+      - equal:
+          path: spec.podMetricsEndpoints[0].interval
+          value: "30s"
+
+  - it: should set custom PodMonitor interval
+    templates:
+      - templates/ap-podmonitor.yaml
+    set:
+      ap.podMonitor.enabled: true
+      ap.podMonitor.interval: "15s"
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[0].interval
+          value: "15s"
+
+  - it: should add custom PodMonitor labels
+    templates:
+      - templates/ap-podmonitor.yaml
+    set:
+      ap.podMonitor.enabled: true
+      ap.podMonitor.labels:
+        monitoring.opendatahub.io/scrape: "true"
+    asserts:
+      - equal:
+          path: metadata.labels["monitoring.opendatahub.io/scrape"]
+          value: "true"
+
+  # -- PrometheusRule --
+  - it: should not render PrometheusRule by default
+    templates:
+      - templates/prometheus-rule.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render PrometheusRule when enabled
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+    asserts:
+      - isKind:
+          of: PrometheusRule
+      - isNotNull:
+          path: spec.groups[0].rules
+
+  - it: should render all four alerts by default
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 4
+
+  - it: should skip disabled alerts
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+      ap.prometheusRule.rules.highRetryRate.enabled: false
+      ap.prometheusRule.rules.highShedRate.enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 2
+
+  - it: should add custom PrometheusRule labels
+    templates:
+      - templates/prometheus-rule.yaml
+    set:
+      ap.prometheusRule.enabled: true
+      ap.prometheusRule.labels:
+        team: inference
+    asserts:
+      - equal:
+          path: metadata.labels.team
+          value: inference
+
+  - it: should use release namespace in alert descriptions
+    templates:
+      - templates/prometheus-rule.yaml
+    release:
+      namespace: test-ns
+    set:
+      ap.prometheusRule.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.groups[0].rules[0].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[1].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[2].annotations.description
+          pattern: "namespace test-ns"
+      - matchRegex:
+          path: spec.groups[0].rules[3].annotations.description
+          pattern: "namespace test-ns"
+
+  # -- Grafana Dashboard ConfigMap --
+  - it: should not render Grafana dashboard ConfigMap by default
+    templates:
+      - templates/grafana-dashboards-configmap.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render Grafana dashboard ConfigMap when enabled
+    templates:
+      - templates/grafana-dashboards-configmap.yaml
+    set:
+      ap.grafana.dashboards.enabled: true
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.labels.grafana_dashboard
+          value: "1"
+      - isNotNull:
+          path: data["llm-d-async.json"]
+
+  - it: should use custom Grafana dashboard label
+    templates:
+      - templates/grafana-dashboards-configmap.yaml
+    set:
+      ap.grafana.dashboards.enabled: true
+      ap.grafana.dashboards.label: custom_label
+      ap.grafana.dashboards.labelValue: "custom"
+    asserts:
+      - equal:
+          path: metadata.labels.custom_label
+          value: "custom"
+
+  # -- ModelServer PodMonitor --
+  - it: should not render ModelServer PodMonitor by default
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render ModelServer PodMonitor when enabled
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+    asserts:
+      - isKind:
+          of: PodMonitor
+      - equal:
+          path: spec.podMetricsEndpoints[0].port
+          value: modelserver
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+
+  - it: should add custom ModelServer PodMonitor labels
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+      ap.modelServerMonitor.labels:
+        monitoring.opendatahub.io/scrape: "true"
+    asserts:
+      - equal:
+          path: metadata.labels["monitoring.opendatahub.io/scrape"]
+          value: "true"
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: llm-d-async
+
+  - it: should not set a ModelServer PodMonitor namespaceSelector by default
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+    asserts:
+      - notExists:
+          path: spec.namespaceSelector
+
+  - it: should scope the ModelServer PodMonitor to the given namespaces
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+      ap.modelServerMonitor.namespaceSelector:
+        matchNames:
+          - llm-d-optimized-baseline
+    asserts:
+      - equal:
+          path: spec.namespaceSelector.matchNames
+          value:
+            - llm-d-optimized-baseline
+
+  - it: should let the ModelServer PodMonitor search all namespaces
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+      ap.modelServerMonitor.namespaceSelector:
+        any: true
+    asserts:
+      - equal:
+          path: spec.namespaceSelector.any
+          value: true
+
+  - it: should only copy the inference_pool pod label by default
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.podMetricsEndpoints[0].relabelings
+          count: 1
+      - equal:
+          path: spec.podMetricsEndpoints[0].relabelings[0].sourceLabels
+          value:
+            - __meta_kubernetes_pod_label_inference_pool
+
+  - it: should fall back to the configured inference pool when pods are unlabelled
+    templates:
+      - templates/modelserver-podmonitor.yaml
+    set:
+      ap.modelServerMonitor.enabled: true
+      ap.modelServerMonitor.inferencePool: optimized-baseline
+    asserts:
+      - lengthEqual:
+          path: spec.podMetricsEndpoints[0].relabelings
+          count: 2
+      # The pod-label copy still runs first, so a labelled pod keeps its own value.
+      - equal:
+          path: spec.podMetricsEndpoints[0].relabelings[0].sourceLabels
+          value:
+            - __meta_kubernetes_pod_label_inference_pool
+      - equal:
+          path: spec.podMetricsEndpoints[0].relabelings[1].sourceLabels
+          value:
+            - inference_pool
+      - equal:
+          path: spec.podMetricsEndpoints[0].relabelings[1].regex
+          value: ^$
+      - equal:
+          path: spec.podMetricsEndpoints[0].relabelings[1].targetLabel
+          value: inference_pool
+      - equal:
+          path: spec.podMetricsEndpoints[0].relabelings[1].replacement
+          value: optimized-baseline

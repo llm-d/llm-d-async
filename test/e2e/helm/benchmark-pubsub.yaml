@@ -1,0 +1,27 @@
+ap:
+  imagePullPolicy: Never
+  concurrency: 64
+  prometheusURL: "http://prometheus.e2e-integration.svc.cluster.local:9090"
+  prometheusCacheTTL: "0s"
+  transport: gcp-pubsub
+  transportConfig:
+    project_id: "test-project"
+    result_topic_id: "pubsub-bench-result-topic"
+    batch_size: 64
+    topics:
+      - subscriber_id: "pubsub-bench-request-sub"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+        gate_type: "prometheus-saturation"
+        gate_params:
+          pool: "e2e-pool"
+          threshold: "0.8"
+  env:
+    - name: PUBSUB_EMULATOR_HOST
+      value: "pubsub-emulator.e2e-integration.svc.cluster.local:8085"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  modelServerMonitor:
+    enabled: false

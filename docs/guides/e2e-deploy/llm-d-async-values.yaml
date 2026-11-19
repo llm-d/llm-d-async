@@ -1,0 +1,55 @@
+ap:
+  image:
+    repository: ghcr.io/llm-d/llm-d-async
+    tag: "938cd44"
+  imagePullPolicy: Always
+  concurrency: 4
+  prometheusURL: "http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  # Unified transport surface: select the backend and configure it with a single
+  # JSON document (see the project README "Transport Configuration" section).
+  transport: redis-sortedset
+  transportConfig:
+    # Connection: this dev Redis is unauthenticated, so the chart creates a Secret
+    # from the URL below and injects it as REDIS_URL (kept out of the pod args).
+    # For an existing Secret use urlSecret: {name: <secret>, key: url} instead.
+    urlSecret:
+      url: "redis://redis-master.redis.svc.cluster.local:6379"
+    result_queue_name: "result-list"
+    poll_interval_ms: 1000
+    batch_size: 10
+    queues:
+      - queue_name: "request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://llm-d-inference-gateway-istio:80"
+        gate_type: "prometheus-budget"
+        gate_params:
+          pool: "optimized-baseline"
+          # Per *ready pod* request capacity, not a pool-wide total: the gate
+          # closes once load reaches ready_pods * max_concurrency * (1 - baseline),
+          # i.e. 95 concurrent requests on the single Qwen3-0.6B replica this
+          # guide deploys. 100 matches the EPP saturation detector's default and
+          # is reachable by the guide's own load test (hey, 200 workers).
+          # Re-derive it for your own model and hardware -- a value your pool
+          # never reaches leaves the gate permanently open. See the
+          # "Size max_concurrency for your pool" section of the guide.
+          max_concurrency: "100"
+          baseline: "0.05"
+  podMonitor:
+    enabled: true
+    interval: "15s"
+  prometheusRule:
+    enabled: true
+  grafana:
+    dashboards:
+      enabled: true
+  modelServerMonitor:
+    enabled: true
+    selector:
+      llm-d.ai/role: decode
+    port: modelserver
+    path: /metrics
+    interval: 15s

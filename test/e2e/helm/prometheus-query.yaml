@@ -1,0 +1,26 @@
+ap:
+  imagePullPolicy: Never
+  concurrency: 1
+  prometheusURL: "http://prometheus.e2e-integration.svc.cluster.local:9090"
+  prometheusCacheTTL: "0s"
+  transport: redis-sortedset
+  transportConfig:
+    result_queue_name: "query-result-list"
+    poll_interval_ms: 500
+    batch_size: 10
+    queues:
+      - queue_name: "query-request-sortedset"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://envoy.e2e-integration.svc.cluster.local:8081"
+        gate_type: "prometheus-query"
+        gate_params:
+          query: "1 - llm_d_epp_flow_control_pool_saturation{inference_pool=\"e2e-pool\"}"
+          fallback: "0.0"
+  metrics:
+    enabled: true
+    port: 9090
+    secure: false
+  redis:
+    url: "redis://redis.e2e-integration.svc.cluster.local:6379"
+  modelServerMonitor:
+    enabled: false

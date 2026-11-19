@@ -1,0 +1,105 @@
+name: CI - Release - Docker Container Image
+
+on:
+  push:
+    branches:
+      - main  # Runs on every push to main (including PR merges)
+    tags:
+      - 'v*'  # Runs when a tag like v0.1.0 is pushed
+  release:
+    types: [published]  # Also runs when a GitHub release is published
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  docker-build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Set project name from repository
+        id: version
+        run: |
+          repo="${GITHUB_REPOSITORY##*/}"
+          echo "project_name=$repo" >> "$GITHUB_OUTPUT"
+
+      - name: Print project name
+        run: echo "Project is ${{ steps.version.outputs.project_name }}"
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          COMMIT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            TAG="${GITHUB_REF##refs/tags/}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF##refs/tags/}"
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            TAG="main"
+          else
+            TAG="dev"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "helm_version=v0" >> "$GITHUB_OUTPUT"
+          else
+            echo "helm_version=${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push multi-arch image
+        run: |
+          IMAGE=ghcr.io/llm-d/${{ steps.version.outputs.project_name }}
+          VERSION_TAG=${{ steps.tag.outputs.tag }}
+          COMMIT_SHA=${{ steps.tag.outputs.commit_sha }}
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          # Same -X symbols as the Makefile's LDFLAGS, so the image reports its
+          # release instead of the pkg/version defaults ("dev" / "unknown").
+          # The Dockerfile's ARG LDFLAGS is empty unless passed in.
+          LDFLAGS="-s -w \
+            -X github.com/llm-d/llm-d-async/pkg/version.Version=${VERSION_TAG} \
+            -X github.com/llm-d/llm-d-async/pkg/version.Commit=${COMMIT_SHA} \
+            -X github.com/llm-d/llm-d-async/pkg/version.BuildDate=${BUILD_DATE}"
+          echo "Building $IMAGE with tags $VERSION_TAG and $COMMIT_SHA for linux/amd64,linux/arm64"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg LDFLAGS="${LDFLAGS}" \
+            --push \
+            -t $IMAGE:$VERSION_TAG \
+            -t $IMAGE:$COMMIT_SHA .
+
+      - name: Install dependencies for Helm publishing
+        run: |
+          sudo apt-get update && sudo apt-get install -y wget
+          # Install yq
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq
+          # helm is usually pre-installed on ubuntu-latest
+
+      - name: Publish Helm chart
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'main'
+        env:
+          VERSION: ${{ steps.tag.outputs.helm_version }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          mkdir -p release
+          make publish-helm-chart
+
+      - name: Run Trivy scan
+        uses: ./.github/actions/trivy-scan
+        with:
+          image: ghcr.io/llm-d/${{ steps.version.outputs.project_name }}:${{ steps.tag.outputs.tag }}

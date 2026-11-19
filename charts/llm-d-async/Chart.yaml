@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llm-d-async
+description: Helm chart for Async-Processor (AP) - Asynchronous Processor for LLM inference workloads
+type: application
+version: 0.7.0
+appVersion: "0.7.0"

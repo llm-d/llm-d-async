@@ -1,0 +1,19 @@
+{{- if or .Values.ap.workerPools .Values.ap.transformConfig .Values.ap.requestMergePolicyConfig }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "llm-d-async.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-async.labels" . | nindent 4 }}
+data:
+  {{- if .Values.ap.workerPools }}
+  worker-pools.json: {{ .Values.ap.workerPools | toJson | quote }}
+  {{- end }}
+  {{- if .Values.ap.transformConfig }}
+  transform-config.json: {{ .Values.ap.transformConfig | toJson | quote }}
+  {{- end }}
+  {{- if .Values.ap.requestMergePolicyConfig }}
+  request-merge-policy.json: {{ .Values.ap.requestMergePolicyConfig | toJson | quote }}
+  {{- end }}
+{{- end }}

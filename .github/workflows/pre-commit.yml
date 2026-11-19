@@ -1,0 +1,108 @@
+name: Pre-commit
+
+on:
+  push:
+    branches:
+      - main
+      - 'release-*'
+  pull_request:
+
+concurrency:
+  group: pre-commit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: asyncq_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgres://postgres@localhost:5432/asyncq_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          # Pin Helm for a deterministic install. Unpinned, azure/setup-helm
+          # fetches "latest" and, on a failed fetch, silently falls back to
+          # v3.18.4 (Helm 3) -- which breaks the helm-unittest step below: Helm 3
+          # has no `helm plugin install --verify` flag, while Helm 4 defaults to
+          # verify-on and needs `--verify=false` for the unsigned plugin source.
+          # Pin to a known-good Helm 4 release matching the --verify=false usage.
+          version: v4.2.3
+
+      - name: Install pre-commit tools
+        run: make install-pre-commit-tools
+
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@v3.0.1
+
+      - name: Run sql transport tests
+        run: make test-sql
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Lint Helm chart
+        run: helm lint charts/llm-d-async
+
+      - name: Run Helm unit tests
+        run: |
+          helm plugin install --version v1.0.3 --verify=false https://github.com/helm-unittest/helm-unittest.git
+          helm unittest charts/llm-d-async
+
+  check-code-changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      has_code_changes: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            code:
+              - '!docs/**'
+              - '!**/*.md'
+              - '!LICENSE'
+              - '!OWNERS'
+
+  container-build:
+    runs-on: ubuntu-latest
+    needs: check-code-changes
+    if: needs.check-code-changes.outputs.has_code_changes == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build container (no push)
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag test-build:pr-${{ github.event.pull_request.number }} \
+            .

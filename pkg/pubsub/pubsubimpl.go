@@ -1,0 +1,737 @@
+package pubsub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"sync"
+	"time"
+
+	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
+	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
+	"github.com/go-logr/logr"
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
+	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+)
+
+var pubSubClient *pubsub.Client
+
+var resultChannels sync.Map
+
+const quotaExceededNackDelay = 10 * time.Second
+
+type TopicConfig struct {
+	SubscriberID       string `json:"subscriber_id"`
+	WorkerPoolID       string `json:"worker_pool_id"`
+	InferenceObjective string `json:"inference_objective"`
+	RequestPathURL     string `json:"request_path_url"`
+	IGWBaseURL         string `json:"igw_base_url"`
+	// ResultTopicID, when set, routes results for requests pulled from this
+	// topic's subscription to this topic instead of the flow-level default. It
+	// takes precedence over a per-message result_queue_name.
+	ResultTopicID string `json:"result_topic_id,omitempty"`
+	pipeline.GateConfig
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+var _ pipeline.Flow = (*PubSubMQFlow)(nil)
+
+type PubSubMQFlow struct {
+	resultTopicID   string
+	requestChannels []RequestChannelData
+	retryChannel    chan pipeline.RetryMessage
+	resultChannel   chan api.ResultMessage
+	batchSize       int
+	gate            pipeline.Gate
+	gateFactory     pipeline.GateFactory
+	workerPools     []pipeline.WorkerPoolConfig
+	consumeCancel   context.CancelFunc
+	consumeWg       sync.WaitGroup
+	drainCancel     context.CancelFunc
+	drainWg         sync.WaitGroup
+	metricClient    *monitoring.MetricClient
+	projectID       string
+	client          *pubsub.Client
+	// consumeHealth caches per-subscription connectivity observed by the
+	// consume loop (requestWorker), keyed by subscriber ID. It is populated once
+	// at construction; the map itself is never mutated afterwards, so concurrent
+	// reads in HealthCheck race-free against per-entry updates guarded by
+	// subHealth's own mutex.
+	consumeHealth map[string]*subHealth
+}
+
+// subHealth records the most recent broker interaction observed by the consume
+// loop for a single subscription. A successful Receive callback is authoritative
+// proof of connectivity; a Receive error (broker unreachable, subscription gone)
+// marks the subscription unhealthy until the next success.
+type subHealth struct {
+	mu        sync.Mutex
+	lastOK    time.Time
+	lastErr   error
+	lastErrAt time.Time
+}
+
+type RequestChannelData struct {
+	requestChannel pipeline.RequestChannel
+	subscriberID   string
+	gate           pipeline.Gate
+	labels         map[string]string
+	resultTopicID  string
+}
+
+// NewGCPPubSubMQFlow builds a GCP Pub/Sub flow from a parsed Config. The config
+// is expected to have had ApplyDefaults applied (LoadConfig does this).
+// workerPools resolves the named pool each topic routes to; gateFactory, when
+// non-nil, instantiates a per-topic gate for any topic that declares a gate_type.
+func NewGCPPubSubMQFlow(cfg Config, workerPools []pipeline.WorkerPoolConfig, gateFactory pipeline.GateFactory) (*PubSubMQFlow, error) {
+	ctx := context.Background()
+	var err error
+	pubSubClient, err = pubsub.NewClient(ctx, cfg.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PubSub client: %w", err)
+	}
+	p := &PubSubMQFlow{
+		resultTopicID:   cfg.ResultTopicID,
+		requestChannels: make([]RequestChannelData, 0, len(cfg.Topics)),
+		retryChannel:    make(chan pipeline.RetryMessage),
+		resultChannel:   make(chan api.ResultMessage),
+		batchSize:       cfg.BatchSize,
+		projectID:       cfg.ProjectID,
+		client:          pubSubClient,
+		consumeHealth:   make(map[string]*subHealth, len(cfg.Topics)),
+		workerPools:     workerPools,
+		gateFactory:     gateFactory,
+	}
+
+	if metricClient, mErr := monitoring.NewMetricClient(ctx); mErr != nil {
+		log.FromContext(ctx).V(logutil.DEFAULT).Error(mErr, "Failed to create Cloud Monitoring client; broker backlog metrics disabled")
+	} else {
+		p.metricClient = metricClient
+	}
+
+	// Create per-topic channels with gates
+	for _, cfg := range cfg.Topics {
+		workerPoolID := cfg.WorkerPoolID
+		if workerPoolID == "" {
+			workerPoolID = "default"
+		}
+
+		found := false
+		for _, pool := range p.workerPools {
+			if pool.ID == workerPoolID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("worker pool %q specified in topic config not found in pool configuration", workerPoolID)
+		}
+
+		if cfg.IGWBaseURL == "" {
+			return nil, fmt.Errorf("topic config for subscriber %q: igw_base_url must be specified", cfg.SubscriberID)
+		}
+
+		reqPath := cfg.RequestPathURL
+		if reqPath == "" {
+			reqPath = "/v1/completions"
+		}
+
+		// Determine gate for this topic
+		var gate pipeline.Gate
+		if p.gateFactory != nil && cfg.GateType != "" {
+			// Use factory to create per-topic gate. The subscriber ID is what the
+			// rest of this backend's metrics use as queue_name (there is no
+			// separate queue ID), so the gate's own gauges join with them.
+			gateCfg := cfg.GateConfig
+			gateCfg.Owner = pipeline.GateOwner{
+				QueueName:    cfg.SubscriberID,
+				WorkerPoolID: workerPoolID,
+			}
+			gate, err = p.gateFactory.CreateGate(gateCfg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create gate for topic subscriber %q (gate_type=%q): %w", cfg.SubscriberID, cfg.GateType, err)
+			}
+		} else if p.gate != nil {
+			// Fall back to global gate if provided
+			gate = p.gate
+		} else {
+			// Default to always-open gate
+			gate = pipeline.ConstOpenGate()
+		}
+
+		ch := make(chan *api.InternalRequest)
+		p.requestChannels = append(p.requestChannels, RequestChannelData{
+			requestChannel: pipeline.RequestChannel{
+				Channel:            ch,
+				IGWBaseURL:         cfg.IGWBaseURL,
+				InferenceObjective: cfg.InferenceObjective,
+				RequestPathURL:     reqPath,
+				Gate:               gate,
+				WorkerPoolID:       workerPoolID,
+			},
+			subscriberID:  cfg.SubscriberID,
+			gate:          gate,
+			labels:        cfg.Labels,
+			resultTopicID: cfg.ResultTopicID,
+		})
+		p.consumeHealth[cfg.SubscriberID] = &subHealth{}
+	}
+
+	// Set default gate if not already set
+	if p.gate == nil {
+		p.gate = pipeline.ConstOpenGate()
+	}
+
+	return p, nil
+}
+
+func (r *PubSubMQFlow) RetryChannel() chan pipeline.RetryMessage {
+	return r.retryChannel
+}
+
+func (r *PubSubMQFlow) ResultChannel() chan api.ResultMessage {
+	return r.resultChannel
+}
+
+func (r *PubSubMQFlow) Characteristics() pipeline.Characteristics {
+	return pipeline.Characteristics{
+		HasExternalBackoff:     true,
+		SupportsMessageLatency: true,
+	}
+}
+
+var _ pipeline.HealthChecker = (*PubSubMQFlow)(nil)
+
+// consumeHealthTTL bounds how long a successful Receive is trusted as proof of
+// connectivity before HealthCheck falls back to an active subscription probe.
+const consumeHealthTTL = 30 * time.Second
+
+// HealthCheck backs the /readyz probe by confirming each configured request
+// subscription is reachable. It prefers the passive signal from the consume loop
+// (requestWorker): a recent successful Receive proves the broker round-tripped
+// without any extra API call or IAM permission, and a recent Receive error marks
+// the pod not-ready. When the consume loop has no fresh signal (a quiet queue, or
+// before Start), it falls back to an active GetSubscription probe. An unreachable
+// Pub/Sub backend surfaces as a gRPC Unavailable error and marks the pod
+// not-ready, fixing the original bug where such pods reported ready.
+func (r *PubSubMQFlow) HealthCheck(ctx context.Context) error {
+	for _, cd := range r.requestChannels {
+		if h := r.consumeHealth[cd.subscriberID]; h != nil {
+			h.mu.Lock()
+			lastOK, lastErr, lastErrAt := h.lastOK, h.lastErr, h.lastErrAt
+			h.mu.Unlock()
+
+			// A recent consume error is authoritative proof of trouble. A stale one
+			// is not: the consume loop only refreshes lastOK when a message is
+			// actually delivered, so on a quiet subscription an old error would
+			// otherwise pin the pod not-ready forever even after the broker
+			// recovers. Once the error ages past the TTL, fall through to the
+			// active probe below, which re-confirms reachability and lets an idle
+			// subscription recover readiness.
+			if lastErr != nil && lastErrAt.After(lastOK) && time.Since(lastErrAt) < consumeHealthTTL {
+				return fmt.Errorf("pubsub subscription %q consume loop unhealthy: %w", cd.subscriberID, lastErr)
+			}
+			// A recent success proves connectivity; skip the admin call.
+			if !lastOK.IsZero() && time.Since(lastOK) < consumeHealthTTL {
+				continue
+			}
+		}
+		// No fresh consume signal: actively probe the subscription.
+		if err := r.probeSubscription(ctx, cd.subscriberID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// probeSubscription actively confirms a subscription is reachable via the admin
+// API. A PermissionDenied response still proves the broker is reachable: the
+// consume-only role (roles/pubsub.subscriber) lacks pubsub.subscriptions.get, so
+// we can confirm connectivity but not introspect the subscription. Treat it as
+// healthy rather than failing readiness for a correctly-configured consumer.
+func (r *PubSubMQFlow) probeSubscription(ctx context.Context, subscriberID string) error {
+	// Subscriber() normalizes both short IDs and full resource paths; reuse its
+	// result as the fully-qualified name for the admin lookup.
+	name := r.client.Subscriber(subscriberID).String()
+	_, err := r.client.SubscriptionAdminClient.GetSubscription(ctx,
+		&pubsubpb.GetSubscriptionRequest{Subscription: name})
+	if err == nil || status.Code(err) == codes.PermissionDenied {
+		return nil
+	}
+	return fmt.Errorf("pubsub subscription %q health check failed: %w", subscriberID, err)
+}
+
+// recordConsumeOK marks a subscription healthy after a successful broker
+// round-trip observed by the consume loop.
+func (r *PubSubMQFlow) recordConsumeOK(subscriberID string) {
+	if h := r.consumeHealth[subscriberID]; h != nil {
+		h.mu.Lock()
+		h.lastOK = time.Now()
+		h.lastErr = nil
+		h.mu.Unlock()
+	}
+}
+
+// recordConsumeErr records a consume-loop Receive failure so HealthCheck can
+// surface it. Intentional shutdown/restart cancellations are filtered by the
+// caller and must not be passed here.
+func (r *PubSubMQFlow) recordConsumeErr(subscriberID string, err error) {
+	if h := r.consumeHealth[subscriberID]; h != nil {
+		h.mu.Lock()
+		h.lastErr = err
+		h.lastErrAt = time.Now()
+		h.mu.Unlock()
+	}
+}
+
+func (r *PubSubMQFlow) RequestChannels() []pipeline.RequestChannel {
+
+	var channels []pipeline.RequestChannel
+	for _, channelData := range r.requestChannels {
+		channels = append(channels, channelData.requestChannel)
+	}
+	return channels
+}
+
+func (r *PubSubMQFlow) Start(ctx context.Context) {
+	logger := log.FromContext(ctx)
+	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	r.consumeCancel = consumeCancel
+
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	r.drainCancel = drainCancel
+
+	for _, channelData := range r.requestChannels {
+		r.consumeWg.Add(1)
+		go func(cd RequestChannelData) {
+			defer r.consumeWg.Done()
+			r.requestWorker(consumeCtx, pubSubClient, cd.subscriberID, cd.requestChannel.WorkerPoolID, cd.requestChannel.Channel, cd.gate, cd.labels, cd.resultTopicID)
+		}(channelData)
+	}
+	r.drainWg.Add(2)
+	go func() { defer r.drainWg.Done(); resultWorker(drainCtx, pubSubClient, r.resultTopicID, r.resultChannel) }()
+	go func() { defer r.drainWg.Done(); addMsgToRetryQueue(drainCtx, r.retryChannel) }()
+}
+
+func (r *PubSubMQFlow) StopConsuming() {
+	if r.consumeCancel != nil {
+		r.consumeCancel()
+	}
+	r.consumeWg.Wait()
+}
+
+func (r *PubSubMQFlow) Shutdown() {
+	if r.drainCancel != nil {
+		r.drainCancel()
+	}
+	r.drainWg.Wait()
+	if r.metricClient != nil {
+		_ = r.metricClient.Close()
+	}
+}
+
+// QueueBacklog reports the number of undelivered messages per subscription,
+// sourced from the Cloud Monitoring metric
+// pubsub.googleapis.com/subscription/num_undelivered_messages. The value is
+// approximate and lags real time by the metric's sampling interval.
+//
+// ExpiringCounts is intentionally never set: Cloud Monitoring exposes only
+// the aggregate undelivered-message count, not per-item deadlines, so the view
+// stays nil and the poller emits nothing for it.
+func (r *PubSubMQFlow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, error) {
+	if r.metricClient == nil {
+		// Backlog reporting was disabled at startup (already logged when the
+		// client failed to initialize). Emit unavailable samples so a zero
+		// backlog cannot be mistaken for a successful read of an empty queue.
+		stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
+		for _, cd := range r.requestChannels {
+			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   cd.subscriberID,
+				QueueName: cd.subscriberID,
+				PoolName:  cd.requestChannel.WorkerPoolID,
+			})
+		}
+		return stats, nil
+	}
+	now := time.Now()
+	interval := &monitoringpb.TimeInterval{
+		StartTime: timestamppb.New(now.Add(-5 * time.Minute)),
+		EndTime:   timestamppb.New(now),
+	}
+
+	stats := make([]pipeline.QueueBacklogStat, 0, len(r.requestChannels))
+	var firstErr error
+	for _, cd := range r.requestChannels {
+		subID := cd.subscriberID
+		req := &monitoringpb.ListTimeSeriesRequest{
+			Name: "projects/" + r.projectID,
+			Filter: fmt.Sprintf(
+				`metric.type="pubsub.googleapis.com/subscription/num_undelivered_messages" AND resource.labels.subscription_id="%s"`,
+				subID),
+			Interval: interval,
+			View:     monitoringpb.ListTimeSeriesRequest_FULL,
+		}
+		it := r.metricClient.ListTimeSeries(ctx, req)
+		ts, err := it.Next()
+		if err != nil {
+			if errors.Is(err, iterator.Done) {
+				// A successful query with no sample does not prove the subscription
+				// is empty. Export a zero sentinel, but leave SourceAvailable false.
+				stats = append(stats, pipeline.QueueBacklogStat{
+					QueueID:   subID,
+					QueueName: subID,
+					PoolName:  cd.requestChannel.WorkerPoolID,
+				})
+				continue
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("list time series for subscription %q: %w", subID, err)
+			}
+			// Report 0 rather than skipping so the gauge does not retain a
+			// stale value for this subscription after a failed poll.
+			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   subID,
+				QueueName: subID,
+				PoolName:  cd.requestChannel.WorkerPoolID,
+			})
+			continue
+		}
+		points := ts.GetPoints()
+		if len(points) == 0 {
+			// A time series without points also cannot certify an empty queue.
+			stats = append(stats, pipeline.QueueBacklogStat{
+				QueueID:   subID,
+				QueueName: subID,
+				PoolName:  cd.requestChannel.WorkerPoolID,
+			})
+			continue
+		}
+		// Points are returned newest-first; the first is the latest sample.
+		stats = append(stats, pipeline.QueueBacklogStat{
+			QueueID:         subID,
+			QueueName:       subID,
+			PoolName:        cd.requestChannel.WorkerPoolID,
+			Depth:           points[0].GetValue().GetInt64Value(),
+			SourceAvailable: true,
+		})
+	}
+	return stats, firstErr
+}
+
+var _ pipeline.BacklogReporter = (*PubSubMQFlow)(nil)
+
+// resultWorker publishes each result to the topic resolved at pull time
+// (msg.Routing.ResultQueueName), falling back to defaultTopicID. One Publisher
+// is cached per distinct result topic and stopped, flushing pending
+// publishes, when the worker exits.
+//
+// The request is only reported as done (and Acked) once the server has
+// accepted its result. A publish that fails, e.g. to a topic that does not
+// exist or that the service account cannot publish to, reports false so the
+// request is Nacked and redelivered instead of losing its result.
+func resultWorker(ctx context.Context, client *pubsub.Client, defaultTopicID string, resultChannel chan api.ResultMessage) {
+	logger := log.FromContext(ctx)
+
+	publishers := make(map[string]*pubsub.Publisher)
+	var pending sync.WaitGroup
+	defer func() {
+		// Stop returns once every outstanding publish has been sent or has
+		// failed, so the pending result waiters below finish promptly.
+		for _, p := range publishers {
+			p.Stop()
+		}
+		pending.Wait()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case msg := <-resultChannel:
+			correlationID := msg.Routing.TransportCorrelationID
+			topicID := msg.Routing.ResultQueueName
+			if topicID == "" {
+				topicID = defaultTopicID
+			}
+			if topicID == "" {
+				logger.V(logutil.DEFAULT).Error(nil, "No result topic resolved for message", "id", msg.ID, "pubsubID", correlationID)
+				signalPublished(logger, correlationID, false)
+				continue
+			}
+			publisher, ok := publishers[topicID]
+			if !ok {
+				publisher = client.Publisher(topicID)
+				publishers[topicID] = publisher
+			}
+			bytes, err := json.Marshal(msg)
+			var msgBytes []byte
+			if err != nil {
+				fallback := map[string]string{"id": msg.ID, "error": "Failed to marshal result to string"}
+				msgBytes, _ = json.Marshal(fallback)
+			} else {
+				msgBytes = bytes
+			}
+			res := publishPubSub(ctx, publisher, msgBytes, map[string]string{})
+
+			// Wait for the server's answer off the loop so publishes keep
+			// batching. The wait is detached from ctx: on shutdown Stop flushes
+			// the publish, and its real outcome decides Ack vs. Nack.
+			pending.Add(1)
+			go func(id string) {
+				defer pending.Done()
+				if _, err := res.Get(context.WithoutCancel(ctx)); err != nil {
+					logger.V(logutil.DEFAULT).Error(err, "Failed to publish result", "id", id, "topic", topicID, "pubsubID", correlationID)
+					signalPublished(logger, correlationID, false)
+					return
+				}
+				signalPublished(logger, correlationID, true)
+			}(msg.ID)
+		}
+	}
+}
+
+// signalPublished tells the receive callback waiting on correlationID whether
+// its result was published, so it Acks or Nacks the request.
+func signalPublished(logger logr.Logger, correlationID string, published bool) {
+	value, ok := resultChannels.Load(correlationID)
+	if !ok {
+		logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for message", "pubsubID", correlationID)
+		return
+	}
+	value.(chan bool) <- published
+}
+
+func publishPubSub(ctx context.Context, publisher *pubsub.Publisher, msg []byte, attrs map[string]string) *pubsub.PublishResult {
+	return publisher.Publish(ctx, &pubsub.Message{
+		Data:       msg,
+		Attributes: attrs,
+	})
+}
+
+func addMsgToRetryQueue(ctx context.Context, retryChannel chan pipeline.RetryMessage) {
+	logger := log.FromContext(ctx)
+
+	handleRetry := func(msg pipeline.RetryMessage) {
+		if msg.InternalRequest == nil {
+			return
+		}
+		value, ok := resultChannels.Load(msg.TransportCorrelationID)
+		if !ok {
+			logger.V(logutil.DEFAULT).Error(nil, "Result channel not found for retry message", "pubsubID", msg.TransportCorrelationID)
+			return
+		}
+		resultChannel := value.(chan bool)
+		logger.V(logutil.DEBUG).Info("Retrying message", "pubsubID", msg.TransportCorrelationID)
+		resultChannel <- false
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			for {
+				select {
+				case msg := <-retryChannel:
+					handleRetry(msg)
+				default:
+					return
+				}
+			}
+
+		case msg := <-retryChannel:
+			handleRetry(msg)
+		}
+	}
+}
+
+func (r *PubSubMQFlow) requestWorker(ctx context.Context, pubSubClient *pubsub.Client, subscriberID, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate, labels map[string]string, resultTopicID string) {
+	logger := log.FromContext(ctx)
+
+	sub := pubSubClient.Subscriber(subscriberID)
+
+	metrics.InitGateDecisions("", subscriberID, poolID)
+
+	for ctx.Err() == nil {
+		receiveCtx, cancel := context.WithCancel(ctx)
+		budget := gate.Budget(ctx)
+		metrics.SetDispatchBudget(budget, "", subscriberID, poolID)
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ticker.C:
+					if gate.Budget(ctx) != budget {
+						cancel() // Trigger restart with different limit
+						return
+					}
+				case <-receiveCtx.Done():
+					return
+				}
+			}
+		}()
+
+		currBatchSize := int(math.Floor(float64(r.batchSize) * budget))
+		logger.V(logutil.DEFAULT).Info("PubSub MaxOutstandingMessages", "value", currBatchSize)
+		sub.ReceiveSettings.MaxOutstandingMessages = currBatchSize
+		sub.ReceiveSettings.NumGoroutines = 1
+		if currBatchSize <= 0 {
+			// Same pre-dequeue back-pressure as the sorted-set path: with no
+			// outstanding-message slots the receive callback never runs, so
+			// gate.Apply never records the refusal. Count the throttled receive
+			// window instead (#368). Unlike Redis there is no cheap depth probe
+			// — the subscription backlog comes from Cloud Monitoring — so this
+			// counts the window whether or not messages happen to be waiting.
+			metrics.RecordGateDecision(metrics.ReasonGateClosed, "", subscriberID, poolID)
+			<-receiveCtx.Done()
+			cancel()
+			continue
+		}
+
+		err := r.processMessages(receiveCtx, sub.Receive, subscriberID, poolID, ch, gate, labels, resultTopicID)
+
+		cancel()
+		// TODO
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Fail to receive messages from request subscription")
+			// Record only genuine receive failures for readiness. A restart
+			// triggered by a budget change or shutdown cancels receiveCtx and
+			// surfaces as context.Canceled, which is not a connectivity problem.
+			if ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+				r.recordConsumeErr(subscriberID, err)
+			}
+		}
+	}
+
+}
+
+type receiveFunc func(context.Context, func(context.Context, *pubsub.Message)) error
+
+func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc, subscriberID string, poolID string, ch chan *api.InternalRequest, gate pipeline.Gate, labels map[string]string, resultTopicID string) error {
+	logger := log.FromContext(ctx)
+	return receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		// A delivered message is authoritative proof the broker round-tripped;
+		// refresh the passive health signal read by HealthCheck.
+		r.recordConsumeOK(subscriberID)
+
+		var wire api.PubSubRequest
+		err := json.Unmarshal(msg.Data, &wire)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to unmarshal message from request queue")
+			msg.Ack()
+			return
+		}
+		body := wire.RequestMessage
+
+		// Carry the subscription as the request queue label so all per-queue
+		// metrics (throughput, depth, inflight, latency) align with the
+		// async_broker_backlog gauge, which is keyed by subscription ID.
+		irout := api.InternalRouting{TransportCorrelationID: msg.ID, RequestQueueName: subscriberID}
+		// Resolve the result destination with the sorted-set precedence:
+		// per-topic config > per-message result_queue_name > flow default
+		// (applied by resultWorker when this is left empty).
+		irout.ResultQueueName = wire.ResultQueueName
+		if resultTopicID != "" {
+			irout.ResultQueueName = resultTopicID
+		}
+		if msg.DeliveryAttempt != nil {
+			irout.RetryCount = *msg.DeliveryAttempt - 1
+		}
+		if len(labels) > 0 {
+			irout.Labels = make(map[string]string, len(labels))
+			for k, v := range labels {
+				irout.Labels[k] = v
+			}
+		}
+		if body.Metadata == nil {
+			body.Metadata = make(map[string]string)
+		}
+		for k, v := range msg.Attributes {
+			body.Metadata[k] = v
+		}
+
+		ir := api.NewInternalRequest(irout, &body)
+		var releases []pipeline.GateReleaseFunc
+		defer func() {
+			pipeline.ReleaseGateReleases(releases)
+		}()
+
+		resultsChannel := make(chan bool, 1)
+		resultChannels.Store(msg.ID, resultsChannel)
+		defer resultChannels.Delete(msg.ID)
+
+		// Apply gate
+		verdict, err := gate.Apply(ctx, ir, &releases)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Gating failed")
+			metrics.RecordGateDecision(metrics.ReasonError, "", subscriberID, poolID)
+			msg.Nack()
+			return
+		}
+
+		if verdict.Action == pipeline.ActionRefuse {
+			reason := verdict.Reason
+			if reason == "" {
+				reason = metrics.ReasonGateClosed
+			}
+			metrics.RecordGateDecision(reason, "", subscriberID, poolID)
+			logger.V(logutil.DEBUG).Info("Quota exceeded or capacity full, delaying Nack", "msgID", msg.ID, "delay", quotaExceededNackDelay)
+			go func() {
+				select {
+				case <-time.After(quotaExceededNackDelay):
+					msg.Nack()
+				case <-ctx.Done():
+					msg.Nack()
+				}
+			}()
+			return
+		}
+
+		if verdict.Action == pipeline.ActionDrop {
+			metrics.RecordGateDecision(metrics.ReasonDropped, "", subscriberID, poolID)
+			var resultMsg api.ResultMessage
+			if verdict.Result != nil {
+				resultMsg = *verdict.Result
+				resultMsg.Routing = ir.InternalRouting
+			} else {
+				resultMsg = api.NewGateDroppedResult(&body, ir.InternalRouting)
+			}
+			r.resultChannel <- resultMsg
+
+			// Wait for the result worker to finish publishing and signal true
+			result := <-resultsChannel
+			if !result {
+				msg.Nack()
+			} else {
+				msg.Ack()
+			}
+			return
+		}
+
+		// Stamp ingestion time as the message enters the in-process buffer so the
+		// worker can record queue residence time when it pulls the message.
+		ir.IngestionTime = time.Now()
+
+		ch <- ir
+
+		result := <-resultsChannel
+		if !result {
+			msg.Nack()
+		} else {
+			metrics.RecordMessageLatency(float64(time.Since(msg.PublishTime).Milliseconds()), ir.QueueID, ir.RequestQueueName, poolID)
+			msg.Ack()
+		}
+	})
+}

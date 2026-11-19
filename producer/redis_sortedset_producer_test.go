@@ -1,0 +1,1271 @@
+package producer
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// customRequest is a user-defined Request implementation for testing the
+// default branch of toInternalRequest.
+type customRequest struct {
+	id, endpoint      string
+	model             string
+	created, deadline int64
+	payload           json.RawMessage
+	metadata          map[string]string
+	headers           map[string]string
+}
+
+func (r *customRequest) ReqID() string                  { return r.id }
+func (r *customRequest) ReqCreated() int64              { return r.created }
+func (r *customRequest) ReqDeadline() int64             { return r.deadline }
+func (r *customRequest) ReqPayload() json.RawMessage    { return r.payload }
+func (r *customRequest) ReqMetadata() map[string]string { return r.metadata }
+func (r *customRequest) ReqHeaders() map[string]string  { return r.headers }
+func (r *customRequest) ReqEndpoint() string            { return r.endpoint }
+func (r *customRequest) ReqModel() string               { return r.model }
+
+func setupTestProducer(t *testing.T, opts ...ProducerOption) (*RedisSortedSetProducer, *miniredis.Miniredis) {
+	t.Helper()
+
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(func() { mr.Close() })
+
+	producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:         "redis://" + mr.Addr(),
+		RequestQueueName: "test-request-queue",
+		ResultQueueName:  "test-result-queue",
+	}, opts...)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := producer.Close(); err != nil {
+			t.Logf("failed to close producer: %v", err)
+		}
+	})
+
+	return producer, mr
+}
+
+func TestSubmitRequest(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx := context.Background()
+
+	req := &api.RequestMessage{
+		ID:       "test-123",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload: testPayload(map[string]interface{}{
+			"model":  "gpt-3.5-turbo",
+			"prompt": "Hello, world!",
+		}),
+		Metadata: map[string]string{
+			"user": "test-user",
+		},
+	}
+
+	err := producer.SubmitRequest(ctx, req)
+	assert.NoError(t, err)
+
+	// Verify the message was added to the sorted set
+	assert.True(t, mr.Exists("test-request-queue"))
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	assert.Len(t, members, 1)
+
+	var ir api.InternalRequest
+	err = json.Unmarshal([]byte(members[0]), &ir)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-123", ir.PublicRequest.ReqID())
+	assert.Equal(t, "test-user", ir.PublicRequest.ReqMetadata()["user"])
+	assert.Equal(t, "test-result-queue", ir.ResultQueueName)
+}
+
+func TestSubmitRequest_ScoresByDeadlineThenSubmissionOrder(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	shared := time.Now().Add(24 * time.Hour).Unix()
+
+	const n = 1000
+	submitted := make([]string, 0, n)
+	for i := range n {
+		id := fmt.Sprintf("line-%04d", i)
+		require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+			ID: id, Created: time.Now().Unix(), Deadline: shared, Payload: testPayload(map[string]any{"prompt": id}),
+		}))
+		submitted = append(submitted, id)
+	}
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "earlier-deadline", Created: time.Now().Unix(), Deadline: shared - 1, Payload: testPayload(map[string]any{}),
+	}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	var order []string
+	seqs := map[string]int64{}
+	for _, member := range members {
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		id := ir.PublicRequest.ReqID()
+		order = append(order, id)
+		seqs[id] = ir.EnqueueSeq
+
+		score, err := mr.ZScore("test-request-queue", member)
+		require.NoError(t, err)
+		assert.Equal(t, ir.QueueScore(), score, "score for %s", id)
+	}
+	assert.Equal(t, append([]string{"earlier-deadline"}, submitted...), order)
+	assert.Equal(t, int64(1), seqs["earlier-deadline"], "each deadline counts from 1")
+	for i, id := range submitted {
+		assert.Equal(t, int64(i+1), seqs[id], "EnqueueSeq for %s", id)
+	}
+}
+
+func TestSubmitRequest_ScoreMatchesQueueScoreAtTheSeqCap(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+	const maxSeq = 1<<21 - 1
+	require.NoError(t, mr.Set(enqueueSeqKey("test-request-queue", deadline, false), fmt.Sprint(maxSeq-2)))
+
+	scores := map[int64]float64{}
+	for _, id := range []string{"a", "b", "c"} {
+		require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+			ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
+		}))
+	}
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	for _, member := range members {
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		score, err := mr.ZScore("test-request-queue", member)
+		require.NoError(t, err)
+		assert.Equal(t, ir.QueueScore(), score, "score for seq %d", ir.EnqueueSeq)
+		scores[ir.EnqueueSeq] = score
+	}
+	assert.Less(t, scores[maxSeq-1], scores[maxSeq])
+	assert.Equal(t, scores[maxSeq], scores[maxSeq+1], "sequences past the cap tie")
+	assert.Less(t, scores[maxSeq+1], float64(deadline+1))
+}
+
+func TestSubmitRequest_PayloadContainingThePlaceholder(t *testing.T) {
+	for name, opts := range map[string][]ProducerOption{
+		"inline":       nil,
+		"payload keys": {WithPayloadKeys()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t, opts...)
+			ctx := context.Background()
+			payload := testPayload(map[string]any{"enqueue_seq": -1, "prompt": `"enqueue_seq":-1`})
+
+			require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+				ID: "tricky", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: payload,
+			}))
+
+			members, err := mr.ZMembers("test-request-queue")
+			require.NoError(t, err)
+			require.Len(t, members, 1)
+			var ir api.InternalRequest
+			require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+			assert.Equal(t, int64(1), ir.EnqueueSeq)
+			got := string(ir.PublicRequest.ReqPayload())
+			if ir.PayloadRef != "" {
+				got, err = mr.Get(ir.PayloadRef)
+				require.NoError(t, err)
+			}
+			assert.JSONEq(t, string(payload), got)
+		})
+	}
+}
+
+func TestSubmitRequest_SetsActiveTokenUntilDeadline(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
+	}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	token, err := mr.Get(api.RequestActiveTokenKey("r"))
+	require.NoError(t, err)
+	assert.Equal(t, ir.RequestToken, token)
+	assert.InDelta(t, time.Until(time.Unix(deadline, 0)).Seconds(), mr.TTL(api.RequestActiveTokenKey("r")).Seconds(), 2)
+}
+
+func TestSubmitRequest_EnqueueSeqIsPerQueue(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+
+	submit := func(id, queue string) {
+		t.Helper()
+		require.NoError(t, producer.SubmitRequest(ctx, &api.RedisRequest{
+			RequestMessage:   api.RequestMessage{ID: id, Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{})},
+			RequestQueueName: queue,
+		}))
+	}
+	submit("a1", "queue-a")
+	submit("b1", "queue-b")
+	submit("a2", "queue-a")
+
+	seqOf := func(queue string) []int64 {
+		t.Helper()
+		members, err := mr.ZMembers(queue)
+		require.NoError(t, err)
+		var seqs []int64
+		for _, member := range members {
+			var ir api.InternalRequest
+			require.NoError(t, json.Unmarshal([]byte(member), &ir))
+			seqs = append(seqs, ir.EnqueueSeq)
+		}
+		return seqs
+	}
+	assert.Equal(t, []int64{1, 2}, seqOf("queue-a"))
+	assert.Equal(t, []int64{1}, seqOf("queue-b"))
+}
+
+func TestSubmitRequest_EnqueueSeqExpiresAfterDeadline(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour).Unix()
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "r", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
+	}))
+
+	key := enqueueSeqKey("test-request-queue", deadline, false)
+	ttl := mr.TTL(key)
+	want := time.Until(time.Unix(deadline, 0).Add(enqueueSeqGrace))
+	assert.InDelta(t, want.Seconds(), ttl.Seconds(), 2, "counter TTL")
+}
+
+func TestSubmitRequest_ExpiredDeadlineLeavesSeqUntouched(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(-time.Minute).Unix()
+
+	err := producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID: "late", Created: time.Now().Unix(), Deadline: deadline, Payload: testPayload(map[string]any{}),
+	})
+	require.ErrorContains(t, err, "deadline has already expired")
+	assert.False(t, mr.Exists(enqueueSeqKey("test-request-queue", deadline, false)))
+}
+
+func TestToInternalRequest_PubSubIDCopiesToInternalRouting(t *testing.T) {
+	req := &api.PubSubRequest{
+		RequestMessage: api.RequestMessage{
+			ID: "x", Created: 1, Deadline: 2,
+		},
+		PubSubID: "ps-123",
+	}
+	ir := toInternalRequest(req)
+	assert.Equal(t, "ps-123", ir.TransportCorrelationID)
+}
+
+func TestToInternalRequest_CustomRequestPreservesHeadersAndEndpoint(t *testing.T) {
+	req := &customRequest{
+		id: "custom-1", created: 1, deadline: 2,
+		payload:  testPayload(map[string]any{"k": "v"}),
+		metadata: map[string]string{"m": "d"},
+		headers:  map[string]string{"Authorization": "Bearer tok"},
+		endpoint: "/v1/chat/completions",
+		model:    "m1",
+	}
+	ir := toInternalRequest(req)
+	rm, ok := ir.PublicRequest.(*api.RequestMessage)
+	require.True(t, ok, "expected *api.RequestMessage for custom Request type")
+	assert.Equal(t, "custom-1", rm.ID)
+	assert.Equal(t, map[string]string{"Authorization": "Bearer tok"}, rm.Headers)
+	assert.Equal(t, "/v1/chat/completions", rm.Endpoint)
+	assert.Equal(t, map[string]string{"m": "d"}, rm.Metadata)
+	assert.Equal(t, "m1", rm.Model)
+}
+
+func TestToInternalRequest_RedisQueueFieldsCopyToInternalRouting(t *testing.T) {
+	req := &api.RedisRequest{
+		RequestMessage: api.RequestMessage{
+			ID: "x", Created: 1, Deadline: 2,
+		},
+		RequestQueueName: "req-q",
+		ResultQueueName:  "res-q",
+	}
+	ir := toInternalRequest(req)
+	assert.Equal(t, "req-q", ir.RequestQueueName)
+	assert.Equal(t, "res-q", ir.ResultQueueName)
+}
+
+func TestSubmitRequest_NilRequest(t *testing.T) {
+	producer, _ := setupTestProducer(t)
+	ctx := context.Background()
+
+	t.Run("untyped nil", func(t *testing.T) {
+		err := producer.SubmitRequest(ctx, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
+
+	t.Run("typed nil RequestMessage", func(t *testing.T) {
+		var req *api.RequestMessage
+		err := producer.SubmitRequest(ctx, req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
+
+	t.Run("typed nil RedisRequest", func(t *testing.T) {
+		var req *api.RedisRequest
+		err := producer.SubmitRequest(ctx, req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
+
+	t.Run("typed nil PubSubRequest", func(t *testing.T) {
+		var req *api.PubSubRequest
+		err := producer.SubmitRequest(ctx, req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request is required")
+	})
+}
+
+func TestSubmitRequestRejectsAPayloadThatIsNotAJSONObject(t *testing.T) {
+	for name, payload := range map[string]json.RawMessage{
+		"not json":   json.RawMessage("not json"),
+		"truncated":  json.RawMessage(`{"model":"m"`),
+		"empty":      json.RawMessage{},
+		"whitespace": json.RawMessage(" \n"),
+		"string":     json.RawMessage(`"hi"`),
+		"number":     json.RawMessage(`42`),
+		"array":      json.RawMessage(`[{"model":"m"}]`),
+		"bool":       json.RawMessage(`true`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t)
+			err := producer.SubmitRequest(context.Background(), &api.RequestMessage{
+				ID:       "bad-payload",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(time.Hour).Unix(),
+				Payload:  payload,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid payload: must be a JSON object or null")
+			assert.Empty(t, mr.Keys(), "a rejected request must not be queued")
+		})
+	}
+}
+
+func TestSubmitRequestAcceptsAnObjectOrNullPayload(t *testing.T) {
+	for name, payload := range map[string]json.RawMessage{
+		"nil":              nil,
+		"null":             json.RawMessage(`null`),
+		"padded null":      json.RawMessage(" null \n"),
+		"object":           json.RawMessage(`{"model":"m"}`),
+		"indented object":  json.RawMessage(" \n\t{\"model\":\"m\"}"),
+		"empty object":     json.RawMessage(`{}`),
+		"trailing newline": json.RawMessage("{\"model\":\"m\"}\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t)
+			require.NoError(t, producer.SubmitRequest(context.Background(), &api.RequestMessage{
+				ID:       "ok-payload",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(time.Hour).Unix(),
+				Payload:  payload,
+			}))
+			members, err := mr.ZMembers("test-request-queue")
+			require.NoError(t, err)
+			assert.Len(t, members, 1)
+		})
+	}
+}
+
+func TestSubmitRequest_Validation(t *testing.T) {
+	producer, _ := setupTestProducer(t)
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		req     *api.RequestMessage
+		wantErr string
+	}{
+		{
+			name: "missing ID",
+			req: &api.RequestMessage{
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Unix(),
+				Payload:  testPayload(map[string]interface{}{}),
+			},
+			wantErr: "request ID is required",
+		},
+		{
+			name: "missing deadline",
+			req: &api.RequestMessage{
+				ID:       "test",
+				Created:  time.Now().Unix(),
+				Deadline: 0,
+				Payload:  testPayload(map[string]interface{}{}),
+			},
+			wantErr: "deadline is required",
+		},
+		{
+			name: "invalid deadline",
+			req: &api.RequestMessage{
+				ID:       "test",
+				Created:  time.Now().Unix(),
+				Deadline: 0,
+				Payload:  testPayload(map[string]interface{}{}),
+			},
+			wantErr: "deadline is required",
+		},
+		{
+			name: "expired deadline",
+			req: &api.RequestMessage{
+				ID:       "test",
+				Created:  time.Now().Unix(),
+				Deadline: time.Now().Add(-1 * time.Minute).Unix(),
+				Payload:  testPayload(map[string]interface{}{}),
+			},
+			wantErr: "deadline has already expired",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := producer.SubmitRequest(ctx, tt.req)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestCancelRequests(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx := context.Background()
+	mr.Set(api.RequestActiveTokenKey("req-1"), "token-1")
+	mr.Set(api.RequestActiveTokenKey("req-2"), "token-2")
+	err := producer.CancelRequests(ctx, []string{"req-1", "", "req-2"})
+	require.NoError(t, err)
+
+	got1, err := mr.Get(api.RequestCancellationKey("req-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "token-1", got1)
+	got2, err := mr.Get(api.RequestCancellationKey("req-2"))
+	require.NoError(t, err)
+	assert.Equal(t, "token-2", got2)
+	assert.False(t, mr.Exists(api.RequestCancellationKey("")))
+}
+
+func TestCancelRequests_UnknownRequestIDIsNoOp(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx := context.Background()
+	err := producer.CancelRequests(ctx, []string{"unknown-request"})
+	require.NoError(t, err)
+
+	assert.False(t, mr.Exists(api.RequestActiveTokenKey("unknown-request")))
+	assert.False(t, mr.Exists(api.RequestCancellationKey("unknown-request")))
+}
+
+func TestSubmitRequest_ClearsStaleCancellationMarker(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx := context.Background()
+	requestID := "reused-id"
+	mr.Set(api.RequestCancellationKey(requestID), "1")
+
+	err := producer.SubmitRequest(ctx, &api.RequestMessage{
+		ID:       requestID,
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  testPayload(map[string]any{"model": "test"}),
+	})
+	require.NoError(t, err)
+	assert.False(t, mr.Exists(api.RequestCancellationKey(requestID)))
+	assert.True(t, mr.Exists(api.RequestActiveTokenKey(requestID)))
+}
+
+// dropReplyConn fails the reply read of the first EVAL written on it with
+// io.EOF after the server has answered, as a connection reset after the
+// script ran would. go-redis then retries the EVAL. onDrop runs between the
+// two attempts.
+type dropReplyConn struct {
+	net.Conn
+	armed  *atomic.Bool
+	onDrop func()
+	drop   bool
+}
+
+func (c *dropReplyConn) Write(b []byte) (int, error) {
+	if bytes.Contains(bytes.ToLower(b), []byte("\r\neval\r\n")) && c.armed.CompareAndSwap(true, false) {
+		c.drop = true
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *dropReplyConn) Read(b []byte) (int, error) {
+	if c.drop {
+		_, _ = c.Conn.Read(b) // the reply arrived, so the script ran
+		_ = c.Close()
+		if c.onDrop != nil {
+			c.onDrop()
+		}
+		return 0, io.EOF
+	}
+	return c.Conn.Read(b)
+}
+
+// submitWithLostReply submits r1 through a client that loses the reply to the
+// first enqueue script, and requires that the loss happened.
+func submitWithLostReply(t *testing.T, mr *miniredis.Miniredis, cluster bool, deadline int64, onDrop func(*RedisSortedSetProducer)) {
+	t.Helper()
+	var armed atomic.Bool
+	armed.Store(true)
+	var producer *RedisSortedSetProducer
+	dialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &dropReplyConn{Conn: conn, armed: &armed, onDrop: func() {
+			if onDrop != nil {
+				onDrop(producer)
+			}
+		}}, nil
+	}
+	var client redis.UniversalClient = redis.NewClient(&redis.Options{Addr: mr.Addr(), Dialer: dialer})
+	if cluster {
+		client = redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{mr.Addr()}, Dialer: dialer})
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	var err error
+	producer, err = NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RequestQueueName: "requests",
+		ResultQueueName:  "results",
+	}, WithRedisClient(client))
+	require.NoError(t, err)
+
+	err = producer.SubmitRequest(context.Background(), &api.RequestMessage{
+		ID:       "r1",
+		Created:  time.Now().Unix(),
+		Deadline: deadline,
+		Payload:  testPayload(map[string]any{"model": "test"}),
+	})
+	require.NoError(t, err)
+	require.False(t, armed.Load(), "the enqueue reply was dropped")
+}
+
+func TestSubmitRequest_RetryAfterLostReplyEnqueuesOnce(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			deadline := time.Now().Add(time.Hour).Unix()
+			submitWithLostReply(t, mr, cluster, deadline, nil)
+
+			members, err := mr.ZMembers("requests")
+			require.NoError(t, err)
+			assert.Len(t, members, 1)
+			seq, err := mr.Get(enqueueSeqKey("requests", deadline, cluster))
+			require.NoError(t, err)
+			assert.Equal(t, "1", seq)
+		})
+	}
+}
+
+func TestSubmitRequest_RetryAfterLostReplyKeepsACancel(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			submitWithLostReply(t, mr, cluster, time.Now().Add(time.Hour).Unix(), func(p *RedisSortedSetProducer) {
+				assert.NoError(t, p.CancelRequests(context.Background(), []string{"r1"}))
+			})
+
+			token, err := mr.Get(api.RequestActiveTokenKey("r1"))
+			require.NoError(t, err)
+			marker, err := mr.Get(api.RequestCancellationKey("r1"))
+			require.NoError(t, err)
+			assert.Equal(t, token, marker)
+		})
+	}
+}
+
+func TestSubmitRequest_RetryAfterLostReplyEnqueuesOnceWhenTheServerClockPassedTheDeadline(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			// Past the deadline, short of the sequence counter's grace.
+			mr.SetTime(time.Now().Add(time.Hour + enqueueSeqGrace/2))
+			submitWithLostReply(t, mr, cluster, time.Now().Add(time.Hour).Unix(), func(*RedisSortedSetProducer) {
+				mr.FastForward(time.Second) // the retry backoff
+			})
+
+			members, err := mr.ZMembers("requests")
+			require.NoError(t, err)
+			assert.Len(t, members, 1)
+		})
+	}
+}
+
+func TestSubmitRequest_EnqueueGuardTTLDoesNotFollowTheDeadline(t *testing.T) {
+	for name, cluster := range map[string]bool{"standalone": false, "cluster": true} {
+		t.Run(name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			submitWithLostReply(t, mr, cluster, time.Now().Add(24*time.Hour).Unix(), nil)
+
+			token, err := mr.Get(api.RequestActiveTokenKey("r1"))
+			require.NoError(t, err)
+			assert.Equal(t, enqueueGuardTTL, mr.TTL(enqueueGuardKey("requests", token, cluster)))
+		})
+	}
+}
+
+func TestGetResult(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Push a result to the result list
+	resultMsg := api.ResultMessage{
+		ID:      "test-123",
+		Payload: `{"response": "Hello!"}`,
+	}
+	resultJSON, _ := json.Marshal(resultMsg)
+	_, err := mr.Lpush("test-result-queue", string(resultJSON))
+	require.NoError(t, err)
+
+	// Get the result
+	result, err := producer.GetResult(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "test-123", result.ID)
+	assert.Contains(t, result.Payload, "Hello!")
+}
+
+func TestGetResultWithContextTimeout(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	t.Run("get result before timeout", func(t *testing.T) {
+		resultMsg := api.ResultMessage{
+			ID:      "test-456",
+			Payload: "test response",
+		}
+		resultJSON, _ := json.Marshal(resultMsg)
+		_, err := mr.Lpush("test-result-queue", string(resultJSON))
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		result, err := producer.GetResult(ctx)
+		require.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Equal(t, "test-456", result.ID)
+	})
+}
+
+func TestGetResultWhileWaitingContextEnds(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		name := "cancel"
+		if deadline {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			producer, mr := setupTestProducer(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			want := context.Canceled
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+				want = context.DeadlineExceeded
+			}
+			defer cancel()
+			commands := mr.CommandCount()
+			done := make(chan error, 1)
+			go func() {
+				_, err := producer.GetResult(ctx)
+				done <- err
+			}()
+			require.Eventually(t, func() bool { return mr.CommandCount() > commands }, time.Second, time.Millisecond)
+			if !deadline {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, want)
+			case <-time.After(2 * time.Second):
+				t.Fatal("GetResult did not return after its context ended")
+			}
+			// A completed wait must release its connection and leave later results
+			// available to the next caller.
+			_, err := mr.Lpush("test-result-queue", `{"id":"next-call"}`)
+			require.NoError(t, err)
+			result, err := producer.GetResult(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, "next-call", result.ID)
+		})
+	}
+}
+
+func TestGetResultWaitsAcrossEmptyPolls(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	commands := mr.CommandCount()
+	type response struct {
+		result *api.ResultMessage
+		err    error
+	}
+	done := make(chan response, 1)
+	go func() {
+		result, err := producer.GetResult(ctx)
+		done <- response{result, err}
+	}()
+	require.Eventually(t, func() bool { return mr.CommandCount() >= commands+2 }, 3*time.Second, time.Millisecond)
+	_, err := mr.Lpush("test-result-queue", `{"id":"after-empty-poll"}`)
+	require.NoError(t, err)
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		require.Equal(t, "after-empty-poll", got.result.ID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetResult did not return the queued result")
+	}
+}
+
+func TestMultipleTenantsIsolation(t *testing.T) {
+	// Start mini Redis
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	ctx := context.Background()
+
+	alphaResultQueue := "results:tenant-alpha:my-results"
+	betaResultQueue := "results:tenant-beta:my-results"
+
+	tenant1Producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:         "redis://" + mr.Addr(),
+		RequestQueueName: "shared-request-queue",
+		ResultQueueName:  alphaResultQueue,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := tenant1Producer.Close(); err != nil {
+			t.Logf("failed to close tenant1Producer: %v", err)
+		}
+	})
+
+	tenant2Producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:         "redis://" + mr.Addr(),
+		RequestQueueName: "shared-request-queue",
+		ResultQueueName:  betaResultQueue,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := tenant2Producer.Close(); err != nil {
+			t.Logf("failed to close tenant2Producer: %v", err)
+		}
+	})
+
+	assert.Equal(t, alphaResultQueue, tenant1Producer.resultQueueName)
+	assert.Equal(t, betaResultQueue, tenant2Producer.resultQueueName)
+	assert.NotEqual(t, tenant1Producer.resultQueueName, tenant2Producer.resultQueueName)
+
+	// Submit requests from both tenants
+	req1 := &api.RequestMessage{
+		ID:       "alpha-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  testPayload(map[string]interface{}{"tenant": "alpha"}),
+	}
+	err = tenant1Producer.SubmitRequest(ctx, req1)
+	require.NoError(t, err)
+
+	req2 := &api.RequestMessage{
+		ID:       "beta-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  testPayload(map[string]interface{}{"tenant": "beta"}),
+	}
+	err = tenant2Producer.SubmitRequest(ctx, req2)
+	require.NoError(t, err)
+
+	// Verify both requests have different result queue routing
+	members, err := mr.ZMembers("shared-request-queue")
+	require.NoError(t, err)
+	assert.Len(t, members, 2)
+
+	var ir1, ir2 api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir1))
+	require.NoError(t, json.Unmarshal([]byte(members[1]), &ir2))
+
+	// Both requests share one queue with equal deadline scores, so the ZMembers
+	// order is not deterministic. Assert routing keyed by request ID rather than
+	// by member position (which previously made this test flaky).
+	routing := map[string]string{
+		ir1.PublicRequest.ReqID(): ir1.ResultQueueName,
+		ir2.PublicRequest.ReqID(): ir2.ResultQueueName,
+	}
+	assert.Equal(t, alphaResultQueue, routing["alpha-request"])
+	assert.Equal(t, betaResultQueue, routing["beta-request"])
+
+	// Simulate worker routing results to correct tenant queues
+	result1 := api.ResultMessage{
+		ID:      "alpha-request",
+		Payload: `{"response": "alpha result"}`,
+	}
+	result1JSON, _ := json.Marshal(result1)
+	_, err = mr.Lpush(alphaResultQueue, string(result1JSON))
+	require.NoError(t, err)
+
+	result2 := api.ResultMessage{
+		ID:      "beta-request",
+		Payload: `{"response": "beta result"}`,
+	}
+	result2JSON, _ := json.Marshal(result2)
+	_, err = mr.Lpush(betaResultQueue, string(result2JSON))
+	require.NoError(t, err)
+
+	// Each tenant should only receive their own result
+	ctxT, cancelT := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelT()
+
+	res1, err := tenant1Producer.GetResult(ctxT)
+	require.NoError(t, err)
+	require.NotNil(t, res1)
+	assert.Equal(t, "alpha-request", res1.ID)
+	assert.Contains(t, res1.Payload, "alpha result")
+
+	res2, err := tenant2Producer.GetResult(ctxT)
+	require.NoError(t, err)
+	require.NotNil(t, res2)
+	assert.Equal(t, "beta-request", res2.ID)
+	assert.Contains(t, res2.Payload, "beta result")
+}
+
+func TestProducerAuth(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	mr.RequireAuth("producer-secret")
+
+	t.Run("fails without password", func(t *testing.T) {
+		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+			RedisURL:        "redis://" + mr.Addr(),
+			ResultQueueName: "test-result-queue",
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "NOAUTH")
+	})
+
+	t.Run("succeeds with password in URL", func(t *testing.T) {
+		producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+			RedisURL:        "redis://default:producer-secret@" + mr.Addr(),
+			ResultQueueName: "test-result-queue",
+		})
+		assert.NoError(t, err)
+		defer producer.Close() //nolint:errcheck
+
+		ctx := context.Background()
+		req := &api.RequestMessage{
+			ID:       "auth-test",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(1 * time.Hour).Unix(),
+			Payload:  testPayload(map[string]interface{}{"test": true}),
+		}
+		err = producer.SubmitRequest(ctx, req)
+		assert.NoError(t, err)
+	})
+}
+
+func TestResultQueueNameRequired(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	_, err = NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:         "redis://" + mr.Addr(),
+		RequestQueueName: "test",
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ResultQueueName is required")
+}
+
+func TestContextCancellation(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	// Push a result so BRPop returns, but cancel context first to test cancellation.
+	// With miniredis, BRPop(ctx,0) blocks indefinitely if no data and ctx isn't pre-cancelled,
+	// so we pre-cancel the context to verify the error path.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := producer.GetResult(ctx)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+
+	_ = mr // keep linter happy
+}
+
+func TestMalformedResultHandling(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		_, err := mr.Lpush("test-result-queue", "invalid-json{{{")
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		result, err := producer.GetResult(ctx)
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), "unmarshal")
+	})
+
+	t.Run("missing id field", func(t *testing.T) {
+		invalidResult := map[string]interface{}{"payload": "data"}
+		resultJSON, _ := json.Marshal(invalidResult)
+		_, err := mr.Lpush("test-result-queue", string(resultJSON))
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		result, err := producer.GetResult(ctx)
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), "missing 'id' field")
+	})
+}
+
+func TestWithRedisClient(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close() //nolint:errcheck
+
+	t.Run("injected client is used, RedisURL not required", func(t *testing.T) {
+		p, err := NewRedisSortedSetProducer(
+			RedisSortedSetConfig{ResultQueueName: "test-result-queue"},
+			WithRedisClient(client),
+		)
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		req := &api.RequestMessage{
+			ID:       "inject-test",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(1 * time.Hour).Unix(),
+			Payload:  testPayload(map[string]interface{}{"test": true}),
+		}
+		err = p.SubmitRequest(ctx, req)
+		assert.NoError(t, err)
+	})
+
+	t.Run("fails with nil client", func(t *testing.T) {
+		_, err := NewRedisSortedSetProducer(
+			RedisSortedSetConfig{ResultQueueName: "test-result-queue"},
+			WithRedisClient(nil),
+		)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "client must not be nil")
+	})
+
+	t.Run("fails without RedisURL and without WithRedisClient", func(t *testing.T) {
+		_, err := NewRedisSortedSetProducer(RedisSortedSetConfig{ResultQueueName: "test-result-queue"})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "RedisURL is required when no RedisClient is provided")
+	})
+}
+
+func TestCloseOwnership(t *testing.T) {
+	t.Run("managed client is closed", func(t *testing.T) {
+		mr, err := miniredis.Run()
+		require.NoError(t, err)
+		defer mr.Close()
+
+		p, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+			RedisURL:        "redis://" + mr.Addr(),
+			ResultQueueName: "test-result-queue",
+		})
+		require.NoError(t, err)
+
+		err = p.Close()
+		assert.NoError(t, err)
+
+		// After Close, operations on the managed client should fail
+		err = p.SubmitRequest(context.Background(), &api.RequestMessage{
+			ID:       "post-close",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(1 * time.Hour).Unix(),
+			Payload:  testPayload(map[string]interface{}{}),
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("injected client is not closed", func(t *testing.T) {
+		mr, err := miniredis.Run()
+		require.NoError(t, err)
+		defer mr.Close()
+
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		defer client.Close() //nolint:errcheck
+
+		p, err := NewRedisSortedSetProducer(
+			RedisSortedSetConfig{ResultQueueName: "test-result-queue"},
+			WithRedisClient(client),
+		)
+		require.NoError(t, err)
+
+		err = p.Close()
+		assert.NoError(t, err)
+
+		// Injected client should still be usable after producer Close
+		err = client.Ping(context.Background()).Err()
+		assert.NoError(t, err)
+	})
+}
+
+func TestMultipleResultQueues(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	batchQueue := "results:tenant-acme:batch-jobs"
+	realtimeQueue := "results:tenant-acme:realtime"
+
+	prod1, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:        "redis://" + mr.Addr(),
+		ResultQueueName: batchQueue,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := prod1.Close(); err != nil {
+			t.Logf("failed to close prod1: %v", err)
+		}
+	})
+
+	prod2, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:        "redis://" + mr.Addr(),
+		ResultQueueName: realtimeQueue,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := prod2.Close(); err != nil {
+			t.Logf("failed to close prod2: %v", err)
+		}
+	})
+
+	assert.Equal(t, batchQueue, prod1.resultQueueName)
+	assert.Equal(t, realtimeQueue, prod2.resultQueueName)
+	assert.NotEqual(t, prod1.resultQueueName, prod2.resultQueueName)
+}
+
+func TestResultQueueNameNoNamespacing(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	shortName := "batch-jobs"
+	legacyNamespaced := "results:tenant-acme:batch-jobs"
+
+	producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:        "redis://" + mr.Addr(),
+		ResultQueueName: shortName,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := producer.Close(); err != nil {
+			t.Logf("failed to close producer: %v", err)
+		}
+	})
+
+	assert.Equal(t, shortName, producer.resultQueueName)
+	assert.NotEqual(t, legacyNamespaced, producer.resultQueueName,
+		"producer must not prepend results:{tenant}: to ResultQueueName")
+
+	ctx := context.Background()
+	req := &api.RequestMessage{
+		ID:       "short-name-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  testPayload(map[string]interface{}{"job": "batch"}),
+	}
+	require.NoError(t, producer.SubmitRequest(ctx, req))
+
+	members, err := mr.ZMembers("request-sortedset")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	assert.Equal(t, shortName, ir.ResultQueueName)
+	assert.NotEqual(t, legacyNamespaced, ir.ResultQueueName)
+
+	resultJSON, _ := json.Marshal(api.ResultMessage{
+		ID:      "short-name-request",
+		Payload: `{"status":"done"}`,
+	})
+	_, err = mr.Lpush(shortName, string(resultJSON))
+	require.NoError(t, err)
+
+	ctxT, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := producer.GetResult(ctxT)
+	require.NoError(t, err)
+	assert.Equal(t, "short-name-request", result.ID)
+}
+
+func TestComplexResultQueueKeyShape(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	complexKey := "llm-d-async:results:pool-a:$batch"
+
+	producer, err := NewRedisSortedSetProducer(RedisSortedSetConfig{
+		RedisURL:         "redis://" + mr.Addr(),
+		RequestQueueName: "llm-d-async:requests:pool-a",
+		ResultQueueName:  complexKey,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := producer.Close(); err != nil {
+			t.Logf("failed to close producer: %v", err)
+		}
+	})
+
+	assert.Equal(t, complexKey, producer.resultQueueName)
+
+	ctx := context.Background()
+	req := &api.RequestMessage{
+		ID:       "complex-key-request",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(1 * time.Hour).Unix(),
+		Payload:  testPayload(map[string]interface{}{"pool": "a"}),
+	}
+	require.NoError(t, producer.SubmitRequest(ctx, req))
+
+	members, err := mr.ZMembers("llm-d-async:requests:pool-a")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	assert.Equal(t, complexKey, ir.ResultQueueName)
+
+	resultJSON, _ := json.Marshal(api.ResultMessage{
+		ID:      "complex-key-request",
+		Payload: `{"response":"ok"}`,
+	})
+	_, err = mr.Lpush(complexKey, string(resultJSON))
+	require.NoError(t, err)
+
+	ctxT, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := producer.GetResult(ctxT)
+	require.NoError(t, err)
+	assert.Equal(t, "complex-key-request", result.ID)
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func TestRedisSortedSetProducer_StoresThePayloadInlineByDefault(t *testing.T) {
+	producer, mr := setupTestProducer(t)
+	ctx := context.Background()
+	payload := `{"model":"m","prompt":"a long prompt"}`
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix(), Payload: json.RawMessage(payload)}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Contains(t, members[0], `"payload":`+payload)
+	assert.NotContains(t, members[0], "payload_ref")
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	assert.Empty(t, ir.PayloadRef)
+	for _, key := range mr.Keys() {
+		assert.NotContains(t, key, "request-payload:")
+	}
+}
+
+func TestRedisSortedSetProducer_StoresPayloadApartFromTheQueuedEnvelope(t *testing.T) {
+	producer, mr := setupTestProducer(t, WithPayloadKeys())
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Hour)
+	payload := `{"model":"m","prompt":"a long prompt"}`
+
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: deadline.Unix(), Payload: json.RawMessage(payload)}))
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "r1", Created: time.Now().Unix(), Deadline: deadline.Unix(), Payload: json.RawMessage(`{"prompt":"second"}`)}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 2)
+	refs := map[string]bool{}
+	for _, member := range members {
+		assert.NotContains(t, member, "prompt", "the queued member does not carry the payload")
+		var ir api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &ir))
+		require.NotEmpty(t, ir.RequestToken)
+		assert.Equal(t, api.RequestPayloadKey("r1", ir.RequestToken), ir.PayloadRef)
+
+		stored, err := mr.Get(ir.PayloadRef)
+		require.NoError(t, err, "payload key %q", ir.PayloadRef)
+		ttl := mr.TTL(ir.PayloadRef)
+		assert.Greater(t, ttl, time.Until(deadline), "the payload outlives the deadline")
+		assert.LessOrEqual(t, ttl, time.Until(deadline)+payloadTTLGrace+time.Second)
+
+		var joined api.InternalRequest
+		require.NoError(t, json.Unmarshal([]byte(member), &joined))
+		require.NoError(t, api.AttachPayload(&joined, json.RawMessage(stored)))
+		refs[ir.PayloadRef] = true
+		if string(joined.PublicRequest.ReqPayload()) != payload {
+			assert.JSONEq(t, `{"prompt":"second"}`, string(joined.PublicRequest.ReqPayload()))
+		}
+	}
+	assert.Len(t, refs, 2, "each generation of a reused ID gets its own payload key")
+}
+
+func TestRedisSortedSetProducer_StoresAnEmptyPayload(t *testing.T) {
+	producer, mr := setupTestProducer(t, WithPayloadKeys())
+	ctx := context.Background()
+	require.NoError(t, producer.SubmitRequest(ctx, &api.RequestMessage{ID: "empty", Created: time.Now().Unix(), Deadline: time.Now().Add(time.Hour).Unix()}))
+
+	members, err := mr.ZMembers("test-request-queue")
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	var ir api.InternalRequest
+	require.NoError(t, json.Unmarshal([]byte(members[0]), &ir))
+	stored, err := mr.Get(ir.PayloadRef)
+	require.NoError(t, err)
+	assert.Empty(t, stored)
+}

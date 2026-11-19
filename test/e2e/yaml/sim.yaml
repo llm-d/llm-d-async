@@ -1,0 +1,27 @@
+# ClusterIP service for EPP to scrape metrics from sim pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-sim
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: llm-sim
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# NodePort service to allow test code to call /fake_metrics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-sim-admin
+  namespace: ${NAMESPACE}
+spec:
+  type: NodePort
+  selector:
+    app: llm-sim
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30490

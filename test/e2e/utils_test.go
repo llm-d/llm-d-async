@@ -1,0 +1,422 @@
+package e2e
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
+	promapi "github.com/prometheus/client_golang/api"
+	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
+)
+
+const (
+	integrationRequestQueue = "integration-request-sortedset"
+	integrationResultQueue  = "integration-result-list"
+
+	saturationRequestQueue = "saturation-request-sortedset"
+	saturationResultQueue  = "saturation-result-list"
+
+	redisGateRequestQueue = "redis-gate-request-sortedset"
+	redisGateResultQueue  = "redis-gate-result-list"
+	dispatchGateBudgetKey = "dispatch-gate-budget"
+
+	oldDispatcherRequestQueue = "old-dispatcher-request-sortedset"
+	oldDispatcherResultQueue  = "old-dispatcher-result-list"
+
+	endpointScrapeRequestQueue = "endpoint-scrape-request-sortedset"
+	endpointScrapeResultQueue  = "endpoint-scrape-result-list"
+
+	shortDrainRequestQueue = "short-drain-request-sortedset"
+	shortDrainResultQueue  = "short-drain-result-list"
+
+	tierPriorityInteractiveQueue = "tier-priority-interactive"
+	tierPriorityAsyncQueue       = "tier-priority-async"
+	tierPriorityResultQueue      = "tier-priority-result-list"
+
+	benchmarkRequestQueue = "benchmark-request-sortedset"
+	benchmarkResultQueue  = "benchmark-result-list"
+
+	benchmarkPoolGateRequestQueue = "benchmark-pool-gate-request-sortedset"
+	benchmarkPoolGateResultQueue  = "benchmark-pool-gate-result-list"
+
+	pubsubProjectID    = "test-project"
+	pubsubRequestTopic = "pubsub-e2e-request-topic"
+	pubsubRequestSub   = "pubsub-e2e-request-sub"
+	pubsubResultTopic  = "pubsub-e2e-result-topic"
+	pubsubResultSub    = "pubsub-e2e-result-sub"
+
+	pubsubBenchRequestTopic = "pubsub-bench-request-topic"
+	pubsubBenchRequestSub   = "pubsub-bench-request-sub"
+	pubsubBenchResultTopic  = "pubsub-bench-result-topic"
+	pubsubBenchResultSub    = "pubsub-bench-result-sub"
+)
+
+var httpClient = &http.Client{Timeout: 10 * time.Second}
+
+func enqueueMessage(ctx context.Context, rdb *redis.Client, queue string, msg api.RequestMessage) {
+	ir := api.NewInternalRequest(api.InternalRouting{}, &msg)
+	data, err := json.Marshal(ir)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	err = rdb.ZAdd(ctx, queue, redis.Z{
+		Score:  float64(msg.Deadline),
+		Member: string(data),
+	}).Err()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
+func enqueueMessageWithRouting(ctx context.Context, rdb *redis.Client, queue string, msg api.RequestMessage, routing api.InternalRouting) {
+	ir := api.NewInternalRequest(routing, &msg)
+	data, err := json.Marshal(ir)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	err = rdb.ZAdd(ctx, queue, redis.Z{
+		Score:  float64(msg.Deadline),
+		Member: string(data),
+	}).Err()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
+// enqueueMessages adds all messages to the sorted set in a single Redis
+// pipeline so they become visible atomically. This prevents the processor
+// from dequeuing early messages before the rest are enqueued.
+func enqueueMessages(ctx context.Context, rdb *redis.Client, queue string, msgs ...api.RequestMessage) {
+	pipe := rdb.Pipeline()
+	for _, msg := range msgs {
+		ir := api.NewInternalRequest(api.InternalRouting{}, &msg)
+		data, err := json.Marshal(ir)
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+		pipe.ZAdd(ctx, queue, redis.Z{
+			Score:  float64(msg.Deadline),
+			Member: string(data),
+		})
+	}
+	_, err := pipe.Exec(ctx)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
+func getResultCount(ctx context.Context, rdb *redis.Client, queue string) int64 {
+	n, err := rdb.LLen(ctx, queue).Result()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	return n
+}
+
+func popResult(ctx context.Context, rdb *redis.Client, queue string) *api.ResultMessage {
+	val, err := rdb.RPop(ctx, queue).Result()
+	if err == redis.Nil {
+		return nil
+	}
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	var msg api.ResultMessage
+	gomega.ExpectWithOffset(1, json.Unmarshal([]byte(val), &msg)).To(gomega.Succeed())
+	return &msg
+}
+
+func enqueuePubSubMessage(ctx context.Context, client *pubsub.Client, topic string, msg api.RequestMessage) {
+	data, err := json.Marshal(msg)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	pubMsg := &pubsub.Message{
+		Data: data,
+	}
+	if msg.Metadata != nil {
+		pubMsg.Attributes = msg.Metadata
+	}
+	res := client.Publisher(topic).Publish(ctx, pubMsg)
+	_, err = res.Get(ctx)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
+// enqueuePubSubMessages enqueues multiple messages to a PubSub topic. It publishes
+// all messages concurrently before waiting on publish results, allowing the SDK's
+// internal bundler to batch requests into efficient RPCs for bulk benchmarks (e.g. 5,000 msgs)
+// without blocking sequentially on each message round-trip.
+func enqueuePubSubMessages(ctx context.Context, client *pubsub.Client, topic string, msgs ...api.RequestMessage) {
+	publisher := client.Publisher(topic)
+	results := make([]*pubsub.PublishResult, len(msgs))
+	for i, msg := range msgs {
+		data, err := json.Marshal(msg)
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+		pubMsg := &pubsub.Message{
+			Data: data,
+		}
+		if msg.Metadata != nil {
+			pubMsg.Attributes = msg.Metadata
+		}
+		results[i] = publisher.Publish(ctx, pubMsg)
+	}
+	for _, res := range results {
+		_, err := res.Get(ctx)
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	}
+}
+
+func popPubSubResult(ctx context.Context, client *pubsub.Client, subName string) *api.ResultMessage {
+	sub := client.Subscriber(subName)
+	sub.ReceiveSettings.MaxOutstandingMessages = 1
+	sub.ReceiveSettings.NumGoroutines = 1
+
+	cctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+
+	var result *api.ResultMessage
+	err := sub.Receive(cctx, func(rctx context.Context, msg *pubsub.Message) {
+		if result == nil {
+			var r api.ResultMessage
+			if err := json.Unmarshal(msg.Data, &r); err != nil {
+				ginkgo.GinkgoLogr.V(1).Info("popPubSubResult unmarshal error", "error", err, "sub", subName)
+			} else {
+				result = &r
+			}
+			msg.Ack()
+			cancel()
+			return
+		}
+		msg.Nack()
+	})
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		ginkgo.GinkgoLogr.V(1).Info("popPubSubResult receive error", "error", err, "sub", subName)
+	}
+	return result
+}
+
+func recreatePubSubSubscription(ctx context.Context, client *pubsub.Client, projectID, subID, topicID string) {
+	subName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)
+	err := client.SubscriptionAdminClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subName})
+	if err != nil && status.Code(err) != codes.NotFound {
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	}
+	_, err = client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  subName,
+		Topic: topicName,
+	})
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+}
+
+func makeRequestMessage(id string, deadlineOffset time.Duration) api.RequestMessage {
+	deadline := time.Now().Add(deadlineOffset)
+	return api.RequestMessage{
+		ID:       id,
+		Created:  time.Now().Unix(),
+		Deadline: deadline.Unix(),
+		Payload:  testPayload(map[string]any{"model": id, "prompt": "test"}),
+	}
+}
+
+// setSimWaitingRequests drives the vLLM simulator's waiting request count.
+// EPP computes per-pod saturation as Max(WaitingQueue/QueueDepthThreshold, KVCache/KVCacheThreshold).
+// The default QueueDepthThreshold is 5, so waitingRequests >= 5 saturates the pod.
+func setSimWaitingRequests(simAdminURL string, waitingRequests int) {
+	body, _ := json.Marshal(map[string]any{
+		"waiting-requests": waitingRequests,
+	})
+	gomega.EventuallyWithOffset(1, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, simAdminURL+"/fake_metrics", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close() //nolint:errcheck
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+		return nil
+	}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed())
+}
+
+// sendProbeRequest sends a minimal inference request through Envoy → EPP to trigger
+// the EPP's flow control admission controller, which records the saturation metric.
+func sendProbeRequest(envoyURL string) {
+	body := []byte(`{"model":"test-model","prompt":"probe"}`)
+	req, err := http.NewRequest(http.MethodPost, envoyURL+"/v1/completions", bytes.NewReader(body))
+	if err != nil {
+		ginkgo.GinkgoLogr.V(1).Info("probe request creation failed", "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		ginkgo.GinkgoLogr.V(1).Info("probe request failed", "error", err)
+		return
+	}
+	resp.Body.Close() //nolint:errcheck
+}
+
+// queryProm runs a PromQL instant query and returns the first result's scalar
+// value. Returns NaN if the query fails or returns no results; callers must
+// check with math.IsNaN. Do NOT use a numeric sentinel like -1: budget PromQL
+// (1 - queue_size/capacity) legitimately returns negative values when queue_size
+// exceeds capacity.
+func queryProm(promURL, query string) float64 {
+	resp, err := httpClient.Get(promURL + "/api/v1/query?query=" + url.QueryEscape(query))
+	if err != nil {
+		ginkgo.GinkgoLogr.V(1).Info("prom query failed", "error", err, "query", query)
+		return math.NaN()
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		ginkgo.GinkgoLogr.V(1).Info("prom query returned non-200", "status", resp.StatusCode, "query", query)
+		return math.NaN()
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Value [2]any `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return math.NaN()
+	}
+	if result.Status != "success" || len(result.Data.Result) == 0 {
+		return math.NaN()
+	}
+	v, err := strconv.ParseFloat(result.Data.Result[0].Value[1].(string), 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return v
+}
+
+// budgetPromQL is the same PromQL the budget gate's primary source uses
+// (EPP flow control queue_size). The multiplier (* 1) is max_concurrency and
+// must match the budget processor's gate-params in llm-d-async.yaml.
+// We use max_concurrency=1 so a single queued request in EPP's admission
+// layer is enough to drive the budget to zero.
+func budgetPromQL(promURL string) string {
+	source, err := flowcontrol.NewFlowControlQueueSizePromQL(promapi.Config{Address: promURL}, "e2e-pool", 1, "")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	return source.Expr()
+}
+
+// waitForBudget polls Prometheus using the same PromQL the budget gate uses.
+// It sends probe requests through Envoy to trigger EPP metric recording, then
+// queries the primary budget PromQL. pred receives the raw budget value D
+// (before baseline subtraction — the gate subtracts baseline internally).
+func waitForBudget(promURL, envoyURL string, pred func(float64) bool) {
+	gomega.EventuallyWithOffset(1, func() bool {
+		sendProbeRequest(envoyURL)
+		v := queryProm(promURL, budgetPromQL(promURL))
+		return !math.IsNaN(v) && pred(v)
+	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for budget to satisfy condition")
+}
+
+// waitForSaturation polls Prometheus until pred is satisfied or the timeout elapses.
+// It sends probe requests through Envoy on each poll to trigger EPP's flow control
+// admission controller, which records the saturation metric.
+func waitForSaturation(promURL, envoyURL string, pred func(float64) bool) {
+	gomega.EventuallyWithOffset(1, func() bool {
+		sendProbeRequest(envoyURL)
+		v := queryProm(promURL, `llm_d_epp_flow_control_pool_saturation{inference_pool="e2e-pool"}`)
+		return !math.IsNaN(v) && pred(v)
+	}, 60*time.Second, 2*time.Second).Should(gomega.BeTrue(), "waiting for saturation to satisfy condition")
+}
+
+// floodProbes continuously sends concurrent inference requests through Envoy
+// to fill EPP's flow control admission queue. When EPP is saturated, these
+// requests queue up, driving llm_d_epp_flow_control_queue_size > 0.
+// Uses a long HTTP timeout so throttled requests stay in EPP's queue long
+// enough for Prometheus to scrape the non-zero queue_size.
+// Call the returned cancel function to stop the flood.
+// A single shared Transport with MaxConnsPerHost is used to cap the number of
+// TCP connections and avoid exhausting ephemeral ports, which would break
+// subsequent tests that need to connect to other services.
+func floodProbes(envoyURL string, concurrency int) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	tr := &http.Transport{
+		MaxConnsPerHost: concurrency,
+	}
+	client := &http.Client{
+		Timeout:   120 * time.Second,
+		Transport: tr,
+	}
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					body := []byte(`{"model":"test-model","prompt":"probe"}`)
+					req, _ := http.NewRequestWithContext(ctx, http.MethodPost, envoyURL+"/v1/completions", bytes.NewReader(body))
+					req.Header.Set("Content-Type", "application/json")
+					resp, err := client.Do(req)
+					if err == nil {
+						resp.Body.Close() //nolint:errcheck
+					}
+				}
+			}
+		}()
+	}
+	return func() {
+		cancel()
+		tr.CloseIdleConnections()
+	}
+}
+
+// setEnvoyFaultAbort configures Envoy's fault injection filter via the admin
+// runtime API. percent is 0–100 (percentage of requests that return 503).
+func setEnvoyFaultAbort(envoyAdminURL string, percent int) {
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		body := fmt.Sprintf("fault.http.abort.abort_percent=%d", percent)
+		req, err := http.NewRequest(http.MethodPost, envoyAdminURL+"/runtime_modify?"+body, nil)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		resp, err := httpClient.Do(req)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
+}
+
+// setEnvoyFaultDelay configures Envoy's fault injection delay via the admin
+// runtime API. percent is 0–100 (percentage of requests delayed by 60s,
+// the duration configured in the static Envoy config).
+func setEnvoyFaultDelay(envoyAdminURL string, percent int) {
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		body := fmt.Sprintf("fault.http.delay.fixed_delay_percent=%d", percent)
+		req, err := http.NewRequest(http.MethodPost, envoyAdminURL+"/runtime_modify?"+body, nil)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		resp, err := httpClient.Do(req)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	}, 30*time.Second, 2*time.Second).Should(gomega.Succeed())
+}
+
+func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string) {
+	gomega.ExpectWithOffset(1, rdb.Set(ctx, dispatchGateBudgetKey, budget, 0).Err()).NotTo(gomega.HaveOccurred())
+}
+
+func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
+	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
+}
+
+func testPayload(m map[string]any) json.RawMessage {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}

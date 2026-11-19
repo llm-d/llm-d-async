@@ -1,0 +1,29 @@
+[default.extend-words]
+k8s = "k8s"
+KServe = "KServe"
+vLLM = "vLLM"
+IST = "IST"
+# Go convention: `typ` is a common identifier (since `type` is a keyword);
+typ = "typ"
+# `unmarshaling` is the standard Go/American spelling (typos suggests British).
+unmarshaling = "unmarshaling"
+# `mis-` is a valid English prefix meaning "wrongly/badly" (e.g. mis-sized, mis-configured);
+# the hyphen causes typos to tokenize `mis` as a standalone word and flag it as `miss`.
+mis = "mis"
+
+# `ZADDed` is the past tense of the Redis ZADD command used as a verb in comments;
+ZADDed = "ZADDed"
+
+# typos sees the trailing `Ded` token and flags it as `Dead`.
+Ded = "Ded"
+
+[files]
+extend-exclude = [
+    "*.png",
+    "*.jpg",
+    "deploy/",
+    "go.mod",
+    "go.sum",
+    "build/",
+    "testdata/"
+]

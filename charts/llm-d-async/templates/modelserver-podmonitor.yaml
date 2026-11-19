@@ -1,0 +1,39 @@
+{{- if .Values.ap.modelServerMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "llm-d-async.fullname" . }}-modelserver
+  labels:
+    {{- include "llm-d-async.labels" . | nindent 4 }}
+    {{- with .Values.ap.modelServerMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml .Values.ap.modelServerMonitor.selector | nindent 6 }}
+  {{- with .Values.ap.modelServerMonitor.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  podMetricsEndpoints:
+    - port: {{ .Values.ap.modelServerMonitor.port }}
+      path: {{ .Values.ap.modelServerMonitor.path }}
+      interval: {{ .Values.ap.modelServerMonitor.interval }}
+      relabelings:
+        # vLLM does not natively emit the inference_pool label that
+        # prometheus-budget/prometheus-saturation gates filter on.
+        # This relabeling carries it from the pod label into scraped metrics.
+        - sourceLabels: [__meta_kubernetes_pod_label_inference_pool]
+          targetLabel: inference_pool
+        {{- with .Values.ap.modelServerMonitor.inferencePool }}
+        # The llm-d guide overlays label decode pods with llm-d.ai/* only, so the
+        # rule above yields an empty label and the gate queries match nothing.
+        # Write the configured pool name in that case. A pod label, where one
+        # exists, is left untouched.
+        - sourceLabels: [inference_pool]
+          regex: ^$
+          targetLabel: inference_pool
+          replacement: {{ . | quote }}
+        {{- end }}
+{{- end }}
