@@ -223,6 +223,12 @@ func TestValidateWithContext_ObjectPath(t *testing.T) {
 		{"virtual-hosted root object", withTarget("my-bucket.storage.googleapis.com/audio.wav"), false},
 		{"virtual-hosted nested object", withTarget("my-bucket.storage.googleapis.com/folder/audio.wav"), false},
 		{"virtual-hosted without object", withTarget("my-bucket.storage.googleapis.com/"), true},
+		{"path-style without bucket name", withTarget("storage.googleapis.com//audio.wav"), true},
+		{"path-style bucket without object", withTarget("storage.googleapis.com/bucket/"), true},
+		{"path-style object name starts with slash", withTarget("storage.googleapis.com/bucket/%2Faudio.wav"), false},
+		{"path-style object named slash", withTarget("storage.googleapis.com/bucket/%2F"), false},
+		{"virtual-hosted object name starts with slash", withTarget("my-bucket.storage.googleapis.com/%2Faudio.wav"), false},
+		{"virtual-hosted object named slash", withTarget("my-bucket.storage.googleapis.com/%2F"), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

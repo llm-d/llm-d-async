@@ -352,7 +352,9 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 							}
 							return
 						}
-						if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+						// reqCtx also ends at the per-attempt timeout, which is
+						// retryable. Only a passed request deadline is terminal.
+						if dline := msg.PublicRequest.ReqDeadline(); dline > 0 && time.Now().Unix() >= dline {
 							metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 							select {
 							case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
@@ -368,7 +370,11 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 							}
 							// Wait on requestCtx, not reqCtx. The per-attempt timeout in
 							// reqCtx must not drop a retry that is waiting for room.
-							retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{})
+							if retry, unsent := retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{}); unsent {
+								// Shutdown started while the retry waited for room.
+								// retryWorker outlives workers, so hand it over anyway.
+								retryChannel <- retry
+							}
 							return
 						}
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
@@ -572,9 +578,13 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 // lastResp carries the most recent HTTP response (if any) so that when retries
 // are exhausted the actual HTTP status/body is surfaced rather than a generic
 // "deadline exceeded" non-HTTP error.
-func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastResp asyncapi.InferenceResponse) {
+//
+// If ctx is cancelled before the retry is sent, retryMessage gives up and
+// returns that retry with unsent set to true. Callers whose retry writer
+// outlives ctx can then send it themselves. Otherwise unsent is false.
+func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastResp asyncapi.InferenceResponse) (retry pipeline.RetryMessage, unsent bool) {
 	if msg.PublicRequest == nil {
-		return
+		return pipeline.RetryMessage{}, false
 	}
 	queueID := msg.QueueID
 	queueName := msg.RequestQueueName
@@ -586,7 +596,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 		case resultChannel <- deadlineExhaustedResult(msg, lastResp):
 		case <-ctx.Done():
 		}
-		return
+		return pipeline.RetryMessage{}, false
 	}
 
 	finalDuration := expBackoffDuration(msg.RetryCount+1, int(secondsToDeadline))
@@ -609,12 +619,15 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 
 	msg.RetryCount++
 	metrics.RecordRetry(queueID, queueName, msg.WorkerPoolID)
-	select {
-	case retryChannel <- pipeline.RetryMessage{
+	retry = pipeline.RetryMessage{
 		EmbelishedRequestMessage: msg,
 		BackoffDurationSeconds:   finalDuration,
-	}:
+	}
+	select {
+	case retryChannel <- retry:
+		return retry, false
 	case <-ctx.Done():
+		return retry, true
 	}
 }
 

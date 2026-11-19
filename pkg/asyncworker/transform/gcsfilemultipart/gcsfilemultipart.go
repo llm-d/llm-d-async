@@ -310,13 +310,16 @@ func (p *Plugin) signedURL(signedURL string, deadline time.Time) (*url.URL, time
 // Virtual-hosted URLs (BUCKET.storage.googleapis.com/OBJECT) carry the bucket in
 // the hostname, so their path only needs the object. Other URLs are path-style
 // (HOST/BUCKET/OBJECT) and need both.
+//
+// Only the leading slash of the path is removed. Object names may themselves
+// start or end with "/" (for example "%2Faudio.wav"), so the rest is kept.
 func identifiesObject(parsedURL *url.URL) bool {
-	objectPath := strings.Trim(parsedURL.Path, "/")
+	objectPath := strings.TrimPrefix(parsedURL.Path, "/")
 	if strings.HasSuffix(strings.ToLower(parsedURL.Hostname()), virtualHostedSuffix) {
 		return objectPath != ""
 	}
-	segments := strings.Split(objectPath, "/")
-	return len(segments) >= 2 && segments[0] != "" && segments[1] != ""
+	bucket, object, found := strings.Cut(objectPath, "/")
+	return found && bucket != "" && object != ""
 }
 
 func (p *Plugin) allowedURL(parsedURL *url.URL) error {
