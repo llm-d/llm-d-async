@@ -47,7 +47,7 @@ Rewrites an audio JSON request into `multipart/form-data` with the actual GCS ob
 
 - **Endpoints:** `/v1/audio/transcriptions` and `/v1/audio/translations`. Other request URLs use the default JSON path unchanged.
 - **Activation:** a supported request URL and a non-empty `gcs_uri`.
-- **Preflight:** accepts only V4-signed HTTPS URLs on an `allowedHosts` hostname and with an expiry later than the request deadline. Unsigned URLs, `gs://` URIs, unapproved hosts, and bad signature formats fail as invalid requests.
+- **Preflight:** accepts V4-signed HTTPS URLs using `GOOG4-RSA-SHA256` or `GOOG4-HMAC-SHA256` on an `allowedHosts` hostname and with an expiry later than the request deadline. RSA signatures must be non-empty hex; HMAC-SHA256 signatures must be 32-byte hex. Unsigned URLs, `gs://` URIs, unapproved hosts, and bad signature formats fail as invalid requests.
 - **Transform:** performs a context-aware `GET` of the signed URL, reads at most `maxFileBytes`, writes those exact bytes to the `file` part, copies the remaining JSON fields as form fields, and removes `gcs_uri`.
 - **Errors:** missing objects and other 4xx responses, except 429, are invalid requests. 429, 5xx, timeouts, and connection failures are retryable. Cancellation and shutdown stop the download.
 - **Security:** redirects to unapproved hosts are rejected, the signed URL is not logged or copied into the multipart body, and no GCS credentials are added to the worker.

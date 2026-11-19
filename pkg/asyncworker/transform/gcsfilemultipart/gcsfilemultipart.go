@@ -26,8 +26,11 @@ import (
 const PluginType = "gcs_file_multipart"
 
 const (
-	gcsURIField = "gcs_uri"
-	fileField   = "file"
+	gcsURIField              = "gcs_uri"
+	fileField                = "file"
+	gcsV4RSASHA256           = "GOOG4-RSA-SHA256"
+	gcsV4HMACSHA256          = "GOOG4-HMAC-SHA256"
+	hmacSHA256SignatureBytes = 32
 )
 
 var (
@@ -271,17 +274,19 @@ func (p *Plugin) signedURL(signedURL string, deadline time.Time) (*url.URL, time
 	}
 
 	query := parsedURL.Query()
-	if value(query, "X-Goog-Algorithm") != "GOOG4-RSA-SHA256" ||
+	algorithm := value(query, "X-Goog-Algorithm")
+	if (algorithm != gcsV4RSASHA256 && algorithm != gcsV4HMACSHA256) ||
 		value(query, "X-Goog-Credential") == "" ||
 		value(query, "X-Goog-Date") == "" ||
 		value(query, "X-Goog-Expires") == "" {
 		return nil, time.Time{}, invalidf("gcs_uri is not a signed V4 URL")
 	}
 	signature := value(query, "X-Goog-Signature")
-	if len(signature) != 64 {
+	if signature == "" || len(signature)%2 != 0 {
 		return nil, time.Time{}, invalidf("gcs_uri has an invalid signature format")
 	}
-	if _, err := hex.DecodeString(signature); err != nil {
+	decodedSignature, err := hex.DecodeString(signature)
+	if err != nil || (algorithm == gcsV4HMACSHA256 && len(decodedSignature) != hmacSHA256SignatureBytes) {
 		return nil, time.Time{}, invalidf("gcs_uri has an invalid signature format")
 	}
 

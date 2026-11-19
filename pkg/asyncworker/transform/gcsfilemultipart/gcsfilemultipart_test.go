@@ -41,10 +41,14 @@ func newPlugin(t *testing.T, parameters string, transport http.RoundTripper) *Pl
 }
 
 func v4SignedURL(expiry time.Time) string {
+	return v4SignedURLWithSignature(expiry, "GOOG4-RSA-SHA256", strings.Repeat("ab", 32))
+}
+
+func v4SignedURLWithSignature(expiry time.Time, algorithm, signature string) string {
 	start := expiry.Add(-time.Hour).UTC()
 	return fmt.Sprintf(
-		"https://storage.googleapis.com/bucket/audio.wav?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=test%%2F20260618%%2Fauto%%2Fstorage%%2Fgoog4_request&X-Goog-Date=%s&X-Goog-Expires=%d&X-Goog-Signature=%s",
-		start.Format("20060102T150405Z"), int(expiry.Sub(start).Seconds()), strings.Repeat("ab", 32),
+		"https://storage.googleapis.com/bucket/audio.wav?X-Goog-Algorithm=%s&X-Goog-Credential=test%%2F20260618%%2Fauto%%2Fstorage%%2Fgoog4_request&X-Goog-Date=%s&X-Goog-Expires=%d&X-Goog-Signature=%s",
+		algorithm, start.Format("20060102T150405Z"), int(expiry.Sub(start).Seconds()), signature,
 	)
 }
 
@@ -199,6 +203,41 @@ func TestValidateWithContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateWithContext_AcceptsV4SignatureAlgorithms(t *testing.T) {
+	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, nil)
+	deadline := time.Now().Add(time.Hour).Unix()
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "RSA 2048-bit signature",
+			url:  v4SignedURLWithSignature(time.Now().Add(2*time.Hour), "GOOG4-RSA-SHA256", strings.Repeat("ab", 256)),
+		},
+		{
+			name: "HMAC-SHA256 signature",
+			url:  v4SignedURLWithSignature(time.Now().Add(2*time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("cd", 32)),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"model":"whisper","gcs_uri":%q}`, tc.url))
+			if err := p.ValidateWithContext(payload, nil, "https://gateway.example/v1/audio/transcriptions", deadline); err != nil {
+				t.Fatalf("ValidateWithContext: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateWithContext_RejectsInvalidHMACSignatureLength(t *testing.T) {
+	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, nil)
+	payload := []byte(fmt.Sprintf(`{"model":"whisper","gcs_uri":%q}`, v4SignedURLWithSignature(
+		time.Now().Add(2*time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("ab", 256))))
+
+	err := p.ValidateWithContext(payload, nil, "https://gateway.example/v1/audio/transcriptions", time.Now().Add(time.Hour).Unix())
+	assertInvalidRequest(t, err)
 }
 
 func TestTransformWithContext_NotHandledForUnrelatedEndpoint(t *testing.T) {
