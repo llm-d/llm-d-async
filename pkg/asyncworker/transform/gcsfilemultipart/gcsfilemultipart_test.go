@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -205,6 +206,59 @@ func TestValidateWithContext(t *testing.T) {
 	}
 }
 
+func TestValidateWithContext_ObjectPath(t *testing.T) {
+	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com","my-bucket.storage.googleapis.com"],"maxFileBytes":1024}`, nil)
+	deadline := time.Now().Add(time.Hour).Unix()
+	signed := v4SignedURL(time.Now().Add(2 * time.Hour))
+	withTarget := func(target string) string {
+		return strings.Replace(signed, "storage.googleapis.com/bucket/audio.wav", target, 1)
+	}
+	tests := []struct {
+		name      string
+		url       string
+		wantError bool
+	}{
+		{"path-style bucket and object", signed, false},
+		{"path-style without object", withTarget("storage.googleapis.com/audio.wav"), true},
+		{"virtual-hosted root object", withTarget("my-bucket.storage.googleapis.com/audio.wav"), false},
+		{"virtual-hosted nested object", withTarget("my-bucket.storage.googleapis.com/folder/audio.wav"), false},
+		{"virtual-hosted without object", withTarget("my-bucket.storage.googleapis.com/"), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"model":"whisper","gcs_uri":%q}`, tc.url))
+			err := p.ValidateWithContext(payload, nil, "https://gateway.example/v1/audio/transcriptions", deadline)
+			if tc.wantError {
+				assertInvalidRequest(t, err)
+				return
+			}
+			if err != nil {
+				t.Errorf("ValidateWithContext: %v", err)
+			}
+		})
+	}
+}
+
+func TestTransformWithContext_DownloadsVirtualHostedURL(t *testing.T) {
+	signedURL := strings.Replace(v4SignedURL(time.Now().Add(time.Hour)), "storage.googleapis.com/bucket/audio.wav", "my-bucket.storage.googleapis.com/audio.wav", 1)
+	p := newPlugin(t, `{"allowedHosts":["my-bucket.storage.googleapis.com"],"maxFileBytes":1024}`, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "my-bucket.storage.googleapis.com" || req.URL.Path != "/audio.wav" {
+			t.Errorf("download URL = %s%s, want my-bucket.storage.googleapis.com/audio.wav", req.URL.Host, req.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("audio")), Header: make(http.Header)}, nil
+	}))
+	payload := []byte(fmt.Sprintf(`{"model":"whisper","gcs_uri":%q}`, signedURL))
+
+	body, contentType, handled, err := p.TransformWithContext(context.Background(), payload, nil, "https://gateway.example/v1/audio/transcriptions")
+	if err != nil || !handled {
+		t.Fatalf("TransformWithContext = handled %v, err %v; want true, nil", handled, err)
+	}
+	_, files, filenames := parseParts(t, contentType, body)
+	if string(files["file"]) != "audio" || filenames["file"] != "audio.wav" {
+		t.Errorf("file part = %q named %q, want %q named %q", files["file"], filenames["file"], "audio", "audio.wav")
+	}
+}
+
 func TestValidateWithContext_AcceptsV4SignatureAlgorithms(t *testing.T) {
 	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, nil)
 	deadline := time.Now().Add(time.Hour).Unix()
@@ -321,7 +375,7 @@ func TestTransformWithContext_HTTPStatuses(t *testing.T) {
 func TestTransformWithContext_ConnectionFailureIsRetryable(t *testing.T) {
 	signedURL := v4SignedURL(time.Now().Add(time.Hour))
 	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, &url.Error{Op: "Get", URL: signedURL, Err: errors.New("connection refused")}
+		return nil, &url.Error{Op: "Get", URL: signedURL, Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}}
 	}))
 	payload := []byte(fmt.Sprintf(`{"gcs_uri":%q}`, signedURL))
 
@@ -335,6 +389,34 @@ func TestTransformWithContext_ConnectionFailureIsRetryable(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), signedURL) || strings.Contains(err.Error(), "X-Goog-Signature") {
 		t.Error("connection failure exposes the signed URL")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error = %v, want the network cause to be kept", err)
+	}
+}
+
+// A redirect with a malformed Location makes the HTTP client copy that header
+// into plain error text. The error must not carry any part of it.
+func TestTransformWithContext_MalformedRedirectDoesNotExposeSignature(t *testing.T) {
+	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Location", "https://storage.googleapis.com/bucket/other.wav?X-Goog-Signature=deadbeef#%zz")
+		return &http.Response{StatusCode: http.StatusFound, Header: header, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}))
+	payload := []byte(fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(time.Now().Add(time.Hour))))
+
+	_, _, handled, err := p.TransformWithContext(context.Background(), payload, nil, "https://gateway.example/v1/audio/transcriptions")
+	if handled {
+		t.Error("handled = true, want false")
+	}
+	var clientErr *asyncapi.ClientError
+	if !errors.As(err, &clientErr) || clientErr.ErrorCategory != asyncapi.ErrCategoryServer {
+		t.Fatalf("error = %v, want SERVER_ERROR", err)
+	}
+	for _, leaked := range []string{"X-Goog-Signature", "deadbeef", "other.wav", "Location"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("error %q exposes %q", err.Error(), leaked)
+		}
 	}
 }
 

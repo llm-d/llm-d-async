@@ -257,6 +257,43 @@ func TestWorker_TransformRetryableErrorRequeues(t *testing.T) {
 	}
 }
 
+// TestWorker_TransformRetryOutlivesAttemptTimeout checks that a retry waiting
+// for room in a full retry channel is not dropped when the per-attempt timeout
+// expires. Only worker shutdown may stop that wait.
+func TestWorker_TransformRetryOutlivesAttemptTimeout(t *testing.T) {
+	httpClient := NewTestClient(func(*http.Request) (*http.Response, error) {
+		t.Error("inference must not be called after a retryable transform error")
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("OK")), Header: make(http.Header)}, nil
+	})
+	chain := transform.NewChain([]transform.RequestTransform{&testTransform{
+		contextErr: &asyncapi.ClientError{ErrorCategory: asyncapi.ErrCategoryServer, Message: "audio download failed"},
+	}})
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage) // unbuffered: the retry send blocks until the test reads
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attemptTimeout := 50 * time.Millisecond
+	go Worker(ctx, ctx, pipeline.Characteristics{}, NewHTTPInferenceClient(httpClient), requestChannel, retryChannel, resultChannel, attemptTimeout, chain)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID: "transform-retry-blocked", Created: time.Now().Unix(), Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload: testPayload(map[string]any{"model": "whisper"}),
+	}, "http://localhost/v1/audio/transcriptions", nil)
+	time.Sleep(4 * attemptTimeout)
+
+	select {
+	case retry := <-retryChannel:
+		if retry.PublicRequest.ReqID() != "transform-retry-blocked" {
+			t.Errorf("retry ID = %q, want transform-retry-blocked", retry.PublicRequest.ReqID())
+		}
+	case result := <-resultChannel:
+		t.Fatalf("retryable transform error produced result %+v", result)
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry was dropped when the per-attempt timeout expired")
+	}
+}
+
 func TestWorker_ContextTransformRequeuesOnShutdown(t *testing.T) {
 	httpClient := NewTestClient(func(*http.Request) (*http.Response, error) {
 		t.Error("inference must not be called after shutdown during transform")

@@ -366,7 +366,9 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 							if errors.As(terr, &clientErr) {
 								retryAfter = clientErr.RetryAfter
 							}
-							retryMessage(reqCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{})
+							// Wait on requestCtx, not reqCtx. The per-attempt timeout in
+							// reqCtx must not drop a retry that is waiting for room.
+							retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{})
 							return
 						}
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)

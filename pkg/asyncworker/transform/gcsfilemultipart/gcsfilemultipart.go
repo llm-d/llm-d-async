@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -31,6 +32,7 @@ const (
 	gcsV4RSASHA256           = "GOOG4-RSA-SHA256"
 	gcsV4HMACSHA256          = "GOOG4-HMAC-SHA256"
 	hmacSHA256SignatureBytes = 32
+	virtualHostedSuffix      = ".storage.googleapis.com"
 )
 
 var (
@@ -207,7 +209,7 @@ func (p *Plugin) download(ctx context.Context, signedURL string) ([]byte, error)
 		if errors.Is(err, errUnsupportedRedirect) {
 			return nil, invalidf("audio download redirect rejected")
 		}
-		return nil, retryablef("audio download failed", sanitizeURLError(err))
+		return nil, retryablef("audio download failed", downloadCause(err))
 	}
 	defer response.Body.Close() // nolint:errcheck
 	retryAfter, _ := transform.ParseRetryAfter(response.Header.Get("Retry-After"))
@@ -239,7 +241,7 @@ func (p *Plugin) download(ctx context.Context, signedURL string) ([]byte, error)
 		if ctx.Err() != nil {
 			return nil, retryablef("audio download stopped", ctx.Err())
 		}
-		return nil, retryablef("audio download failed", sanitizeURLError(err))
+		return nil, retryablef("audio download failed", downloadCause(err))
 	}
 	if int64(len(audio)) == p.maxFileBytes {
 		var extra [1]byte
@@ -251,7 +253,7 @@ func (p *Plugin) download(ctx context.Context, signedURL string) ([]byte, error)
 			if ctx.Err() != nil {
 				return nil, retryablef("audio download stopped", ctx.Err())
 			}
-			return nil, retryablef("audio download failed", sanitizeURLError(readErr))
+			return nil, retryablef("audio download failed", downloadCause(readErr))
 		}
 	}
 	return audio, nil
@@ -268,8 +270,7 @@ func (p *Plugin) signedURL(signedURL string, deadline time.Time) (*url.URL, time
 	if parsedURL.Scheme != "https" {
 		return nil, time.Time{}, invalidf("gcs_uri must use HTTPS")
 	}
-	segments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-	if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
+	if !identifiesObject(parsedURL) {
 		return nil, time.Time{}, invalidf("gcs_uri must identify a bucket and object")
 	}
 
@@ -303,6 +304,19 @@ func (p *Plugin) signedURL(signedURL string, deadline time.Time) (*url.URL, time
 		return nil, time.Time{}, invalidf("gcs_uri expires at or before the request deadline")
 	}
 	return parsedURL, expiry, nil
+}
+
+// identifiesObject reports whether the URL names a bucket and an object.
+// Virtual-hosted URLs (BUCKET.storage.googleapis.com/OBJECT) carry the bucket in
+// the hostname, so their path only needs the object. Other URLs are path-style
+// (HOST/BUCKET/OBJECT) and need both.
+func identifiesObject(parsedURL *url.URL) bool {
+	objectPath := strings.Trim(parsedURL.Path, "/")
+	if strings.HasSuffix(strings.ToLower(parsedURL.Hostname()), virtualHostedSuffix) {
+		return objectPath != ""
+	}
+	segments := strings.Split(objectPath, "/")
+	return len(segments) >= 2 && segments[0] != "" && segments[1] != ""
 }
 
 func (p *Plugin) allowedURL(parsedURL *url.URL) error {
@@ -446,10 +460,14 @@ func retryablef(message string, rawErr error) error {
 	}
 }
 
-func sanitizeURLError(err error) error {
-	var urlErr *url.Error
-	if !errors.As(err, &urlErr) {
-		return err
+// downloadCause returns the part of a download error that is safe to record.
+// Go's HTTP client can copy a redirect Location header into plain error text,
+// and that header can hold the signature. So only network errors are kept: their
+// text has a host and port, never a URL path or query. Any other error is dropped.
+func downloadCause(err error) error {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr
 	}
-	return &url.Error{Op: urlErr.Op, URL: "[redacted]", Err: sanitizeURLError(urlErr.Err)}
+	return nil
 }
