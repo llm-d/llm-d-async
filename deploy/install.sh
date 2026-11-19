@@ -78,6 +78,7 @@ PROMETHEUS_SECRET_NAME=${PROMETHEUS_SECRET_NAME:-"prometheus-web-tls"}
 # Flags for deployment steps
 DEPLOY_PROMETHEUS=${DEPLOY_PROMETHEUS:-true}
 DEPLOY_AP=${DEPLOY_AP:-true}
+DEPLOY_REDIS=${DEPLOY_REDIS:-true}
 DEPLOY_LLM_D=${DEPLOY_LLM_D:-true}
 SKIP_CHECKS=${SKIP_CHECKS:-false}
 E2E_TESTS_ENABLED=${E2E_TESTS_ENABLED:-false}
@@ -430,7 +431,7 @@ deploy_redis() {
     # otherwise append "-valkey". Persistence and AOF keep queued requests
     # across a pod restart.
     helm upgrade -i "$REDIS_RELEASE_NAME" valkey --repo "$VALKEY_CHART_REPO" --version "$VALKEY_CHART_VERSION" \
-        -n $REDIS_NS \
+        -n $REDIS_NS --create-namespace \
         --set fullnameOverride="$REDIS_RELEASE_NAME" \
         --set persistence.enabled=true --set persistence.size=1Gi \
         --set-string extraConfig="appendonly yes"
