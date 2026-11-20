@@ -22,12 +22,16 @@ func NewQuotaStore(rdb redis.UniversalClient, slotTTL time.Duration) *QuotaStore
 	return &QuotaStore{rdb: rdb, slotTTL: slotTTL}
 }
 
-// quotaCallGuardTTL outlasts the retries of one script call. Under the
-// go-redis defaults the last retry runs at most about 53s after the first
-// attempt: the first attempt's 5s read timeout, then three retries of up to
-// 16s each (pool wait, dial and write timeouts). A read_timeout above about
-// 14s or a larger max_retries in the Redis URL can push the retries past
-// this TTL. It does not follow slotTTL or how long a slot is held.
+// quotaCallTimeout bounds one script call, retries included. go-redis checks
+// the context before it hands an attempt a connection, so no retry starts
+// after this deadline.
+const quotaCallTimeout = 30 * time.Second
+
+// quotaCallGuardTTL outlasts the retries of one script call. The last attempt
+// starts within quotaCallTimeout of the first. The remaining 90s cover that
+// attempt's connection handshake and write, unless the Redis URL raises
+// read_timeout or write_timeout past them. It does not follow slotTTL or how
+// long a slot is held.
 const quotaCallGuardTTL = 2 * time.Minute
 
 // quotaCallGuardKey marks that the call holding token has changed the counter
@@ -67,7 +71,9 @@ func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (fu
 		return nil, false, fmt.Errorf("acquire concurrency quota: %w", err)
 	}
 	keys := []string{key, quotaCallGuardKey(key, token)}
-	res, err := s.rdb.Eval(ctx, script, keys, limit, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
+	callCtx, cancel := context.WithTimeout(ctx, quotaCallTimeout)
+	defer cancel()
+	res, err := s.rdb.Eval(callCtx, script, keys, limit, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
 	if err != nil {
 		return nil, false, fmt.Errorf("acquire concurrency quota: %w", err)
 	}
@@ -119,7 +125,9 @@ func (s *QuotaStore) releaseSlot(ctx context.Context, key string, ttl int) (int6
 		return 0, fmt.Errorf("release concurrency quota: %w", err)
 	}
 	keys := []string{key, quotaCallGuardKey(key, token)}
-	res, err := s.rdb.Eval(ctx, releaseScript, keys, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
+	callCtx, cancel := context.WithTimeout(ctx, quotaCallTimeout)
+	defer cancel()
+	res, err := s.rdb.Eval(callCtx, releaseScript, keys, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return 0, fmt.Errorf("release concurrency quota: %w", err)
 	}

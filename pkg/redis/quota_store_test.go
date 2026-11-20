@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -252,6 +253,49 @@ func TestQuotaStoreAdmitRetryAfterLostReplyAtTheLastTokenIsAdmitted(t *testing.T
 		ok, err = store.Admit(ctx, "rate:k", 1, time.Minute)
 		require.NoError(t, err)
 		require.False(t, ok, "a later call is still limited")
+	})
+}
+
+// scriptDeadlineHook records the time left before the context deadline of
+// each script call, or -1 when the call has no deadline.
+type scriptDeadlineHook struct {
+	remaining []time.Duration
+}
+
+func (h *scriptDeadlineHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *scriptDeadlineHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *scriptDeadlineHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if strings.HasPrefix(cmd.Name(), "eval") {
+			remaining := time.Duration(-1)
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining = time.Until(deadline)
+			}
+			h.remaining = append(h.remaining, remaining)
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestQuotaStoreSlotScriptCallsHaveADeadline(t *testing.T) {
+	forEachClientLosingAReply(t, func(t *testing.T, store *QuotaStore, _ *miniredis.Miniredis, _ *atomic.Bool) {
+		hook := &scriptDeadlineHook{}
+		store.rdb.AddHook(hook)
+
+		release, ok, err := store.AcquireSlot(context.Background(), "quota:k", 2)
+		require.NoError(t, err)
+		require.True(t, ok)
+		release()
+
+		require.Len(t, hook.remaining, 2, "one acquire and one release")
+		for _, remaining := range hook.remaining {
+			require.Positive(t, remaining, "the script call has a deadline")
+			require.LessOrEqual(t, remaining, quotaCallTimeout)
+		}
 	})
 }
 
