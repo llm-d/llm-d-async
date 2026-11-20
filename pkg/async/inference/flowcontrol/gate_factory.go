@@ -305,6 +305,45 @@ func (f *GateFactory) Close() error {
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error) {
+	return f.createGate(cfg, "")
+}
+
+func (f *GateFactory) createGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
+	gate, err := f.buildGate(cfg, index)
+	if metric, ok := gate.(*MetricDispatchGate); ok {
+		metric.readings.Owner = cfg.Owner
+		metric.readings.Type = cfg.GateType
+		metric.readings.Index = index
+	}
+	return gate, err
+}
+
+// RetireGateMetrics releases metrics for the configured gate tree when a queue is replaced or removed.
+func (f *GateFactory) RetireGateMetrics(gate pipeline.Gate) {
+	switch g := gate.(type) {
+	case *MetricDispatchGate:
+		g.readings.Retire()
+	case *CompositeGate:
+		for _, child := range g.gates {
+			f.RetireGateMetrics(child)
+		}
+	case *WaitOnRefuseGate:
+		f.RetireGateMetrics(g.inner)
+	case *TierPriorityAdmissionGate:
+		f.RetireGateMetrics(g.saturationGate)
+	}
+}
+
+func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
+	childGate := func(child pipeline.GateConfig, position int) (pipeline.Gate, error) {
+		child.Owner = cfg.Owner
+		path := strconv.Itoa(position)
+		if index != "" {
+			path = index + "." + path
+		}
+		return f.createGate(child, path)
+	}
+
 	params := cfg.GateParams
 	if params == nil {
 		params = map[string]any{}
@@ -318,9 +357,8 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		}
 
 		var innerGates []pipeline.Gate
-		for _, innerCfg := range configs {
-			innerCfg.Owner = cfg.Owner
-			gate, err := f.CreateGate(innerCfg)
+		for i, innerCfg := range configs {
+			gate, err := childGate(innerCfg, i)
 			if err != nil {
 				return nil, fmt.Errorf("composite gate failed to create inner gate %q: %w", innerCfg.GateType, err)
 			}
@@ -335,8 +373,7 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		innerCfg.Owner = cfg.Owner
-		innerGate, err := f.CreateGate(innerCfg)
+		innerGate, err := childGate(innerCfg, 0)
 		if err != nil {
 			return nil, fmt.Errorf("wait-on-refuse gate failed to create inner gate %q: %w", innerCfg.GateType, err)
 		}
@@ -353,11 +390,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("tier-priority-admission gate failed to parse 'saturation_gate_params': %w", err)
 		}
 
-		satGate, err := f.CreateGate(pipeline.GateConfig{
+		satGate, err := childGate(pipeline.GateConfig{
 			GateType:   satGateType,
 			GateParams: satGateParams,
-			Owner:      cfg.Owner,
-		})
+		}, 0)
 		if err != nil {
 			return nil, fmt.Errorf("tier-priority-admission gate failed to create saturation gate %q: %w", satGateType, err)
 		}

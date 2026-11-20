@@ -438,7 +438,7 @@ func TestGateFactory_StampsOwnerOnMetricGate(t *testing.T) {
 	metricGate, ok := gate.(*MetricDispatchGate)
 	assert.True(t, ok, "prometheus-query should produce a MetricDispatchGate")
 	assert.Equal(t, owner, metricGate.owner)
-	assert.Equal(t, "optimized-baseline", metricGate.inferencePool)
+	assert.Equal(t, "optimized-baseline", metricGate.readings.InferencePool)
 }
 
 // TestGateFactory_PropagatesOwnerThroughWrappers checks that the owner survives the
