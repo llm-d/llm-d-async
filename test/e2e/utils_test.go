@@ -26,8 +26,11 @@ import (
 )
 
 const (
-	integrationRequestQueue = "integration-request-sortedset"
-	integrationResultQueue  = "integration-result-list"
+	integrationRequestQueue  = "integration-request-sortedset"
+	integrationResultQueue   = "integration-result-list"
+	multiReplicaRequestQueue = "multi-replica-request-sortedset"
+	multiReplicaResultQueue  = "multi-replica-result-list"
+	multiReplicaBudgetKey    = "multi-replica-dispatch-budget"
 
 	saturationRequestQueue = "saturation-request-sortedset"
 	saturationResultQueue  = "saturation-result-list"
@@ -298,6 +301,47 @@ func queryProm(promURL, query string) float64 {
 		return math.NaN()
 	}
 	return v
+}
+
+// queryPromVectorByLabel runs a PromQL instant query and indexes vector values
+// by one metric label. It returns an empty map when the query fails.
+func queryPromVectorByLabel(promURL, query, label string) map[string]float64 {
+	resp, err := httpClient.Get(promURL + "/api/v1/query?query=" + url.QueryEscape(query))
+	if err != nil {
+		ginkgo.GinkgoLogr.V(1).Info("prom vector query failed", "error", err, "query", query)
+		return map[string]float64{}
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return map[string]float64{}
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+				Value  [2]any            `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Status != "success" {
+		return map[string]float64{}
+	}
+
+	values := make(map[string]float64, len(result.Data.Result))
+	for _, sample := range result.Data.Result {
+		key := sample.Metric[label]
+		value, ok := sample.Value[1].(string)
+		if key == "" || !ok {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			values[key] = parsed
+		}
+	}
+	return values
 }
 
 // budgetPromQL is the same PromQL the budget gate's primary source uses
