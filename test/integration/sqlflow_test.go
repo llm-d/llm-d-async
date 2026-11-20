@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +62,11 @@ func startSQLFlow(t *testing.T, dsn, igwURL string, leaseTTLSeconds int64, poll 
 
 func startSQLFlowWorkers(t *testing.T, dsn, igwURL string, leaseTTLSeconds int64, poll time.Duration, workers int) *sqlHarness {
 	t.Helper()
+	return startSQLFlowClient(t, dsn, igwURL, leaseTTLSeconds, poll, workers, asyncworker.NewHTTPInferenceClient(http.DefaultClient))
+}
+
+func startSQLFlowClient(t *testing.T, dsn, igwURL string, leaseTTLSeconds int64, poll time.Duration, workers int, client api.InferenceClient) *sqlHarness {
+	t.Helper()
 	cfg := sqlflow.Config{
 		URL:             dsn,
 		ResultQueueName: sqlResultQueue,
@@ -89,7 +95,7 @@ func startSQLFlowWorkers(t *testing.T, dsn, igwURL string, leaseTTLSeconds int64
 		go func() {
 			defer wg.Done()
 			asyncworker.WorkerWithGate(workerCtx, drainCtx, flow.Characteristics(),
-				asyncworker.NewHTTPInferenceClient(http.DefaultClient), dispatch.Channels["default"],
+				client, dispatch.Channels["default"],
 				flow.RetryChannel(), flow.ResultChannel(), 30*time.Second, nil, nil)
 		}()
 	}
@@ -425,5 +431,79 @@ func TestSQLFlow_StopHandsOffPartitionsAfterInFlightWork(t *testing.T) {
 		assert.Equal(t, []string{"in-flight"}, seenA, "a dispatched nothing after it stopped consuming")
 		mu.Unlock()
 		a.stop()
+	})
+}
+
+func TestSQLFlow_BinaryResultRoundTrips(t *testing.T) {
+	withSQLDSN(t, func(t *testing.T, dsn string) {
+		audio := []byte("RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\xc0\x5d\x00\x00data\x04\x00\x00\x00\xff\x7f\x00\x80")
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/audio/speech" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "audio/wav")
+			w.Header().Set("X-Vllm-Omni-Input-Tokens", "18")
+			w.Header().Set("X-Vllm-Omni-Output-Tokens", "77")
+			w.Header().Set("X-Audio-Sample-Rate", "24000")
+			w.Header().Set("Server", "not-forwarded")
+			_, _ = w.Write(audio)
+		}))
+		t.Cleanup(srv.Close)
+
+		client := asyncworker.NewHTTPInferenceClient(http.DefaultClient, asyncworker.WithResultHeaderPrefixes("x-vllm-omni-", "x-audio-"))
+		h := startSQLFlowClient(t, dsn, srv.URL, 60, 100*time.Millisecond, 1, client)
+		req := &api.RequestMessage{
+			ID:       "speech-1",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Endpoint: "/v1/audio/speech",
+			Payload:  testPayload(map[string]any{"model": "tts", "input": "hello", "response_format": "wav"}),
+		}
+		require.NoError(t, h.producer.SubmitRequest(context.Background(), req))
+
+		res := getResult(t, h.producer, 10*time.Second)
+		require.Equal(t, "speech-1", res.ID)
+		require.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, api.PayloadEncodingBase64, res.PayloadEncoding)
+		assert.Equal(t, "audio/wav", res.ContentType)
+		assert.Equal(t, map[string]string{
+			"x-vllm-omni-input-tokens":  "18",
+			"x-vllm-omni-output-tokens": "77",
+			"x-audio-sample-rate":       "24000",
+		}, res.Headers)
+		body, err := res.Body()
+		require.NoError(t, err)
+		assert.Equal(t, audio, body, "audio bytes changed on the way through Postgres")
+	})
+}
+
+func TestSQLFlow_OversizedResultFailsWithoutRetry(t *testing.T) {
+	withSQLDSN(t, func(t *testing.T, dsn string) {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.Header().Set("Content-Type", "audio/wav")
+			_, _ = w.Write(make([]byte, 2048))
+		}))
+		t.Cleanup(srv.Close)
+
+		client := asyncworker.NewHTTPInferenceClient(http.DefaultClient, asyncworker.WithMaxResponseBytes(1024))
+		h := startSQLFlowClient(t, dsn, srv.URL, 60, 100*time.Millisecond, 1, client)
+		require.NoError(t, h.producer.SubmitRequest(context.Background(), &api.RequestMessage{
+			ID:       "long-speech",
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(5 * time.Minute).Unix(),
+			Endpoint: "/v1/audio/speech",
+			Payload:  testPayload(map[string]any{"model": "tts", "input": "a very long story"}),
+		}))
+
+		res := getResult(t, h.producer, 10*time.Second)
+		require.Equal(t, "long-speech", res.ID)
+		assert.Zero(t, res.StatusCode)
+		assert.Equal(t, api.ErrCodeInferenceError, res.ErrorCode)
+		assert.Contains(t, res.ErrorMessage, "exceeds 1024 bytes")
+		time.Sleep(500 * time.Millisecond)
+		assert.Equal(t, int32(1), calls.Load(), "oversized response was retried")
 	})
 }

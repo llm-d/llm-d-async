@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,12 +22,54 @@ var _ asyncapi.InferenceClient = (*HTTPInferenceClient)(nil)
 
 // HTTPInferenceClient is the default HTTP implementation of InferenceClient.
 type HTTPInferenceClient struct {
-	client *http.Client
+	client               *http.Client
+	resultHeaderPrefixes []string
+	maxResponseBytes     int64
+}
+
+// HTTPClientOption configures an HTTPInferenceClient.
+type HTTPClientOption func(*HTTPInferenceClient)
+
+// WithResultHeaderPrefixes forwards response headers whose name starts with one of prefixes,
+// compared case-insensitively.
+func WithResultHeaderPrefixes(prefixes ...string) HTTPClientOption {
+	return func(c *HTTPInferenceClient) {
+		for _, p := range prefixes {
+			if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+				c.resultHeaderPrefixes = append(c.resultHeaderPrefixes, p)
+			}
+		}
+	}
+}
+
+// WithMaxResponseBytes fails, without retrying, a request whose response body is larger than
+// n bytes. n <= 0 is unlimited.
+func WithMaxResponseBytes(n int64) HTTPClientOption {
+	return func(c *HTTPInferenceClient) { c.maxResponseBytes = n }
 }
 
 // NewHTTPInferenceClient creates a new HTTPInferenceClient with the given HTTP client.
-func NewHTTPInferenceClient(client *http.Client) *HTTPInferenceClient {
-	return &HTTPInferenceClient{client: client}
+func NewHTTPInferenceClient(client *http.Client, opts ...HTTPClientOption) *HTTPInferenceClient {
+	c := &HTTPInferenceClient{client: client}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+func (h *HTTPInferenceClient) forwardedHeaders(header http.Header) map[string]string {
+	var out map[string]string
+	for name, values := range header {
+		lower := strings.ToLower(name)
+		if !slices.ContainsFunc(h.resultHeaderPrefixes, func(p string) bool { return strings.HasPrefix(lower, p) }) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[lower] = strings.Join(values, ", ")
+	}
+	return out
 }
 
 // SendRequest implements InferenceClient for HTTP-based inference requests.
@@ -57,9 +102,22 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 	droppedReason := result.Header.Get(asyncapi.DroppedReasonHeader)
 	retryAfter, _ := parseRetryAfter(result.Header.Get("Retry-After"))
 
-	body, err := io.ReadAll(result.Body)
+	body, err := h.readBody(result)
+	if errors.Is(err, errResponseTooLarge) {
+		return nil, &asyncapi.ClientError{
+			ErrorCategory: asyncapi.ErrCategoryInvalidReq,
+			Message:       fmt.Sprintf("status code %d response body exceeds %d bytes", result.StatusCode, h.maxResponseBytes),
+			RawError:      err,
+		}
+	}
+	resp := &asyncapi.InferenceResponse{
+		StatusCode:  result.StatusCode,
+		Body:        body,
+		ContentType: result.Header.Get("Content-Type"),
+		Headers:     h.forwardedHeaders(result.Header),
+	}
 	if err != nil {
-		return &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body}, &asyncapi.ClientError{
+		return resp, &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       "failed to read response",
 			RawError:      err,
@@ -68,8 +126,6 @@ func (h *HTTPInferenceClient) SendRequest(ctx context.Context, url string, heade
 			DroppedReason: droppedReason,
 		}
 	}
-
-	resp := &asyncapi.InferenceResponse{StatusCode: result.StatusCode, Body: body}
 
 	if result.StatusCode == 429 {
 		return resp, &asyncapi.ClientError{
@@ -121,6 +177,28 @@ func transportErrorCategory(err error) asyncapi.ErrorCategory {
 	default:
 		return asyncapi.ErrCategoryUnknown
 	}
+}
+
+var errResponseTooLarge = errors.New("response body too large")
+
+func (h *HTTPInferenceClient) readBody(resp *http.Response) ([]byte, error) {
+	limit := h.maxResponseBytes
+	limited := limit > 0 && limit < math.MaxInt64
+	if limited && resp.ContentLength > limit {
+		return nil, errResponseTooLarge
+	}
+	r := io.Reader(resp.Body)
+	if limited {
+		r = io.LimitReader(r, limit+1)
+	}
+	body, err := io.ReadAll(r)
+	if limited && int64(len(body)) > limit {
+		return nil, errResponseTooLarge
+	}
+	if err != nil {
+		return body, fmt.Errorf("read response body: %w", err)
+	}
+	return body, nil
 }
 
 // parseRetryAfter parses a Retry-After header value, which can be either

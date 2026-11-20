@@ -158,6 +158,34 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --gate-wait-timeout=0
 
+  - it: should not forward result headers by default
+    asserts:
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--result-header-prefixes
+
+  - it: should pass result header prefixes to binary args
+    set:
+      ap.resultHeaderPrefixes: ["x-vllm-omni-", "x-audio-"]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --result-header-prefixes=x-vllm-omni-,x-audio-
+
+  - it: should not limit response size by default
+    asserts:
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--max-response-bytes
+
+  - it: should pass the response size limit to binary args
+    set:
+      ap.maxResponseBytes: 26214400
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --max-response-bytes=26214400
+
   # --- Transport surface (ap.transport + ap.transportConfig) ---------------
   - it: should select the configured transport
     asserts:
