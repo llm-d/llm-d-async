@@ -299,6 +299,10 @@ func (f *GateFactory) Close() error {
 //     is in [0, 1]. Unlike prometheus-saturation and prometheus-budget, this gate does not
 //     construct queries internally — the user provides the complete PromQL expression.
 //     Params: query (required), fallback (default 0.0)
+//   - "inference-pool-ready": Opens when llm_d_epp_ready_endpoints for the pool (max across EPP
+//     replicas) is at least min_ready_endpoints, and holds requests otherwise, e.g. while the
+//     pool is scaled to zero. A missing metric holds unless fail_open is set.
+//     Params: pool (required), namespace, min_ready_endpoints (default 1), fail_open (default false)
 //   - "endpoint-scrape": Scrapes a metric endpoint and interprets the normalized value as
 //     saturation (default) or a direct budget. Params: url and metric (required),
 //     value_type (saturation or budget), fallback (default 0.0)
@@ -524,6 +528,58 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			WithOwner(cfg.Owner).
 			WithInferencePool(pool), nil
 
+	case "inference-pool-ready":
+		if f.prometheusURL == "" {
+			return nil, fmt.Errorf("inference-pool-ready gate type requires --prometheus-url flag to be set")
+		}
+
+		pool := paramString(params, "pool", "")
+		if pool == "" {
+			return nil, fmt.Errorf("inference-pool-ready gate requires a 'pool' parameter")
+		}
+
+		namespace := paramString(params, "namespace", "")
+
+		minReady, err := paramInt(params, "min_ready_endpoints", 1)
+		if err != nil {
+			return nil, err
+		}
+		if minReady < 1 {
+			return nil, fmt.Errorf("inference-pool-ready gate requires 'min_ready_endpoints' >= 1, got %d", minReady)
+		}
+
+		failOpen, err := paramBool(params, "fail_open", false)
+		if err != nil {
+			return nil, err
+		}
+
+		labels := map[string]string{"name": pool}
+		if namespace != "" {
+			labels["namespace"] = namespace
+		}
+		query := fmt.Sprintf(`max(%s) >= bool %d`, buildPromQL("llm_d_epp_ready_endpoints", labels), minReady)
+
+		// The query evaluates to 1 when the pool has enough ready endpoints and 0
+		// otherwise. A missing metric (no InferencePool yet, or the EPP is down)
+		// takes the fallback, which holds requests unless fail_open is set.
+		fallback := 0.0
+		if failOpen {
+			fallback = 1.0
+		}
+
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
+		source, err := NewPromQLMetricSource(promConfig, query)
+		if err != nil {
+			return nil, err
+		}
+		f.logger.Info("inference-pool-ready metric source", "pool", pool, "query", source.Expr())
+		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback).
+			WithOwner(cfg.Owner).
+			WithInferencePool(pool), nil
+
 	case "prometheus-query":
 		if f.prometheusURL == "" {
 			return nil, fmt.Errorf("prometheus-query gate type requires --prometheus-url flag to be set")
@@ -674,6 +730,30 @@ func paramFloat(params map[string]any, key string, defaultVal float64) (float64,
 		return f, nil
 	default:
 		return 0, fmt.Errorf("invalid %s value: unsupported type %T", key, v)
+	}
+}
+
+// paramBool extracts a bool value from params. Accepts a bool or a string that
+// strconv.ParseBool understands; any other type is a config error.
+func paramBool(params map[string]any, key string, defaultVal bool) (bool, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return defaultVal, nil
+	}
+	switch val := v.(type) {
+	case bool:
+		return val, nil
+	case string:
+		if val == "" {
+			return defaultVal, nil
+		}
+		b, err := strconv.ParseBool(val)
+		if err != nil {
+			return false, fmt.Errorf("invalid %s value %q: %w", key, val, err)
+		}
+		return b, nil
+	default:
+		return false, fmt.Errorf("invalid %s value: expected bool, got %T", key, v)
 	}
 }
 
