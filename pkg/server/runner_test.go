@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/llm-d/llm-d-async/pkg/asyncworker"
 	"github.com/llm-d/llm-d-async/pkg/metrics"
@@ -286,7 +287,7 @@ func TestPollBacklogObservesDeadlineViews(t *testing.T) {
 		Depth:          2,
 		ExpiringCounts: counts,
 	}}}
-	go pollBacklog(ctx, reporter, 10*time.Millisecond)
+	go pollBacklog(ctx, reporter, 10*time.Millisecond, nil)
 	time.Sleep(50 * time.Millisecond)
 
 	if got := histogramSampleCount(metrics.DeadlineProximity); got != 9 {
@@ -314,7 +315,7 @@ func TestPollBacklogSkipsNilDeadlineViews(t *testing.T) {
 		PoolName:  "pool-a",
 		Depth:     5,
 	}}}
-	go pollBacklog(ctx, reporter, 10*time.Millisecond)
+	go pollBacklog(ctx, reporter, 10*time.Millisecond, nil)
 	time.Sleep(50 * time.Millisecond)
 
 	if got := histogramSampleCount(metrics.DeadlineProximity); got != 0 {
@@ -333,7 +334,7 @@ func TestPollBacklogRemovesDeletedQueueSnapshots(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go pollBacklog(ctx, reporter, 10*time.Millisecond)
+	go pollBacklog(ctx, reporter, 10*time.Millisecond, nil)
 	waitFor(t, "initial backlog snapshot", func() bool {
 		return testutil.CollectAndCount(metrics.BrokerBacklog) == 1
 	})
@@ -388,5 +389,35 @@ func TestGateWaitTimeoutOption(t *testing.T) {
 	opts.Worker.GateWaitTimeout = -time.Second
 	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "--gate-wait-timeout must be non-negative") {
 		t.Fatalf("Validate() error = %v, want negative gate-wait-timeout error", err)
+	}
+}
+
+func TestLoadWorkerPoolsDeadlineScaling(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name, pools, wantErr string
+	}{
+		{"valid", `[{"id": "p", "workers": 1, "deadline_scaling": {"throughput_rps": 2, "cold_start_seconds": 60, "max_replicas": 8}}]`, ""},
+		{"no max_replicas", `[{"id": "p", "workers": 1, "deadline_scaling": {"throughput_rps": 2, "cold_start_seconds": 60}}]`, `pool "p": deadline_scaling.max_replicas`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name+".json")
+			if err := os.WriteFile(path, []byte(tc.pools), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pools, _, err := loadWorkerPools(WorkerConfig{PoolConfigFile: path}, logr.Discard())
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ds := pools["p"].DeadlineScaling; ds == nil || ds.MaxReplicas != 8 {
+				t.Fatalf("pool deadline_scaling = %+v, want max_replicas 8", ds)
+			}
+		})
 	}
 }
