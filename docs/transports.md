@@ -218,6 +218,12 @@ The `url` field in the transport configuration (see [Transport Configuration](#t
 
 > **Note:** The `url`/`redis.*` naming is retained because it refers to the wire protocol, not a specific product.
 
+### Licensing
+
+llm-d-async does not include or distribute a Redis or Valkey server. The container image holds only the processor binary, and the Helm chart connects to a server you provide. The client library, [go-redis](https://github.com/redis/go-redis), is BSD-2-Clause.
+
+The server's license is that of the server you run. Valkey is BSD-3-Clause. Redis is BSD-3-Clause up to 7.2, RSALv2 or SSPLv1 for 7.4 to 7.8, and RSALv2, SSPLv1 or AGPLv3 from 8.0 (see [Redis licenses](https://redis.io/legal/licenses/)). The e2e tests and `deploy/install.sh` use Valkey.
+
 ### Redis Cluster and Sentinel
 
 The Redis transports connect to a standalone server by default. Set `mode` in the transport config to use a different topology; the deprecated `--redis.*` flags are standalone only.
