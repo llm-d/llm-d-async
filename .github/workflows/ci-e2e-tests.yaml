@@ -1,6 +1,11 @@
 name: CI - E2E Tests
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/ci-e2e-tests.yaml'
+      - 'charts/llm-d-async/**'
+      - 'test/e2e/**'
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
@@ -20,6 +25,15 @@ concurrency:
 
 jobs:
   e2e-tests:
+    name: E2E (${{ matrix.backend.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: Valkey-8
+            image: valkey/valkey:8-alpine
+          - name: Redis-8
+            image: redis:8-alpine
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -61,7 +75,10 @@ jobs:
 
       - name: Determine test scope
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.focus }}" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "E2E_MULTI_REPLICA_ONLY=true" >> $GITHUB_ENV
+            echo "FOCUS=Multi-replica Redis Sorted Set E2E" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.focus }}" ]]; then
             echo "FOCUS=${{ inputs.focus }}" >> $GITHUB_ENV
           fi
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.skip }}" ]]; then
@@ -71,6 +88,7 @@ jobs:
       - name: Run E2E tests
         env:
           E2E_SKIP_CLEANUP: "true"
+          REDIS_IMAGE: ${{ matrix.backend.image }}
           SIM_IMAGE: ghcr.io/llm-d/llm-d-inference-sim:v0.9.1
           PUBSUB_IMAGE: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
         run: make test-e2e
@@ -90,7 +108,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-test-artifacts-${{ github.run_id }}
+          name: e2e-test-artifacts-${{ github.run_id }}-${{ matrix.backend.name }}
           path: /tmp/e2e-artifacts/
           retention-days: 7
 

@@ -95,9 +95,11 @@ Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclai
   queued requests live in Redis; run it with AOF (`appendonly
   yes`, e.g. `appendfsync everysec`) and/or replication. Without persistence a
   Redis restart reintroduces a loss window this feature cannot close.
-- Multiple Async replicas may share one queue: atomic claims prevent double
-  dispatch, and lease expiry hands work over automatically when a replica
-  disappears.
+- Atomic claims are designed to let multiple Async replicas share one queue,
+  prevent concurrent dispatch of one claim, and hand abandoned work to a
+  survivor after lease expiry. Multi-replica deployment is still being
+  validated and is not yet a generally supported configuration; see the
+  [multi-replica guide](multi-replica.md).
 - Rolling upgrades are safe for the pending format, but during the mixed-fleet
   window old instances still run destructive `ZPOPMIN` and can still lose
   requests until the rollout completes.
