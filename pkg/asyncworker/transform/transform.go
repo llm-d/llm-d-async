@@ -9,7 +9,11 @@
 // are separate plugins that register a factory under their own type.
 package transform
 
-import "github.com/llm-d/llm-d-async/pkg/plugins"
+import (
+	"context"
+
+	"github.com/llm-d/llm-d-async/pkg/plugins"
+)
 
 // RequestTransform is a dispatch-time body-transform plugin. The worker invokes
 // the configured chain after marshalling the request payload and before sending
@@ -31,4 +35,16 @@ type RequestTransform interface {
 	// and handled=true. Otherwise it returns handled=false and the default JSON
 	// body is used unchanged.
 	Transform(payload []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error)
+}
+
+// ContextRequestTransform is the context-aware form of RequestTransform.
+// Plugins that perform I/O must implement it so their work honors cancellation,
+// request deadlines, and worker shutdown. RequestURL lets endpoint-specific
+// plugins decide whether they own a message.
+type ContextRequestTransform interface {
+	RequestTransform
+
+	ValidateWithContext(payload []byte, metadata map[string]string, requestURL string, reqDeadline int64) error
+
+	TransformWithContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string) (body []byte, contentType string, handled bool, err error)
 }

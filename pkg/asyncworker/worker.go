@@ -319,17 +319,64 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 
 					// Apply the request body-transform chain. If a transform handles
 					// the message we send its body and Content-Type; otherwise the
-					// default JSON payload is sent unchanged. A transform error is
-					// fatal/non-retryable.
+					// default JSON payload is sent unchanged.
 					sendPayload := payloadBytes
 					sendHeaders := msg.HttpHeaders
-					if body, contentType, handled, terr := transforms.Apply(payloadBytes, msg.PublicRequest.ReqMetadata()); terr != nil {
+					transformCtx, stopTransformCancellationWatch := watchInflightCancellation(reqCtx, logger, msg)
+					body, contentType, handled, terr := transforms.ApplyContext(transformCtx, payloadBytes, msg.PublicRequest.ReqMetadata(), msg.RequestURL)
+					cancelledDuringTransform := stopTransformCancellationWatch()
+					if terr != nil {
+						category := asyncapi.ErrCategoryInvalidReq
+						var transformErr asyncapi.InferenceError
+						if errors.As(terr, &transformErr) {
+							category = transformErr.Category()
+						}
 						span.RecordError(terr)
 						span.SetStatus(codes.Error, "request transform failed")
 						span.SetAttributes(
-							attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
-							attribute.String(uotel.LegacyAttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
+							attribute.String(uotel.AttrErrorCategory, string(category)),
+							attribute.String(uotel.LegacyAttrErrorCategory, string(category)),
 						)
+
+						if cancelledDuringTransform {
+							select {
+							case resultChannel <- asyncapi.NewCancelledResult(msg.PublicRequest, msg.InternalRouting):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+						if requestCtx.Err() != nil {
+							retryChannel <- pipeline.RetryMessage{
+								EmbelishedRequestMessage: msg,
+								BackoffDurationSeconds:   0,
+							}
+							return
+						}
+						// reqCtx also ends at the per-attempt timeout, which is
+						// retryable. Only a passed request deadline is terminal.
+						if dline := msg.PublicRequest.ReqDeadline(); dline > 0 && time.Now().Unix() >= dline {
+							metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+							select {
+							case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+							case <-requestCtx.Done():
+							}
+							return
+						}
+						if !category.Fatal() {
+							var retryAfter time.Duration
+							var clientErr *asyncapi.ClientError
+							if errors.As(terr, &clientErr) {
+								retryAfter = clientErr.RetryAfter
+							}
+							// Wait on requestCtx, not reqCtx. The per-attempt timeout in
+							// reqCtx must not drop a retry that is waiting for room.
+							if retry, unsent := retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{}); unsent {
+								// Shutdown started while the retry waited for room.
+								// retryWorker outlives workers, so hand it over anyway.
+								retryChannel <- retry
+							}
+							return
+						}
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 						select {
 						case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to transform request body: %s", terr.Error())):
@@ -513,7 +560,7 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 	// Pre-dispatch transform validation (e.g. signed object URL expiry). A
 	// validation failure is fatal/non-retryable, so we surface an error result
 	// rather than re-enqueue. A nil chain validates successfully.
-	if err := transforms.Validate(payloadBytes, r.ReqMetadata(), deadline); err != nil {
+	if err := transforms.ValidateContext(payloadBytes, r.ReqMetadata(), msg.RequestURL, deadline); err != nil {
 		metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 		select {
 		case resultChannel <- asyncapi.NewErrorResult(r, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to validate request for transform: %s", err.Error())):
@@ -531,9 +578,13 @@ func validateAndMarshal(ctx context.Context, resultChannel chan asyncapi.ResultM
 // lastResp carries the most recent HTTP response (if any) so that when retries
 // are exhausted the actual HTTP status/body is surfaced rather than a generic
 // "deadline exceeded" non-HTTP error.
-func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastResp asyncapi.InferenceResponse) {
+//
+// If ctx is cancelled before the retry is sent, retryMessage gives up and
+// returns that retry with unsent set to true. Callers whose retry writer
+// outlives ctx can then send it themselves. Otherwise unsent is false.
+func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, retryChannel chan pipeline.RetryMessage, resultChannel chan asyncapi.ResultMessage, retryAfter time.Duration, lastResp asyncapi.InferenceResponse) (retry pipeline.RetryMessage, unsent bool) {
 	if msg.PublicRequest == nil {
-		return
+		return pipeline.RetryMessage{}, false
 	}
 	queueID := msg.QueueID
 	queueName := msg.RequestQueueName
@@ -545,7 +596,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 		case resultChannel <- deadlineExhaustedResult(msg, lastResp):
 		case <-ctx.Done():
 		}
-		return
+		return pipeline.RetryMessage{}, false
 	}
 
 	finalDuration := expBackoffDuration(msg.RetryCount+1, int(secondsToDeadline))
@@ -568,12 +619,15 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 
 	msg.RetryCount++
 	metrics.RecordRetry(queueID, queueName, msg.WorkerPoolID)
-	select {
-	case retryChannel <- pipeline.RetryMessage{
+	retry = pipeline.RetryMessage{
 		EmbelishedRequestMessage: msg,
 		BackoffDurationSeconds:   finalDuration,
-	}:
+	}
+	select {
+	case retryChannel <- retry:
+		return retry, false
 	case <-ctx.Done():
+		return retry, true
 	}
 }
 
