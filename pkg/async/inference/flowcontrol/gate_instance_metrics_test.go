@@ -32,8 +32,36 @@ import (
 	"github.com/llm-d/llm-d-async/pkg/metrics"
 	redisflow "github.com/llm-d/llm-d-async/pkg/redis"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRetiringGatePreservesSharedGauges(t *testing.T) {
+	server := newTestPrometheusServer(http.StatusOK, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"0.7"]}]}}`)
+	t.Cleanup(server.Close)
+	factory := NewGateFactoryWithCacheTTL(server.URL, 0)
+	owner := pipeline.GateOwner{QueueID: t.Name(), QueueName: "requests", WorkerPoolID: "default"}
+	const pool = "shared"
+	cfg := pipeline.GateConfig{Owner: owner, GateType: "prometheus-saturation", GateParams: map[string]any{"pool": pool}}
+	first, err := factory.createGate(cfg, "0")
+	require.NoError(t, err)
+	t.Cleanup(func() { factory.RetireGateMetrics(first) })
+	cfg.GateParams["threshold"] = 0.5
+	second, err := factory.createGate(cfg, "1")
+	require.NoError(t, err)
+	t.Cleanup(func() { factory.RetireGateMetrics(second) })
+
+	labels := []string{owner.QueueID, owner.QueueName, owner.WorkerPoolID, pool}
+	for _, gauge := range []*prometheus.GaugeVec{metrics.GateMetricValue, metrics.GateMetricThreshold, metrics.GateMetricSourceAvailable} {
+		t.Cleanup(func() { gauge.DeleteLabelValues(labels...) })
+	}
+	first.Budget(t.Context())
+	second.Budget(t.Context())
+	factory.RetireGateMetrics(first)
+	require.Equal(t, 0.7, testutil.ToFloat64(metrics.GateMetricValue.WithLabelValues(labels...)))
+	require.Equal(t, 0.5, testutil.ToFloat64(metrics.GateMetricThreshold.WithLabelValues(labels...)))
+	require.Equal(t, 1.0, testutil.ToFloat64(metrics.GateMetricSourceAvailable.WithLabelValues(labels...)))
+}
 
 func TestGateInstanceMetricsAcrossQueueReload(t *testing.T) {
 	var holdOldQuery atomic.Bool

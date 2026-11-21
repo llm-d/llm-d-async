@@ -39,8 +39,9 @@ func (g *GateInstanceMetrics) Record(value, threshold float64, available bool) {
 	gateInstanceSourceAvailable.WithLabelValues(labels...).Set(sourceAvailable)
 }
 
-// Retire removes this gate's series before its replacement starts. An old
-// query completing after removal must not recreate a series or update the replacement.
+// Retire removes this gate's instance series before its replacement starts.
+// A late query must not recreate those series or update the replacement's readings.
+// Sibling gates share the four-label v1 gauges, so retiring one leaves them intact.
 func (g *GateInstanceMetrics) Retire() {
 	g.mu.Lock()
 	defer g.mu.Unlock()

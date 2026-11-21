@@ -68,9 +68,11 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `gate_index` | Zero-based child positions from the root, separated by dots. The root uses an empty string. For a composite inside `wait-on-refuse`, its two children are `0.0` and `0.1`. Reordering children changes their indexes. |
 | `direction` | Token direction (only on `async_tokens_total`): `input` or `output` |
 
-The four-label `async_gate_metric_*` gauges keep the last reading for an owner and inference pool.
+The four-label `async_gate_metric_*` gauges preserve the v1 behavior for existing dashboards.
+Gates with the same owner and inference pool share the last usable value and threshold, and the availability of the last evaluation.
 Use the six-label instance gauges to distinguish children of a composite, including two gates of the same type.
-Replacing or removing a sorted-set queue retires its instance series. The number of instances is bounded by the configured gate tree.
+Replacing or removing a sorted-set queue retires its instance series. Retiring an individual gate leaves the shared gauges intact for its siblings.
+The number of instances is bounded by the configured gate tree.
 
 
 `pool_name` always names the **async worker pool** that owns the series, never the

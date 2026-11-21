@@ -2,6 +2,7 @@
 package metrics
 
 import (
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -35,7 +36,7 @@ var queueLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName}
 // the full queue triple so they join with the queue's other series; a
 // pool-level gate leaves queue_id and queue_name empty.
 var gateLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName, LabelInferencePool}
-var gateInstanceLabels = append(gateLabels, LabelGateType, LabelGateIndex)
+var gateInstanceLabels = slices.Concat(gateLabels, []string{LabelGateType, LabelGateIndex})
 
 var (
 	Retries = prometheus.NewCounterVec(prometheus.CounterOpts{
