@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 var _ MetricSource = (*CascadeMetricSource)(nil)
