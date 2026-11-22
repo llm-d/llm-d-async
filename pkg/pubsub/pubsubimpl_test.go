@@ -100,7 +100,7 @@ func TestProcessMessages_QuotaGating(t *testing.T) {
 				return nil
 			}
 
-			// Run in a goroutine because it blocks on resultsChannel
+			// Run in a goroutine because it blocks on the delivery's outcome channel
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 

@@ -53,13 +53,13 @@ func (r *deliveryRegistry) open() (uint64, <-chan bool, func()) {
 func (r *deliveryRegistry) signal(logger logr.Logger, token uint64, published bool) {
 	v, ok := r.m.Load(token)
 	if !ok {
-		logger.V(logutil.DEFAULT).Error(nil, "no waiting delivery for signal", "deliveryToken", token)
+		logger.V(logutil.DEFAULT).Error(nil, "No waiting delivery for signal", "deliveryToken", token)
 		return
 	}
 	select {
 	case v.(chan bool) <- published:
 	default:
-		logger.V(logutil.DEFAULT).Error(nil, "duplicate signal dropped", "deliveryToken", token)
+		logger.V(logutil.DEFAULT).Error(nil, "Duplicate signal dropped", "deliveryToken", token)
 	}
 }
 
@@ -655,11 +655,12 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 		}
 		body := wire.RequestMessage
 
+		token, outcome, closeDelivery := r.deliveries.open()
+		defer closeDelivery()
+
 		// Carry the subscription as the request queue label so all per-queue
 		// metrics (throughput, depth, inflight, latency) align with the
 		// async_broker_backlog gauge, which is keyed by subscription ID.
-		token, done, closeDelivery := r.deliveries.open()
-		defer closeDelivery()
 		irout := api.InternalRouting{TransportCorrelationID: msg.ID, RequestQueueName: subscriberID, DeliveryToken: token}
 		// Resolve the result destination with the sorted-set precedence:
 		// per-topic config > per-message result_queue_name > flow default
@@ -729,7 +730,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 			r.resultChannel <- resultMsg
 
 			// Wait for the result worker to finish publishing and signal true
-			result := <-done
+			result := <-outcome
 			if !result {
 				msg.Nack()
 			} else {
@@ -744,7 +745,7 @@ func (r *PubSubMQFlow) processMessages(ctx context.Context, receive receiveFunc,
 
 		ch <- ir
 
-		result := <-done
+		result := <-outcome
 		if !result {
 			msg.Nack()
 		} else {

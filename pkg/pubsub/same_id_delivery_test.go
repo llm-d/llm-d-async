@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,7 +16,11 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-const sameIDTimeout = 5 * time.Second
+const (
+	sameIDTimeout    = 5 * time.Second
+	sameIDSubscriber = "same-id-sub"
+	sameIDPool       = "same-id-pool"
+)
 
 // ackOutcome is how a receive callback finished.
 type ackOutcome string
@@ -24,6 +29,14 @@ const (
 	outcomeAck  ackOutcome = "ack"
 	outcomeNack ackOutcome = "nack"
 )
+
+// deliveryResult is what a receive callback reports to the test goroutine. err
+// is set when the Ack check could not read its metric; the test goroutine
+// reports it, because t must not be used from the callback goroutine.
+type deliveryResult struct {
+	outcome ackOutcome
+	err     error
+}
 
 // queueTagGate admits every request and tags it with its request ID as the
 // queue ID, so the per-request message-latency series shows which deliveries
@@ -40,24 +53,17 @@ func (queueTagGate) Apply(_ context.Context, ir *api.InternalRequest, _ *[]pipel
 
 // ackedLatencySamples returns how many Ack-path latency samples were recorded
 // for requestID.
-func ackedLatencySamples(t *testing.T, requestID string) uint64 {
-	t.Helper()
+func ackedLatencySamples(requestID string) (uint64, error) {
 	var m dto.Metric
 	if err := metrics.MessageLatencyTime.WithLabelValues(requestID, sameIDSubscriber, sameIDPool).(prometheus.Metric).Write(&m); err != nil {
-		t.Fatalf("read latency metric: %v", err)
+		return 0, fmt.Errorf("read latency metric: %w", err)
 	}
-	return m.GetHistogram().GetSampleCount()
+	return m.GetHistogram().GetSampleCount(), nil
 }
-
-const (
-	sameIDSubscriber = "same-id-sub"
-	sameIDPool       = "same-id-pool"
-)
 
 // sameIDHarness runs processMessages against a captured receive callback so a
 // test can deliver several messages that share one Pub/Sub message ID.
 type sameIDHarness struct {
-	t        *testing.T
 	callback func(context.Context, *pubsub.Message)
 	ctx      context.Context
 	ch       chan *api.InternalRequest
@@ -68,7 +74,7 @@ func newSameIDHarness(t *testing.T, flow *PubSubMQFlow) *sameIDHarness {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	h := &sameIDHarness{t: t, ctx: ctx, ch: make(chan *api.InternalRequest, 4)}
+	h := &sameIDHarness{ctx: ctx, ch: make(chan *api.InternalRequest, 4)}
 	captured := make(chan func(context.Context, *pubsub.Message), 1)
 	go func() {
 		_ = flow.processMessages(ctx, func(_ context.Context, f func(context.Context, *pubsub.Message)) error {
@@ -89,43 +95,51 @@ func newSameIDHarness(t *testing.T, flow *PubSubMQFlow) *sameIDHarness {
 // returned channel yields the delivery's outcome once the callback returns.
 // Ack and Nack are no-ops on a hand-built pubsub.Message, so an Ack is
 // recognised by the latency sample processMessages records just before it.
-func (h *sameIDHarness) deliver(id, requestID, resultQueue string) <-chan ackOutcome {
+func (h *sameIDHarness) deliver(t *testing.T, id, requestID, resultQueue string) <-chan deliveryResult {
+	t.Helper()
 	data, err := json.Marshal(map[string]any{
 		"id":                requestID,
 		"payload":           map[string]any{"prompt": "hi"},
 		"result_queue_name": resultQueue,
 	})
 	if err != nil {
-		h.t.Fatalf("marshal request: %v", err)
+		t.Fatalf("marshal request: %v", err)
 	}
-	done := make(chan ackOutcome, 1)
+	results := make(chan deliveryResult, 1)
 	go func() {
 		h.callback(h.ctx, &pubsub.Message{ID: id, Data: data})
-		if ackedLatencySamples(h.t, requestID) > 0 {
-			done <- outcomeAck
-			return
+		n, err := ackedLatencySamples(requestID)
+		switch {
+		case err != nil:
+			results <- deliveryResult{err: err}
+		case n > 0:
+			results <- deliveryResult{outcome: outcomeAck}
+		default:
+			results <- deliveryResult{outcome: outcomeNack}
 		}
-		done <- outcomeNack
 	}()
-	return done
+	return results
 }
 
-func (h *sameIDHarness) nextRequest() *api.InternalRequest {
-	h.t.Helper()
+func (h *sameIDHarness) nextRequest(t *testing.T) *api.InternalRequest {
+	t.Helper()
 	select {
 	case ir := <-h.ch:
 		return ir
 	case <-time.After(sameIDTimeout):
-		h.t.Fatal("timed out waiting for a request to reach the dispatch channel")
+		t.Fatal("timed out waiting for a request to reach the dispatch channel")
 		return nil
 	}
 }
 
-func awaitOutcome(t *testing.T, name string, done <-chan ackOutcome) ackOutcome {
+func awaitOutcome(t *testing.T, name string, results <-chan deliveryResult) ackOutcome {
 	t.Helper()
 	select {
-	case got := <-done:
-		return got
+	case got := <-results:
+		if got.err != nil {
+			t.Fatalf("%s: %v", name, got.err)
+		}
+		return got.outcome
 	case <-time.After(sameIDTimeout):
 		t.Fatalf("%s: receive callback is still blocked: its result was routed to another delivery", name)
 		return ""
@@ -146,20 +160,12 @@ func startResultWorker(t *testing.T, flow *PubSubMQFlow) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		runResultWorker(ctx, client, flow)
+		resultWorker(ctx, client, "", flow.resultChannel, &flow.deliveries)
 	}()
 	t.Cleanup(func() {
 		cancel()
 		<-stopped
 	})
-}
-
-func runResultWorker(ctx context.Context, client *pubsub.Client, flow *PubSubMQFlow) {
-	resultWorker(ctx, client, "", flow.resultChannel, &flow.deliveries)
-}
-
-func runRetryWorker(ctx context.Context, retryCh chan pipeline.RetryMessage, flow *PubSubMQFlow) {
-	addMsgToRetryQueue(ctx, retryCh, &flow.deliveries)
 }
 
 func publishResult(flow *PubSubMQFlow, ir *api.InternalRequest) {
@@ -176,10 +182,10 @@ func TestProcessMessages_SameIDDeliveriesFollowOwnResult(t *testing.T) {
 
 	// Same message ID. "ok" publishes to an existing topic, "bad" to a topic
 	// that does not exist, so one result succeeds and the other fails.
-	okDone := h.deliver("dup-id", "req-ok", "good-results")
-	first := h.nextRequest()
-	badDone := h.deliver("dup-id", "req-bad", "missing-results")
-	second := h.nextRequest()
+	okDone := h.deliver(t, "dup-id", "req-ok", "good-results")
+	first := h.nextRequest(t)
+	badDone := h.deliver(t, "dup-id", "req-bad", "missing-results")
+	second := h.nextRequest(t)
 
 	// The correlation ID stays the Pub/Sub message ID on every delivery.
 	for _, ir := range []*api.InternalRequest{first, second} {
@@ -207,10 +213,10 @@ func TestProcessMessages_FirstDeliveryFinishingKeepsSecondReachable(t *testing.T
 	h := newSameIDHarness(t, flow)
 	startResultWorker(t, flow)
 
-	firstDone := h.deliver("dup-id", "req-first", "good-results")
-	first := h.nextRequest()
-	secondDone := h.deliver("dup-id", "req-second", "missing-results")
-	second := h.nextRequest()
+	firstDone := h.deliver(t, "dup-id", "req-first", "good-results")
+	first := h.nextRequest(t)
+	secondDone := h.deliver(t, "dup-id", "req-second", "missing-results")
+	second := h.nextRequest(t)
 
 	publishResult(flow, first)
 	if got := awaitOutcome(t, "first delivery", firstDone); got != outcomeAck {
@@ -230,13 +236,13 @@ func TestAddMsgToRetryQueue_NacksOnlyRetriedDelivery(t *testing.T) {
 	h := newSameIDHarness(t, flow)
 	startResultWorker(t, flow)
 
-	retried := h.deliver("dup-id", "req-retried", "good-results")
-	retriedIR := h.nextRequest()
-	running := h.deliver("dup-id", "req-running", "good-results")
-	runningIR := h.nextRequest()
+	retried := h.deliver(t, "dup-id", "req-retried", "good-results")
+	retriedIR := h.nextRequest(t)
+	running := h.deliver(t, "dup-id", "req-running", "good-results")
+	runningIR := h.nextRequest(t)
 
 	retryCh := make(chan pipeline.RetryMessage)
-	go runRetryWorker(h.ctx, retryCh, flow)
+	go addMsgToRetryQueue(h.ctx, retryCh, &flow.deliveries)
 	retryCh <- pipeline.RetryMessage{EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{InternalRequest: retriedIR}}
 
 	if got := awaitOutcome(t, "retried delivery", retried); got != outcomeNack {
@@ -244,7 +250,7 @@ func TestAddMsgToRetryQueue_NacksOnlyRetriedDelivery(t *testing.T) {
 	}
 	select {
 	case got := <-running:
-		t.Fatalf("delivery that was not retried finished early with %q", got)
+		t.Fatalf("delivery that was not retried finished early: %+v", got)
 	case <-time.After(100 * time.Millisecond):
 	}
 

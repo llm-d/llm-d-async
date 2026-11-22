@@ -100,8 +100,9 @@ func TestGating_EndToEnd(t *testing.T) {
 		}
 
 		// 3. Complete Request 1
-		flow.deliveries.signal(logr.Discard(), req1.DeliveryToken, true) // Success
-		wg.Wait()                                                        // Wait for processMessages to finish and release quota
+		// Report a successful publish for request 1.
+		flow.deliveries.signal(logr.Discard(), req1.DeliveryToken, true)
+		wg.Wait() // Wait for processMessages to finish and release quota
 
 		// 4. Send Request 3 for User A (should now be allowed)
 		msg3 := createMsg("req-3", "user-a")

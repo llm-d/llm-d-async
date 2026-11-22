@@ -2,14 +2,14 @@ package pubsub
 
 import (
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
-	"github.com/llm-d/llm-d-async/api"
 )
+
+const registryTimeout = 5 * time.Second
 
 func TestDeliveryRegistry_TokensAreUnique(t *testing.T) {
 	var reg deliveryRegistry
@@ -46,7 +46,7 @@ func TestDeliveryRegistry_SignalReachesOnlyItsDelivery(t *testing.T) {
 		if got {
 			t.Error("delivery B received true, want false")
 		}
-	case <-time.After(sameIDTimeout):
+	case <-time.After(registryTimeout):
 		t.Fatal("delivery B never received its signal")
 	}
 }
@@ -58,13 +58,8 @@ func TestDeliveryRegistry_SecondSignalDoesNotBlock(t *testing.T) {
 	token, ch, closeDelivery := reg.open()
 	defer closeDelivery()
 
-	var mu sync.Mutex
 	var logged []string
-	logger := funcr.New(func(_, args string) {
-		mu.Lock()
-		defer mu.Unlock()
-		logged = append(logged, args)
-	}, funcr.Options{})
+	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
 
 	returned := make(chan struct{})
 	go func() {
@@ -74,17 +69,15 @@ func TestDeliveryRegistry_SecondSignalDoesNotBlock(t *testing.T) {
 	}()
 	select {
 	case <-returned:
-	case <-time.After(sameIDTimeout):
+	case <-time.After(registryTimeout):
 		t.Fatal("second signal blocked")
 	}
 
 	if got := <-ch; got {
 		t.Error("outcome = true, want the first signal (false)")
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(logged) != 1 || !strings.Contains(logged[0], "duplicate signal dropped") {
-		t.Errorf("logged %v, want one \"duplicate signal dropped\" error", logged)
+	if len(logged) != 1 || !strings.Contains(logged[0], "Duplicate signal dropped") {
+		t.Errorf("logged %v, want one \"Duplicate signal dropped\" error", logged)
 	}
 }
 
@@ -102,7 +95,7 @@ func TestDeliveryRegistry_UnknownTokenLogsError(t *testing.T) {
 		t.Fatalf("logged %d entries, want 2: %v", len(logged), logged)
 	}
 	for _, entry := range logged {
-		if !strings.Contains(entry, "no waiting delivery for signal") {
+		if !strings.Contains(entry, "No waiting delivery for signal") {
 			t.Errorf("log entry %q does not name the missing delivery", entry)
 		}
 	}
@@ -117,7 +110,7 @@ func TestDeliveryRegistry_UnsetTokenLogsError(t *testing.T) {
 	var logged []string
 	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
 
-	reg.signal(logger, api.InternalRouting{}.DeliveryToken, true)
+	reg.signal(logger, 0, true)
 
 	if len(logged) != 1 {
 		t.Fatalf("logged %v, want one error", logged)
