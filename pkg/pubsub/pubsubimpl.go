@@ -357,7 +357,10 @@ func (r *PubSubMQFlow) Start(ctx context.Context) {
 		defer r.drainWg.Done()
 		resultWorker(drainCtx, pubSubClient, r.resultTopicID, r.resultChannel, &r.deliveries)
 	}()
-	go func() { defer r.drainWg.Done(); addMsgToRetryQueue(drainCtx, r.retryChannel, &r.deliveries) }()
+	go func() {
+		defer r.drainWg.Done()
+		addMsgToRetryQueue(drainCtx, r.retryChannel, &r.deliveries)
+	}()
 }
 
 func (r *PubSubMQFlow) StopConsuming() {
