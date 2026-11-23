@@ -71,6 +71,26 @@ jobs:
           helm plugin install --version v1.0.3 --verify=false https://github.com/helm-unittest/helm-unittest.git
           helm unittest charts/llm-d-async
 
+      # Trivy reads dependency licenses from the Go module cache, so every
+      # module in the repository is downloaded first.
+      - name: Download Go modules for the license scan
+        run: |
+          for mod in $(git ls-files '*go.mod'); do
+            (cd "$(dirname "$mod")" && GOWORK=off go mod download)
+          done
+
+      # Fails on licenses Trivy classes as restricted (HIGH, e.g. GPL, LGPL) or
+      # forbidden (CRITICAL, e.g. AGPL).
+      - name: Scan dependency licenses
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: license
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+
   check-code-changes:
     runs-on: ubuntu-latest
     permissions:
