@@ -148,18 +148,26 @@ Expected: one `llm_d_epp_ready_endpoints` series per scraped EPP replica, each r
 
 [Valkey](https://valkey.io/) is a BSD-licensed, Redis-compatible alternative that works as a drop-in replacement. All `redis.*` flags and configurations work unchanged with Valkey.
 
+The processor needs a Redis that never evicts keys; see [Redis requirements](../redis.md). Both options set a 512 MB limit with `noeviction`.
+
 **Option A — Redis:**
 
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
-helm install redis bitnami/redis -n redis --create-namespace --set auth.enabled=false
+helm install redis bitnami/redis -n redis --create-namespace --set auth.enabled=false \
+    --set master.resources.requests.memory=1Gi --set master.resources.limits.memory=1Gi \
+    --set-json 'master.extraFlags=["--maxmemory 512mb","--maxmemory-policy noeviction"]'
+export REDIS_HOST=redis-master.redis.svc.cluster.local
 ```
 
 **Option B — Valkey:**
 
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
-helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled=false
+helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled=false \
+    --set primary.resources.requests.memory=1Gi --set primary.resources.limits.memory=1Gi \
+    --set-json 'primary.extraFlags=["--maxmemory 512mb","--maxmemory-policy noeviction"]'
+export REDIS_HOST=redis-valkey-primary.redis.svc.cluster.local
 ```
 
 ## Step 9: Deploy Async Processor with dispatch budget gate
@@ -168,6 +176,7 @@ helm install redis bitnami/valkey -n redis --create-namespace --set auth.enabled
 helm install llm-d-async ${ASYNC_REPO}/charts/llm-d-async/ \
     -f ${ASYNC_REPO}/docs/guides/e2e-deploy/llm-d-async-values.yaml \
     --set-string "ap.transportConfig.queues[0].gate_params.namespace=${NAMESPACE}" \
+    --set-string "ap.transportConfig.urlSecret.url=redis://${REDIS_HOST}:6379" \
     -n ${NAMESPACE}
 ```
 
@@ -333,8 +342,6 @@ kubectl get configmap -n ${NAMESPACE} -l grafana_dashboard=1
 Requests use the `InternalRequest` wire format with a `request_kind` envelope:
 
 ```bash
-export REDIS_HOST=redis-master.redis.svc.cluster.local
-
 # Push a valid request
 kubectl run --rm -i test-push --image=redis --restart=Never -n ${NAMESPACE} -- \
     redis-cli -h ${REDIS_HOST} ZADD request-sortedset 1999999999 \
