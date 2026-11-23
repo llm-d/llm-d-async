@@ -301,7 +301,8 @@ func (f *GateFactory) Close() error {
 //     Params: query (required), fallback (default 0.0)
 //   - "inference-pool-ready": Opens when llm_d_epp_ready_endpoints for the pool (max across EPP
 //     replicas) is at least min_ready_endpoints, and holds requests otherwise, e.g. while the
-//     pool is scaled to zero. A missing metric holds unless fail_open is set.
+//     pool is scaled to zero. A missing metric holds unless fail_open is set, and so does a pool
+//     name that matches more than one namespace when namespace is not set.
 //     Params: pool (required), namespace, min_ready_endpoints (default 1), fail_open (default false)
 //   - "endpoint-scrape": Scrapes a metric endpoint and interprets the normalized value as
 //     saturation (default) or a direct budget. Params: url and metric (required),
@@ -557,11 +558,13 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		if namespace != "" {
 			labels["namespace"] = namespace
 		}
-		query := fmt.Sprintf(`max(%s) >= bool %d`, buildPromQL("llm_d_epp_ready_endpoints", labels), minReady)
+		readyMetric := buildPromQL("llm_d_epp_ready_endpoints", labels)
+		query := requireSingleNamespace(fmt.Sprintf(`max(%s) >= bool %d`, readyMetric, minReady), namespace, readyMetric)
 
 		// The query evaluates to 1 when the pool has enough ready endpoints and 0
 		// otherwise. A missing metric (no InferencePool yet, or the EPP is down)
-		// takes the fallback, which holds requests unless fail_open is set.
+		// or an unscoped pool name found in several namespaces returns no samples
+		// and takes the fallback, which holds requests unless fail_open is set.
 		fallback := 0.0
 		if failOpen {
 			fallback = 1.0

@@ -309,13 +309,16 @@ The available gate types, at a glance:
   The budget is `1` when the pool has enough ready endpoints and `0` otherwise. `max` keeps an HA
   EPP (several replicas reporting the same pool) behaving like a single one. The metric is absent
   until the EPP has an InferencePool and absent when the EPP is down; both take the fallback.
+  Without `namespace`, the pool name must match a single namespace: when the same name is found in
+  several namespaces, the query returns no samples and also takes the fallback, so a ready pool
+  elsewhere cannot open the gate for one that is scaled to zero.
 
   - `pool` (**required**): The InferencePool name, matched against the `name` label.
-  - `namespace` (optional): Adds a `namespace` label match, for a Prometheus that holds pools with
-    the same name in several namespaces.
+  - `namespace` (optional): Adds a `namespace` label match. Set it whenever the Prometheus holds
+    pools with the same name in several namespaces; without it, such a name takes the fallback.
   - `min_ready_endpoints` (optional): Ready endpoints needed to open the gate. Must be `>= 1`. Default is `1`.
-  - `fail_open` (optional): When `true`, a failed query or missing metric lets requests through.
-    Default is `false` (fail closed).
+  - `fail_open` (optional): When `true`, a failed query, a missing metric, or an ambiguous pool
+    name lets requests through. Default is `false` (fail closed).
 
   Configure it as a **pool-level** gate inside `wait-on-refuse` so held requests park in memory
   instead of returning to the broker, and combine it with a saturation or budget gate in a
