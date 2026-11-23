@@ -75,6 +75,8 @@ Turns JSON media requests into the `multipart/form-data` bodies their endpoints 
 | `.../v1/audio/transcriptions`, `.../v1/audio/translations` (vLLM) | Reads `file`, an `s3://bucket/key` reference or a base64 `data:` URL, and sends its bytes as the multipart `file` part. Every other field becomes a form field. |
 | `.../v1/images/edits` (vllm-omni) | Maps each `images[].image_url` to a `url` form field, which vllm-omni fetches itself: `s3://bucket/key` references are presigned, base64 `data:image/` URLs pass through, and any other URL is rejected. Every other field becomes a form field. The worker never downloads the image. |
 
+`/v1/audio/speech` and `/v1/images/generations` already take JSON, so they need no transform; the plugin leaves them unchanged.
+
 ```json
 {
   "requestTransforms": [

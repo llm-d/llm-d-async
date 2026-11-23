@@ -96,6 +96,15 @@ ap:
   #       type: "gcs_uri_multipart"
   #       parameters:
   #         providers: ["whisper"]
+  #     # JSON media requests (audio transcriptions/translations, vllm-omni image
+  #     # edits) to multipart, reading s3:// media from the listed buckets.
+  #     - name: "media"
+  #       type: "s3_multipart"
+  #       parameters:
+  #         endpoint: "http://seaweedfs.batch.svc:8333"
+  #         region: "us-east-1"
+  #         usePathStyle: true
+  #         allowedBuckets: ["batch-files"]
   transformConfig: {}
   # Request merge policy configuration. When set, rendered to a config file and passed
   # via --request-merge-policy-config-file.
