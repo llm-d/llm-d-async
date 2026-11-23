@@ -480,6 +480,10 @@ func TestGateFactory_InferencePoolReadyGate(t *testing.T) {
 	sample := func(v string) string {
 		return fmt.Sprintf(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1234567,"%s"]}]}}`, v)
 	}
+	// Without a namespace param the pool name must resolve to one namespace;
+	// a same-named pool elsewhere makes the query return no samples (fallback).
+	const unscopedQuery = `(max(llm_d_epp_ready_endpoints{name="my-pool"}) >= bool 1) and on() ` +
+		`(count(count by(namespace)(llm_d_epp_ready_endpoints{name="my-pool"})) == 1)`
 
 	tests := []struct {
 		name       string
@@ -492,7 +496,7 @@ func TestGateFactory_InferencePoolReadyGate(t *testing.T) {
 			name:       "enough ready endpoints opens the gate",
 			params:     map[string]any{"pool": "my-pool"},
 			response:   sample("1"),
-			wantQuery:  `max(llm_d_epp_ready_endpoints{name="my-pool"}) >= bool 1`,
+			wantQuery:  unscopedQuery,
 			wantBudget: 1.0,
 		},
 		{
@@ -506,14 +510,14 @@ func TestGateFactory_InferencePoolReadyGate(t *testing.T) {
 			name:       "missing metric fails closed by default",
 			params:     map[string]any{"pool": "my-pool"},
 			response:   emptyVector,
-			wantQuery:  `max(llm_d_epp_ready_endpoints{name="my-pool"}) >= bool 1`,
+			wantQuery:  unscopedQuery,
 			wantBudget: 0.0,
 		},
 		{
 			name:       "missing metric fails open when fail_open is set",
 			params:     map[string]any{"pool": "my-pool", "fail_open": true},
 			response:   emptyVector,
-			wantQuery:  `max(llm_d_epp_ready_endpoints{name="my-pool"}) >= bool 1`,
+			wantQuery:  unscopedQuery,
 			wantBudget: 1.0,
 		},
 	}
