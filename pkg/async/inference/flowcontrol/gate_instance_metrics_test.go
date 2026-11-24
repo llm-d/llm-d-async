@@ -45,22 +45,28 @@ func TestRetiringGatePreservesSharedGauges(t *testing.T) {
 	cfg := pipeline.GateConfig{Owner: owner, GateType: "prometheus-saturation", GateParams: map[string]any{"pool": pool}}
 	first, err := factory.createGate(cfg, "0")
 	require.NoError(t, err)
-	t.Cleanup(func() { factory.RetireGateMetrics(first) })
+	t.Cleanup(func() { metrics.RetireGateMetrics(first) })
 	cfg.GateParams["threshold"] = 0.5
 	second, err := factory.createGate(cfg, "1")
 	require.NoError(t, err)
-	t.Cleanup(func() { factory.RetireGateMetrics(second) })
+	t.Cleanup(func() { metrics.RetireGateMetrics(second) })
 
-	labels := []string{owner.QueueID, owner.QueueName, owner.WorkerPoolID, pool}
-	for _, gauge := range []*prometheus.GaugeVec{metrics.GateMetricValue, metrics.GateMetricThreshold, metrics.GateMetricSourceAvailable} {
-		t.Cleanup(func() { gauge.DeleteLabelValues(labels...) })
-	}
+	labels := sharedGaugeLabels(t, owner, pool)
 	first.Budget(t.Context())
 	second.Budget(t.Context())
-	factory.RetireGateMetrics(first)
+	metrics.RetireGateMetrics(first)
 	require.Equal(t, 0.7, testutil.ToFloat64(metrics.GateMetricValue.WithLabelValues(labels...)))
 	require.Equal(t, 0.5, testutil.ToFloat64(metrics.GateMetricThreshold.WithLabelValues(labels...)))
 	require.Equal(t, 1.0, testutil.ToFloat64(metrics.GateMetricSourceAvailable.WithLabelValues(labels...)))
+}
+
+func sharedGaugeLabels(t *testing.T, owner pipeline.GateOwner, inferencePool string) []string {
+	t.Helper()
+	labels := []string{owner.QueueID, owner.QueueName, owner.WorkerPoolID, inferencePool}
+	for _, gauge := range []*prometheus.GaugeVec{metrics.GateMetricValue, metrics.GateMetricThreshold, metrics.GateMetricSourceAvailable} {
+		t.Cleanup(func() { gauge.DeleteLabelValues(labels...) })
+	}
+	return labels
 }
 
 func TestGateInstanceMetricsAcrossQueueReload(t *testing.T) {
@@ -98,13 +104,14 @@ func TestGateInstanceMetricsAcrossQueueReload(t *testing.T) {
 		GateConfig: pipeline.GateConfig{GateType: "wait-on-refuse", GateParams: map[string]any{
 			"gate": `{"gate_type":"composite","gate_params":{"gates":[
 				{"gate_type":"prometheus-query","gate_params":{"query":"high","pool":"shared"}},
-				{"gate_type":"wait-on-refuse","gate_params":{"gate":
-					{"gate_type":"prometheus-query","gate_params":{"query":"low","pool":"shared"}}}},
+				{"gate_type":"tier-priority-admission","gate_params":{"saturation_gate":"prometheus-query",
+					"saturation_gate_params":{"query":"low","pool":"shared"}}},
 				{"gate_type":"prometheus-query","gate_params":{"query":"missing","pool":"shared"}}
 			]}}`,
 		}},
 	}
-	flow := newMetricTestFlow(t, factory, queue)
+	// A factory supplied by a plugin only needs to implement CreateGate.
+	flow := newMetricTestFlow(t, struct{ pipeline.GateFactory }{factory}, queue)
 	ctx := context.Background()
 	old := flow.RequestChannels()[0].Gate
 	old.Budget(ctx)
@@ -184,26 +191,42 @@ func newMetricTestFlow(t *testing.T, factory pipeline.GateFactory, queues ...red
 }
 
 func TestEndpointScrapeInstancesHaveSeparateQueueOwners(t *testing.T) {
+	var unavailable atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if unavailable.Load() {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		_, _ = fmt.Fprint(w, "# TYPE capacity gauge\ncapacity 0.75\n")
 	}))
 	defer server.Close()
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(metrics.GetAsyncProcessorCollectors(false)...)
 	queue := func(id string) redisflow.SortedSetQueueConfig {
-		return redisflow.SortedSetQueueConfig{ID: id, QueueName: id, IGWBaseURL: "http://gw",
+		return redisflow.SortedSetQueueConfig{ID: id, QueueName: id + "-requests", IGWBaseURL: "http://gw",
 			GateConfig: pipeline.GateConfig{GateType: "endpoint-scrape",
-				GateParams: map[string]any{"url": server.URL, "metric": "capacity", "value_type": "budget"}},
+				GateParams: map[string]any{"url": server.URL, "metric": "capacity", "value_type": "budget", "baseline": .25, "fallback": .1}},
 		}
+	}
+	owner := func(q redisflow.SortedSetQueueConfig) pipeline.GateOwner {
+		return pipeline.GateOwner{QueueID: q.ID, QueueName: q.QueueName, WorkerPoolID: "default"}
 	}
 	first, second := queue(t.Name()+"-a"), queue(t.Name()+"-b")
 	flow := newMetricTestFlow(t, NewGateFactoryWithCacheTTL("", 0), first, second)
-	for _, ch := range flow.RequestChannels() {
-		require.Equal(t, .75, ch.Gate.Budget(context.Background()))
+	queues := []redisflow.SortedSetQueueConfig{first, second}
+	for i, ch := range flow.RequestChannels() {
+		labels := sharedGaugeLabels(t, owner(queues[i]), "")
+		unavailable.Store(false)
+		require.Equal(t, .5, ch.Gate.Budget(t.Context()))
+		require.Equal(t, .75, testutil.ToFloat64(metrics.GateMetricValue.WithLabelValues(labels...)))
+		require.Equal(t, .25, testutil.ToFloat64(metrics.GateMetricThreshold.WithLabelValues(labels...)))
+		require.Equal(t, 1.0, testutil.ToFloat64(metrics.GateMetricSourceAvailable.WithLabelValues(labels...)))
+		unavailable.Store(true)
+		require.Equal(t, .1, ch.Gate.Budget(t.Context()))
+		require.Zero(t, testutil.ToFloat64(metrics.GateMetricSourceAvailable.WithLabelValues(labels...)))
 	}
 	values := func(queue redisflow.SortedSetQueueConfig) map[string]float64 {
-		owner := pipeline.GateOwner{QueueID: queue.ID, QueueName: queue.QueueName, WorkerPoolID: "default"}
-		return gateInstanceSamples(t, registry, "value", owner, "")
+		return gateInstanceSamples(t, registry, "value", owner(queue), "")
 	}
 	expected := map[string]float64{"endpoint-scrape/": .75}
 	require.Equal(t, expected, values(first))

@@ -536,8 +536,8 @@ func (r *RedisSortedSetFlow) ReconfigureQueues(queues []SortedSetQueueConfig, be
 		if old.cancel != nil {
 			old.cancel()
 		}
-		if factory, ok := r.gateFactory.(interface{ RetireGateMetrics(pipeline.Gate) }); ok && old.config.GateType != "" {
-			factory.RetireGateMetrics(old.data.gate)
+		if r.gateFactory != nil && old.config.GateType != "" {
+			metrics.RetireGateMetrics(old.data.gate)
 		}
 	}
 	for _, queueCfg := range normalized {

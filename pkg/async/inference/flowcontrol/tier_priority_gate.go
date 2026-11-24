@@ -6,6 +6,7 @@ import (
 
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
 )
 
 var _ pipeline.Gate = (*TierPriorityAdmissionGate)(nil)
@@ -23,6 +24,10 @@ func NewTierPriorityAdmissionGate(saturationGate pipeline.Gate, tierLabel string
 		saturationGate: saturationGate,
 		tierLabel:      tierLabel,
 	}
+}
+
+func (g *TierPriorityAdmissionGate) RetireGateMetrics() {
+	metrics.RetireGateMetrics(g.saturationGate)
 }
 
 func (g *TierPriorityAdmissionGate) Budget(ctx context.Context) float64 {

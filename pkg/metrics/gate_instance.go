@@ -6,6 +6,17 @@ import (
 	"github.com/llm-d/llm-d-async/pipeline"
 )
 
+type gateMetricsRetirer interface {
+	RetireGateMetrics()
+}
+
+// RetireGateMetrics releases instance series when a gate that owns them is removed.
+func RetireGateMetrics(gate pipeline.Gate) {
+	if r, ok := gate.(gateMetricsRetirer); ok {
+		r.RetireGateMetrics()
+	}
+}
+
 // GateInstanceMetrics identifies one metric gate in its owner's configuration.
 // Its labels are set before the gate is used.
 type GateInstanceMetrics struct {

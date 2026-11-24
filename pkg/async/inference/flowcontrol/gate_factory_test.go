@@ -437,7 +437,7 @@ func TestGateFactory_StampsOwnerOnMetricGate(t *testing.T) {
 
 	metricGate, ok := gate.(*MetricDispatchGate)
 	assert.True(t, ok, "prometheus-query should produce a MetricDispatchGate")
-	assert.Equal(t, owner, metricGate.owner)
+	assert.Equal(t, owner, metricGate.readings.Owner)
 	assert.Equal(t, "optimized-baseline", metricGate.readings.InferencePool)
 }
 
@@ -474,7 +474,7 @@ func TestGateFactory_PropagatesOwnerThroughWrappers(t *testing.T) {
 	assert.True(t, ok)
 	metricGate, ok := waiter.inner.(*MetricDispatchGate)
 	assert.True(t, ok)
-	assert.Equal(t, owner, metricGate.owner)
+	assert.Equal(t, owner, metricGate.readings.Owner)
 }
 
 // TestGateFactory_PropagatesOwnerToSaturationGate covers the third recursion site,
@@ -497,7 +497,7 @@ func TestGateFactory_PropagatesOwnerToSaturationGate(t *testing.T) {
 	assert.True(t, ok)
 	metricGate, ok := tierGate.saturationGate.(*MetricDispatchGate)
 	assert.True(t, ok)
-	assert.Equal(t, owner, metricGate.owner)
+	assert.Equal(t, owner, metricGate.readings.Owner)
 }
 
 // --- GMP auth RoundTripper tests ---

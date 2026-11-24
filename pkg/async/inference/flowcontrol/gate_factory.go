@@ -311,27 +311,11 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 func (f *GateFactory) createGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
 	gate, err := f.buildGate(cfg, index)
 	if metric, ok := gate.(*MetricDispatchGate); ok {
-		metric.readings.Owner = cfg.Owner
+		metric.WithOwner(cfg.Owner)
 		metric.readings.Type = cfg.GateType
 		metric.readings.Index = index
 	}
 	return gate, err
-}
-
-// RetireGateMetrics releases metrics for the configured gate tree when a queue is replaced or removed.
-func (f *GateFactory) RetireGateMetrics(gate pipeline.Gate) {
-	switch g := gate.(type) {
-	case *MetricDispatchGate:
-		g.readings.Retire()
-	case *CompositeGate:
-		for _, child := range g.gates {
-			f.RetireGateMetrics(child)
-		}
-	case *WaitOnRefuseGate:
-		f.RetireGateMetrics(g.inner)
-	case *TierPriorityAdmissionGate:
-		f.RetireGateMetrics(g.saturationGate)
-	}
 }
 
 func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
@@ -485,7 +469,6 @@ func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline
 			ms = NewCachedMetricSource(source, f.cacheTTL)
 		}
 		return NewSaturationDispatchGate(ms, threshold, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(paramString(params, "pool", "")), nil
 
 	case "prometheus-budget":
@@ -557,7 +540,6 @@ func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline
 		)
 
 		return NewBudgetDispatchGate(ms, baseline, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(pool), nil
 
 	case "prometheus-query":
@@ -587,7 +569,6 @@ func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline
 		// the inference_pool label on async_gate_metric_value; it does not affect
 		// the query. pool_name comes from the queue or pool that owns the gate.
 		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(paramString(params, "pool", "")), nil
 
 	case "endpoint-scrape":
