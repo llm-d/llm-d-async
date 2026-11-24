@@ -41,6 +41,11 @@ type InternalRouting struct {
 	ResultTTLSeconds       int64  `json:"result_ttl_seconds,omitempty"`
 	ResultRoutingResolved  bool   `json:"result_routing_resolved,omitempty"`
 	TransportCorrelationID string `json:"transport_correlation_id,omitempty"`
+	// DeliveryToken is a transport-private, per-delivery rendezvous key that
+	// is unique within one process. Zero means unset. It is in-process only and
+	// is not persisted. Only the gcp-pubsub transport (pkg/pubsub) sets it;
+	// other transports leave it zero.
+	DeliveryToken uint64 `json:"-"`
 	// EnqueueSeq is the producer's 1-based submission order among requests
 	// sharing this queue and deadline.
 	EnqueueSeq int64 `json:"enqueue_seq,omitempty"`
