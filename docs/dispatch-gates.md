@@ -194,7 +194,7 @@ The available gate types, at a glance:
   Sources 0 and 2 compute `max_SYS = ready_pods × max_concurrency` dynamically from the
   `llm_d_epp_ready_endpoints` metric. Source 1 averages over pods, so the `ready_pods` factor
   cancels and no join is needed. That also keeps it honest when the pool drains: EPP's metrics
-  refresh [returns early when the pool has no pods](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/v1.2.1/pkg/epp/backend/metrics/logger.go#L89-L91),
+  refresh [returns early when the pool has no pods](https://github.com/llm-d/llm-d-router/blob/fb9e9649a4e75ff3476196130affd78d43d20455/pkg/epp/datalayer/logger/logger.go#L113-L119),
   so `llm_d_epp_average_queue_size` and the other pool averages freeze at their last
   values and a scaled-to-zero pool would read as idle capacity. Since llm-d-router v0.9.0,
   `llm_d_epp_ready_endpoints` is recorded before that early return and drops to `0`. `llm_d_epp_per_endpoint_queue_size`
