@@ -2,6 +2,7 @@
 package metrics
 
 import (
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -25,6 +26,8 @@ const (
 	// series — several worker pools may gate on one InferencePool, and one
 	// worker pool may serve several.
 	LabelInferencePool = "inference_pool"
+	LabelGateType      = "gate_type"
+	LabelGateIndex     = "gate_index"
 )
 
 var queueLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName}
@@ -33,6 +36,7 @@ var queueLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName}
 // the full queue triple so they join with the queue's other series; a
 // pool-level gate leaves queue_id and queue_name empty.
 var gateLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName, LabelInferencePool}
+var gateInstanceLabels = slices.Concat(gateLabels, []string{LabelGateType, LabelGateIndex})
 
 var (
 	Retries = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -169,6 +173,18 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_gate_metric_source_available",
 		Help: "1 when a metric-based dispatch gate's last evaluation got a usable reading from its metric source, 0 when it fell back to the configured 'fallback' budget (query error, no samples, or NaN/Inf). Distinguishes a fallback budget from a real reading of the same number: async_dispatch_budget 0 with this at 1 means a saturated pool, at 0 means unreadable metrics. async_gate_metric_value is stale whenever this is 0.",
 	}, gateLabels)
+	gateInstanceValue = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_gate_instance_metric_value",
+		Help: "Last usable metric value for a configured gate instance.",
+	}, gateInstanceLabels)
+	gateInstanceThreshold = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_gate_instance_metric_threshold",
+		Help: "Threshold the configured gate instance compares its metric value against.",
+	}, gateInstanceLabels)
+	gateInstanceSourceAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: SchedulerSubsystem, Name: "async_gate_instance_metric_source_available",
+		Help: "1 when the gate instance obtained a usable metric reading, or 0 when it used its fallback.",
+	}, gateInstanceLabels)
 )
 
 // Gate decision reason label values for async_gate_decisions_total.
@@ -552,6 +568,7 @@ func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Colle
 		DispatchBudget, PoolWorkerLimit, QueueConfigReloads, QueueConfigLastSuccess,
 		DrainLimitRPS, DrainLimitLeaseValid, DrainLimitValidUntil, GateDecisions,
 		GateMetricValue, GateMetricThreshold, GateMetricSourceAvailable,
+		gateInstanceValue, gateInstanceThreshold, gateInstanceSourceAvailable,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

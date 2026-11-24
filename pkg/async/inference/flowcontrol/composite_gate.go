@@ -21,6 +21,7 @@ import (
 
 	"github.com/llm-d/llm-d-async/api"
 	pipeline "github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
 )
 
 var _ pipeline.Gate = (*CompositeGate)(nil)
@@ -35,6 +36,12 @@ type CompositeGate struct {
 // NewCompositeGate creates a CompositeGate with the given inner gates.
 func NewCompositeGate(gates ...pipeline.Gate) *CompositeGate {
 	return &CompositeGate{gates: gates}
+}
+
+func (c *CompositeGate) RetireGateMetrics() {
+	for _, gate := range c.gates {
+		metrics.RetireGateMetrics(gate)
+	}
 }
 
 // Budget implements pipeline.Gate.

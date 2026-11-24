@@ -310,6 +310,29 @@ func (f *GateFactory) Close() error {
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error) {
+	return f.createGate(cfg, "")
+}
+
+func (f *GateFactory) createGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
+	gate, err := f.buildGate(cfg, index)
+	if metric, ok := gate.(*MetricDispatchGate); ok {
+		metric.WithOwner(cfg.Owner)
+		metric.readings.Type = cfg.GateType
+		metric.readings.Index = index
+	}
+	return gate, err
+}
+
+func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
+	childGate := func(child pipeline.GateConfig, position int) (pipeline.Gate, error) {
+		child.Owner = cfg.Owner
+		path := strconv.Itoa(position)
+		if index != "" {
+			path = index + "." + path
+		}
+		return f.createGate(child, path)
+	}
+
 	params := cfg.GateParams
 	if params == nil {
 		params = map[string]any{}
@@ -323,9 +346,8 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		}
 
 		var innerGates []pipeline.Gate
-		for _, innerCfg := range configs {
-			innerCfg.Owner = cfg.Owner
-			gate, err := f.CreateGate(innerCfg)
+		for i, innerCfg := range configs {
+			gate, err := childGate(innerCfg, i)
 			if err != nil {
 				return nil, fmt.Errorf("composite gate failed to create inner gate %q: %w", innerCfg.GateType, err)
 			}
@@ -340,8 +362,7 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		innerCfg.Owner = cfg.Owner
-		innerGate, err := f.CreateGate(innerCfg)
+		innerGate, err := childGate(innerCfg, 0)
 		if err != nil {
 			return nil, fmt.Errorf("wait-on-refuse gate failed to create inner gate %q: %w", innerCfg.GateType, err)
 		}
@@ -358,11 +379,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("tier-priority-admission gate failed to parse 'saturation_gate_params': %w", err)
 		}
 
-		satGate, err := f.CreateGate(pipeline.GateConfig{
+		satGate, err := childGate(pipeline.GateConfig{
 			GateType:   satGateType,
 			GateParams: satGateParams,
-			Owner:      cfg.Owner,
-		})
+		}, 0)
 		if err != nil {
 			return nil, fmt.Errorf("tier-priority-admission gate failed to create saturation gate %q: %w", satGateType, err)
 		}
@@ -454,7 +474,6 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			ms = NewCachedMetricSource(source, f.cacheTTL)
 		}
 		return NewSaturationDispatchGate(ms, threshold, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(paramString(params, "pool", "")), nil
 
 	case "prometheus-budget":
@@ -526,7 +545,6 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		)
 
 		return NewBudgetDispatchGate(ms, baseline, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(pool), nil
 
 	case "inference-pool-ready":
@@ -610,7 +628,6 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		// the inference_pool label on async_gate_metric_value; it does not affect
 		// the query. pool_name comes from the queue or pool that owns the gate.
 		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(paramString(params, "pool", "")), nil
 
 	case "endpoint-scrape":
