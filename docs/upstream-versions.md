@@ -2,11 +2,11 @@
 
 | Dependency | Current Pin | Pin Type | File Location | Upstream Repo |
 |---|---|---|---|---|
-| Gateway API Inference Extension (GAIE) Go module | `v1.2.1` | tag | [go.mod](../go.mod) | [kubernetes-sigs/gateway-api-inference-extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) |
+| Gateway API Inference Extension (GAIE) Go module | `v1.6.2` | tag ([#558](https://github.com/llm-d/llm-d-async/pull/558)) | [go.mod](../go.mod) | [kubernetes-sigs/gateway-api-inference-extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) |
 | GAIE InferencePool CRDs used by end-to-end tests | `v1.6.2` | tag (`GAIE_VERSION` default) | [E2E suite](../test/e2e/e2e_suite_test.go) | [GAIE releases](https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases) |
 | llm-d-router endpoint picker and router CRDs used by end-to-end tests | `main` | branch (`EPP_IMAGE` and `ROUTER_VERSION` defaults) | [E2E suite](../test/e2e/e2e_suite_test.go) | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router) |
 
-The Go module is a build dependency. For a deployment, select the GAIE CRDs expected by the router image and take router-owned CRDs from the matching router release. The E2E defaults exercise router `main` with the `llm-d.ai/v1` configuration.
+The Go module is a build dependency. The `v0.11.0` and `v1.0.0` processor releases used in the upgrade guide both pin GAIE `v1.2.1`. For a deployment, select the GAIE CRDs expected by the router image and take router-owned CRDs from the matching router release. The E2E defaults exercise router `main` with the `llm-d.ai/v1` configuration.
 
 ## Router compatibility for the processor
 
