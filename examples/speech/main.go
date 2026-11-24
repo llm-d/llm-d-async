@@ -82,7 +82,7 @@ func run() error {
 	if res.StatusCode != 200 {
 		return fmt.Errorf("status %d: %s", res.StatusCode, body)
 	}
-	if err := os.WriteFile(*out, body, 0o644); err != nil {
+	if err := os.WriteFile(*out, body, 0o600); err != nil {
 		return fmt.Errorf("write audio: %w", err)
 	}
 	fmt.Printf("%s: %d bytes of %s\n", *out, len(body), res.ContentType)
