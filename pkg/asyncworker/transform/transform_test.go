@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
@@ -119,6 +120,49 @@ func TestChain_Apply_ErrorShortCircuits(t *testing.T) {
 	}
 	if !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+}
+
+// ctxFakeTransform implements ContextTransform and records what it was given.
+// Its Transform must not be called by ApplyContext.
+type ctxFakeTransform struct {
+	fakeTransform
+	gotURL      string
+	gotDeadline bool
+}
+
+var _ ContextTransform = (*ctxFakeTransform)(nil)
+
+func (f *ctxFakeTransform) Transform(_ []byte, _ map[string]string) ([]byte, string, bool, error) {
+	return nil, "", false, errors.New("Transform called instead of TransformContext")
+}
+
+func (f *ctxFakeTransform) TransformContext(ctx context.Context, _ []byte, _ map[string]string, requestURL string) ([]byte, string, bool, error) {
+	f.gotURL = requestURL
+	_, f.gotDeadline = ctx.Deadline()
+	return f.body, f.contentType, f.handled, nil
+}
+
+func TestChain_ApplyContext_MixesContextAndPlainTransforms(t *testing.T) {
+	var log []string
+	plain := &fakeTransform{name: "plain", transformLog: &log}
+	withCtx := &ctxFakeTransform{fakeTransform: fakeTransform{name: "ctx", handled: true, body: []byte("B"), contentType: "ct"}}
+	c := NewChain([]RequestTransform{plain, withCtx})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	body, ct, handled, err := c.ApplyContext(ctx, []byte(`{}`), nil, "http://gw/v1/audio/transcriptions")
+	if err != nil || !handled || string(body) != "B" || ct != "ct" {
+		t.Fatalf("ApplyContext = (%q,%q,%v,%v), want (B,ct,true,nil)", body, ct, handled, err)
+	}
+	if len(log) != 1 {
+		t.Errorf("plain transform calls = %v, want one call through Transform", log)
+	}
+	if withCtx.gotURL != "http://gw/v1/audio/transcriptions" {
+		t.Errorf("requestURL = %q, want the dispatch URL", withCtx.gotURL)
+	}
+	if !withCtx.gotDeadline {
+		t.Error("TransformContext did not receive the request context deadline")
 	}
 }
 
