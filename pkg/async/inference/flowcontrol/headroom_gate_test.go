@@ -41,6 +41,8 @@ type eppMetrics struct {
 	// queueText and readyText, when set, replace the values as written, for samples that are
 	// not integers.
 	queueText, readyText atomic.Pointer[string]
+	// hold, when set, keeps every scrape open until the channel is closed.
+	hold atomic.Pointer[chan struct{}]
 }
 
 func (m *eppMetrics) text(override *atomic.Pointer[string], v *atomic.Int64) string {
@@ -58,6 +60,9 @@ func newEPPMetrics(t *testing.T, queue, ready int64) (*eppMetrics, string) {
 	m.status.Store(http.StatusOK)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		m.scrapes.Add(1)
+		if hold := m.hold.Load(); hold != nil {
+			<-*hold
+		}
 		w.WriteHeader(int(m.status.Load()))
 		_, _ = fmt.Fprintf(w, "llm_d_epp_ready_endpoints{name=\"pool\"} %s\n", m.text(&m.readyText, &m.ready))
 		if !m.absent.Load() {
@@ -201,6 +206,122 @@ func TestHeadroomGateNeverOverAdmitsUnderConcurrency(t *testing.T) {
 	assert.EqualValues(t, 10, admitted.Load())
 }
 
+func TestHeadroomGateReleaseReturnsTheSlot(t *testing.T) {
+	_, url := newEPPMetrics(t, 60, 8)
+	g := NewHeadroomGate(headroomSourceFor(url, 8), time.Minute)
+	ctx := context.Background()
+
+	var releases []pipeline.GateReleaseFunc
+	for range 4 {
+		v, err := g.Apply(ctx, nil, &releases)
+		require.NoError(t, err)
+		require.Equal(t, pipeline.ActionContinue, v.Action)
+	}
+	require.Len(t, releases, 4, "each admission registers one release")
+	assert.Zero(t, admitCount(t, g, 5))
+	assert.Zero(t, g.Budget(ctx))
+
+	releases[0]()
+	assert.Equal(t, 1.0, g.Budget(ctx))
+	assert.Equal(t, 1, admitCount(t, g, 5), "a released slot is admitted once more")
+
+	pipeline.ReleaseGateReleases(releases[1:])
+	assert.Equal(t, 3, admitCount(t, g, 10))
+}
+
+func TestHeadroomGateRefusalRegistersNoRelease(t *testing.T) {
+	_, url := newEPPMetrics(t, 64, 8)
+	g := NewHeadroomGate(headroomSourceFor(url, 8), time.Minute)
+
+	var releases []pipeline.GateReleaseFunc
+	v, err := g.Apply(context.Background(), nil, &releases)
+	require.NoError(t, err)
+	assert.Equal(t, pipeline.ActionRefuse, v.Action)
+	assert.Empty(t, releases)
+}
+
+func TestHeadroomGateIgnoresAReleaseFromAnOlderReading(t *testing.T) {
+	m, url := newEPPMetrics(t, 60, 8)
+	g := NewHeadroomGate(headroomSourceFor(url, 8), time.Minute)
+	clock := time.Unix(1000, 0)
+	g.now = func() time.Time { return clock }
+	ctx := context.Background()
+
+	var stale []pipeline.GateReleaseFunc
+	for range 4 {
+		_, err := g.Apply(ctx, nil, &stale)
+		require.NoError(t, err)
+	}
+
+	m.queue.Store(62)
+	clock = clock.Add(time.Minute)
+	assert.Equal(t, 2, admitCount(t, g, 10), "the next reading has two free slots")
+
+	pipeline.ReleaseGateReleases(stale)
+	assert.Zero(t, g.Budget(ctx))
+	assert.Zero(t, admitCount(t, g, 10), "slots of an older reading do not reopen the current one")
+}
+
+func TestHeadroomGateDoesNotRecordAReadingThatFailedOnTheCallersContext(t *testing.T) {
+	_, url := newEPPMetrics(t, 60, 8)
+	g := NewHeadroomGate(headroomSourceFor(url, 8), time.Minute)
+	clock := time.Unix(1000, 0)
+	g.now = func() time.Time { return clock }
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := g.Apply(canceled, nil, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, g.Budget(canceled))
+
+	assert.Equal(t, 4, admitCount(t, g, 10), "the next caller takes its own reading within the same interval")
+}
+
+func TestHeadroomGateInFlightReadingBlocksNeitherReleaseNorACanceledCaller(t *testing.T) {
+	m, url := newEPPMetrics(t, 60, 8)
+	g := NewHeadroomGate(headroomSourceFor(url, 8), time.Minute)
+	clock := time.Unix(1000, 0)
+	g.now = func() time.Time { return clock }
+
+	var releases []pipeline.GateReleaseFunc
+	_, err := g.Apply(context.Background(), nil, &releases)
+	require.NoError(t, err)
+	require.Len(t, releases, 1)
+
+	hold := make(chan struct{})
+	m.hold.Store(&hold)
+	clock = clock.Add(time.Minute)
+	before := m.scrapes.Load()
+	reading := make(chan error, 1)
+	go func() {
+		_, err := g.Apply(context.Background(), nil, nil)
+		reading <- err
+	}()
+	require.Eventually(t, func() bool { return m.scrapes.Load() > before }, 5*time.Second, time.Millisecond,
+		"the reading is in flight")
+
+	released := make(chan struct{})
+	go func() {
+		releases[0]()
+		close(released)
+	}()
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a release waited for the in-flight reading")
+	}
+
+	waiter, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = g.Apply(waiter, nil, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Zero(t, g.Budget(waiter))
+
+	close(hold)
+	require.NoError(t, <-reading)
+	assert.Equal(t, 3, admitCount(t, g, 10), "64 slots, 60 used, one taken by the caller that read")
+}
+
 func TestGateFactoryEndpointScrapeCountedAdmission(t *testing.T) {
 	_, url := newEPPMetrics(t, 60, 8)
 	base := func() map[string]any {
@@ -235,4 +356,7 @@ func TestGateFactoryEndpointScrapeCountedAdmission(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+
+	_, err = NewGateFactoryWithCacheTTL("", 0).CreateGate(pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: base()})
+	require.ErrorContains(t, err, "--prometheus-cache-ttl", "counted admission has no reading interval without a cache TTL")
 }

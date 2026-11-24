@@ -680,6 +680,9 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			if baseline != 0 || fallback != 0 {
 				return nil, fmt.Errorf("endpoint-scrape admission 'counted' takes neither baseline nor fallback: size the headroom with max_count_per_pod; a failed scrape admits nothing")
 			}
+			if f.cacheTTL <= 0 {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' takes one reading per --prometheus-cache-ttl, which must be greater than 0")
+			}
 			return NewHeadroomGate(NewScrapeMetricSource(scrapeCfg), f.cacheTTL).WithOwner(cfg.Owner), nil
 		default:
 			return nil, fmt.Errorf("endpoint-scrape admission must be either 'budget' or 'counted', got %q", admission)

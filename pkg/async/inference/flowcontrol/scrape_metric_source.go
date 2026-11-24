@@ -22,10 +22,13 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 var _ MetricSource = (*ScrapeMetricSource)(nil)
@@ -53,6 +56,7 @@ type ScrapeMetricSource struct {
 	podsMetric     string
 	podsLabels     map[string]string
 	absentValue    *float64
+	neverMatched   sync.Once
 }
 
 // ScrapeConfig holds configuration for NewScrapeMetricSource.
@@ -141,7 +145,15 @@ func (s *ScrapeMetricSource) read(ctx context.Context) ([]Sample, float64, error
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(samples) == 0 && s.absentValue != nil {
+	switch {
+	case len(samples) > 0:
+		s.neverMatched.Do(func() {})
+	case s.absentValue != nil:
+		s.neverMatched.Do(func() {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info(
+				"endpoint-scrape metric has not matched a series yet, reading it as absent_value; check the metric name and labels if the series should exist",
+				"metric", s.metricName, "labels", s.labels, "url", s.url, "absentValue", *s.absentValue)
+		})
 		samples = []Sample{{Value: *s.absentValue}}
 	}
 

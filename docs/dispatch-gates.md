@@ -355,8 +355,8 @@ The available gate types, at a glance:
   - `max_count_per_pod` (optional): Per-pod capacity. When > 0, the normalized value is `value / max_count`. When 0, the metric value is assumed to already be in [0, 1]. Default is `0`.
   - `baseline` (optional): Reserved headroom subtracted from budget. Default is `0.0`.
   - `fallback` (optional): Budget returned when scrape fails or metric is missing. Default is `0.0` (fail closed).
-  - `absent_value` (optional): Raw metric value assumed when the scrape succeeds but no series matches, for gauges that exist only while there is something to count. EPP drops an idle priority band's `llm_d_epp_flow_control_queue_size` series, so a gate on that series needs `absent_value: 0`, or it falls back closed and never sends the traffic that would bring the series back. A failed scrape still uses `fallback`. Unset by default.
-  - `admission` (optional): `budget` (default) admits every request while the latest reading's budget is above `baseline`. `counted` admits at most the reading's free slots (`max_count - value`, in the metric's units) until the next reading, one reading per `--prometheus-cache-ttl`; it needs `max_count_per_pod` with `value_type: saturation` and takes neither `baseline` nor `fallback` (a failed scrape admits nothing). Use `counted` to bound how much a fast dispatcher can send into a queue between readings.
+  - `absent_value` (optional): Raw metric value assumed when the scrape succeeds but no series matches, for gauges that exist only while there is something to count. EPP drops an idle priority band's `llm_d_epp_flow_control_queue_size` series, so a gate on that series needs `absent_value: 0`, or it falls back closed and never sends the traffic that would bring the series back. A failed scrape still uses `fallback`. A misspelled metric name or label reads the same as an idle series, so the first scrape that applies `absent_value` to a series the gate has never matched is logged. Unset by default.
+  - `admission` (optional): `budget` (default) admits every request while the latest reading's budget is above `baseline`. `counted` admits at most the reading's free slots (`max_count - value`, in the metric's units) until the next reading, one reading per `--prometheus-cache-ttl`; it needs `max_count_per_pod` with `value_type: saturation` and takes neither `baseline` nor `fallback` (a failed scrape admits nothing), and `--prometheus-cache-ttl` must be greater than 0. A request that finishes, is retried or loses its claim to another replica returns its slot to the reading that admitted it. Use `counted` to bound how much a fast dispatcher can send into a queue between readings.
   - `pods_url` (optional): URL to scrape for dynamic pod count (e.g., `http://epp-svc:9090/metrics`). When set with `pods_metric`, `max_count = ready_pods * max_count_per_pod`.
   - `pods_metric` (optional): Metric name for ready pods (e.g., `llm_d_epp_ready_endpoints`).
   - `pods_labels` (optional): JSON label filters for the pods metric (e.g., `{"name":"my-pool"}`).
@@ -365,6 +365,12 @@ The available gate types, at a glance:
   deployments without a dedicated Prometheus instance. Use `max_count_per_pod` with `pods_url`/`pods_metric`
   for dynamic scaling, or set `max_count_per_pod` to a static value for single-pod setups. For a
   readiness metric where `1` means ready and `0` means unavailable, set `value_type` to `budget`.
+
+  With `admission: counted`:
+
+  - Each dispatcher replica keeps its own count, so N replicas together admit up to N times the free slots per reading.
+  - `async_gate_metric_value` reports the free-slot count of the last reading, not a value in `[0, 1]`.
+  - The budget is `1` while the reading has a free slot and `0` otherwise. `gcp-pubsub` restarts its receiver whenever the budget changes, so a counted gate restarts it on most readings; use it with `redis-sortedset` or `sql`.
 
 ## Admission gates
 
