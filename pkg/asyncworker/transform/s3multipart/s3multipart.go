@@ -14,11 +14,14 @@
 // references so vllm-omni needs no storage credentials and the worker never
 // downloads the image.
 //
-// The plugin picks requests by the path of the URL they are dispatched to and
-// leaves every other request untouched. s3:// references are only resolved for
-// buckets in the configured allowlist. Storage credentials come from the AWS SDK
-// default chain (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, shared config files,
-// or a workload identity), never from the plugin parameters.
+// The plugin picks requests by the path of the URL they are dispatched to, and
+// on those paths only claims a request whose body has the field it reads
+// (`file` or `images`). Every other request is left untouched for the next
+// transform in the chain; a request it claims but cannot convert fails. s3://
+// references are only resolved for buckets in the configured allowlist, which
+// guards only the requests this plugin handles. Storage credentials come from
+// the AWS SDK default chain (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, shared
+// config files, or a workload identity), never from the plugin parameters.
 package s3multipart
 
 import (
@@ -28,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/url"
 	"sort"
@@ -37,6 +41,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 
 	asyncapi "github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
@@ -120,8 +125,9 @@ func newPlugin(ctx context.Context, name string, p params, optFns ...func(*s3.Op
 		}
 		buckets[b] = struct{}{}
 	}
-	if p.MaxFileBytes < 0 {
-		return nil, fmt.Errorf("%q must not be negative", "maxFileBytes")
+	// The size checks add up to 2 to the limit; keep that from overflowing.
+	if p.MaxFileBytes < 0 || p.MaxFileBytes > math.MaxInt64-2 {
+		return nil, fmt.Errorf("%q must be between 0 and %d", "maxFileBytes", int64(math.MaxInt64-2))
 	}
 	maxFileBytes := p.MaxFileBytes
 	if maxFileBytes == 0 {
@@ -177,7 +183,8 @@ func (p *Plugin) Transform(payload []byte, metadata map[string]string) ([]byte, 
 }
 
 // TransformContext rewrites requests whose dispatch URL path ends in a
-// supported endpoint and returns handled=false for every other request.
+// supported endpoint and carry the field this plugin reads, and returns
+// handled=false for every other request.
 func (p *Plugin) TransformContext(ctx context.Context, payload []byte, _ map[string]string, requestURL string) ([]byte, string, bool, error) {
 	u, err := url.Parse(requestURL)
 	if err != nil {
@@ -206,23 +213,30 @@ func (p *Plugin) parseS3URI(ref string) (bucket, key string, err error) {
 	return bucket, key, nil
 }
 
-// getObject reads an object of at most maxFileBytes and returns its bytes and
-// stored Content-Type.
-func (p *Plugin) getObject(ctx context.Context, bucket, key string) ([]byte, string, error) {
+// openObject opens an object of at most maxFileBytes and returns its body, its
+// stored Content-Type and its declared size (-1 when unknown). The caller must
+// close the body and still enforce the limit while reading, since a body can be
+// longer than declared or have no declared length.
+func (p *Plugin) openObject(ctx context.Context, bucket, key string) (io.ReadCloser, string, int64, error) {
 	ref := s3Scheme + bucket + "/" + key
+	// Retrieved here (and cached) so a credentials failure is reported as one
+	// rather than as a failed read.
+	if _, err := p.client.Options().Credentials.Retrieve(ctx); err != nil {
+		return nil, "", 0, credentialsError(ctx, ref, err)
+	}
 	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err != nil {
-		return nil, "", storageError(ctx, ref, err)
+		return nil, "", 0, storageError(ctx, "read", ref, err)
 	}
-	defer func() { _ = out.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(out.Body, p.maxFileBytes+1))
-	if err != nil {
-		return nil, "", storageError(ctx, ref, err)
+	size := int64(-1)
+	if out.ContentLength != nil {
+		size = *out.ContentLength
 	}
-	if int64(len(data)) > p.maxFileBytes {
-		return nil, "", fatalf("%s is over the %d-byte limit", ref, p.maxFileBytes)
+	if size > p.maxFileBytes {
+		_ = out.Body.Close()
+		return nil, "", 0, fatalf("%s is over the %d-byte limit", ref, p.maxFileBytes)
 	}
-	return data, aws.ToString(out.ContentType), nil
+	return out.Body, aws.ToString(out.ContentType), size, nil
 }
 
 // storageError classifies a failed storage call so the worker retries what can
@@ -235,11 +249,16 @@ func (p *Plugin) getObject(ctx context.Context, bucket, key string) ([]byte, str
 //   - an error the AWS SDK itself would retry (5xx, RequestTimeout,
 //     connection failures, timeouts), or a body cut off mid-read:
 //     SERVER_ERROR (retried).
-//   - HTTP 401/403: AUTH_ERROR; anything else (NoSuchKey, missing
-//     credentials, invalid input): INVALID_REQ. None of these is retried.
-func storageError(ctx context.Context, ref string, err error) error {
+//   - HTTP 401/403: AUTH_ERROR; anything else (NoSuchKey, invalid input):
+//     INVALID_REQ. None of these is retried.
+//
+// The message names the operation, the reference and the service's error code
+// when there is one, never the service's error text: that can carry response
+// bodies and URLs into results, spans and logs. The full error stays in
+// RawError.
+func storageError(ctx context.Context, op, ref string, err error) error {
 	if ctx.Err() != nil {
-		return fmt.Errorf("read %s: %w", ref, err)
+		return fmt.Errorf("%s %s: %w", op, ref, err)
 	}
 	category := asyncapi.ErrCategoryInvalidReq
 	var resp interface{ HTTPStatusCode() int }
@@ -251,7 +270,25 @@ func storageError(ctx context.Context, ref string, err error) error {
 	case errors.As(err, &resp) && (resp.HTTPStatusCode() == 401 || resp.HTTPStatusCode() == 403):
 		category = asyncapi.ErrCategoryAuth
 	}
-	return &asyncapi.ClientError{ErrorCategory: category, Message: "read " + ref, RawError: err}
+	message := op + " " + ref
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() != "" {
+		message += ": " + apiErr.ErrorCode()
+	}
+	return &asyncapi.ClientError{ErrorCategory: category, Message: message, RawError: err}
+}
+
+// credentialsError reports a failure to get storage credentials as a fatal
+// AUTH_ERROR, even when the SDK would call the cause retryable: off AWS, a
+// missing Secret looks like an unreachable EC2 metadata service, and retrying
+// it would hold every request until its deadline. The cost is that a real
+// metadata-service or STS outage on AWS fails requests instead of retrying.
+// As in storageError, a done request context is left to the worker.
+func credentialsError(ctx context.Context, ref string, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("get credentials for %s: %w", ref, err)
+	}
+	return &asyncapi.ClientError{ErrorCategory: asyncapi.ErrCategoryAuth, Message: "get credentials for " + ref, RawError: err}
 }
 
 // decodeFields parses the JSON body into its top-level fields, preserving each
@@ -259,23 +296,9 @@ func storageError(ctx context.Context, ref string, err error) error {
 func decodeFields(payload []byte) (map[string]json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &fields); err != nil {
-		return nil, fatalf("failed to parse request body: %v", err)
+		return nil, fatalWrap(err, "failed to parse request body")
 	}
 	return fields, nil
-}
-
-// stringField returns the value of a JSON string field, or ok=false if the
-// field is absent or not a string.
-func stringField(fields map[string]json.RawMessage, name string) (string, bool) {
-	raw, ok := fields[name]
-	if !ok {
-		return "", false
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", false
-	}
-	return s, true
 }
 
 // writeFormFields writes every field not in skip as a form field, in name order
@@ -325,5 +348,15 @@ func fatalf(format string, args ...any) error {
 	return &asyncapi.ClientError{
 		ErrorCategory: asyncapi.ErrCategoryInvalidReq,
 		Message:       fmt.Sprintf(format, args...),
+	}
+}
+
+// fatalWrap is fatalf with a cause, kept in RawError for errors.Is/As rather
+// than flattened into the message.
+func fatalWrap(cause error, format string, args ...any) error {
+	return &asyncapi.ClientError{
+		ErrorCategory: asyncapi.ErrCategoryInvalidReq,
+		Message:       fmt.Sprintf(format, args...),
+		RawError:      cause,
 	}
 }

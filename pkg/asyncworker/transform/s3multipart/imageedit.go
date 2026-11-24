@@ -25,26 +25,27 @@ const (
 	defaultPresignExpiry = 15 * time.Minute
 	// maxPresignExpiry is the longest lifetime S3 SigV4 allows.
 	maxPresignExpiry = 7 * 24 * time.Hour
-	// credentialRefreshWindow is how much lifetime cached expiring
-	// credentials must have left before they sign a URL; with less, they are
-	// refreshed first so the URL is not cut short.
-	credentialRefreshWindow = 10 * time.Minute
 )
 
 // transformImageEdit builds the multipart body for a vllm-omni image edit:
 // each `images[].image_url` becomes a `url` form field, and every other field a
-// form field. s3:// references are presigned for vllm-omni to fetch; data:image
-// URLs pass through. Any other URL is rejected, since vllm-omni fetches `url`
-// values without an allowlist.
+// form field. A body without `images` is left to the next transform. s3://
+// references are presigned for vllm-omni to fetch; data:image URLs pass
+// through. Any other URL is rejected, since vllm-omni fetches `url` values
+// without an allowlist.
 func (p *Plugin) transformImageEdit(ctx context.Context, payload []byte) ([]byte, string, bool, error) {
 	fields, err := decodeFields(payload)
 	if err != nil {
 		return nil, "", false, err
 	}
+	raw, present := fields[imagesField]
+	if !present {
+		return nil, "", false, nil
+	}
 	var images []struct {
 		ImageURL string `json:"image_url"`
 	}
-	if err := json.Unmarshal(fields[imagesField], &images); err != nil || len(images) == 0 {
+	if err := json.Unmarshal(raw, &images); err != nil || len(images) == 0 {
 		return nil, "", false, fatalf("%q must be a non-empty list of {\"image_url\": ...}", imagesField)
 	}
 	// vllm-omni has no `mask` form field, so a mask would be silently dropped
@@ -76,20 +77,23 @@ func (p *Plugin) transformImageEdit(ctx context.Context, payload []byte) ([]byte
 			return nil, "", false, fatalf("each image_url must be an s3:// reference or a data:image/ URL")
 		}
 		if err := w.WriteField(urlFormField, u); err != nil {
-			return nil, "", false, fatalf("failed to write %q field: %v", urlFormField, err)
+			return nil, "", false, fatalWrap(err, "failed to write %q field", urlFormField)
 		}
 	}
 	if err := writeFormFields(w, fields, imagesField); err != nil {
-		return nil, "", false, fatalf("failed to write form fields: %v", err)
+		return nil, "", false, fatalWrap(err, "failed to write form fields")
 	}
 	if err := w.Close(); err != nil {
-		return nil, "", false, fatalf("failed to finalize multipart body: %v", err)
+		return nil, "", false, fatalWrap(err, "failed to finalize multipart body")
 	}
 	return buf.Bytes(), w.FormDataContentType(), true, nil
 }
 
-// presign returns a GET URL for an allowlisted s3:// reference that stays valid
-// for the rest of this dispatch attempt (see presignExpiry).
+// presign returns a GET URL for an allowlisted s3:// reference, valid until the
+// attempt's deadline but never past the expiry of the credentials that sign it
+// (see presignExpiry). Short-lived credentials near their end therefore give a
+// URL that ends with them; the SDK's cache renews them when they expire, so a
+// retry signs with fresh ones.
 func (p *Plugin) presign(ctx context.Context, ref string) (string, error) {
 	bucket, key, err := p.parseS3URI(ref)
 	if err != nil {
@@ -100,24 +104,15 @@ func (p *Plugin) presign(ctx context.Context, ref string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("presign %s: %w", ref, err)
 	}
-	provider := p.client.Options().Credentials
-	creds, err := provider.Retrieve(ctx)
+	creds, err := p.client.Options().Credentials.Retrieve(ctx)
 	if err != nil {
-		return "", storageError(ctx, ref, err)
-	}
-	// A URL stops working when the keys that signed it expire, so refresh
-	// expiring keys (STS, workload identity) that are near their end.
-	if cache, ok := provider.(*aws.CredentialsCache); ok && creds.CanExpire && time.Until(creds.Expires) < credentialRefreshWindow {
-		cache.Invalidate()
-		if creds, err = cache.Retrieve(ctx); err != nil {
-			return "", storageError(ctx, ref, err)
-		}
+		return "", credentialsError(ctx, ref, err)
 	}
 	deadline, hasDeadline := ctx.Deadline()
 	expires, ok := presignExpiry(time.Now(), deadline, hasDeadline, creds)
 	if !ok {
-		// Even freshly retrieved keys expire within a second; a retry signs
-		// with rotated ones.
+		// The cached keys expire within a second; a retry signs with the ones
+		// the cache fetches next.
 		return "", &asyncapi.ClientError{
 			ErrorCategory: asyncapi.ErrCategoryServer,
 			Message:       fmt.Sprintf("presign %s: credentials expire at %s", ref, creds.Expires.UTC().Format(time.RFC3339)),
@@ -133,7 +128,7 @@ func (p *Plugin) presign(ctx context.Context, ref string) (string, error) {
 			})
 		})
 	if err != nil {
-		return "", storageError(ctx, ref, err)
+		return "", storageError(ctx, "presign", ref, err)
 	}
 	return req.URL, nil
 }

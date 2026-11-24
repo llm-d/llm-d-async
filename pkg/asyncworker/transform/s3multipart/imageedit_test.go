@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -129,8 +131,9 @@ func TestTransform_ImageEditRejectsBadInput(t *testing.T) {
 	store := newFakeS3(t, nil)
 	p := newTestPlugin(t, store.URL, 0)
 	tests := map[string]string{
-		"not json":           `not json`,
-		"no images":          `{"prompt":"x"}`,
+		"not json": `not json`,
+		// Present but not a usable list: claimed, and rejected.
+		"images null":        `{"images":null}`,
 		"images not a list":  `{"images":"s3://audio/a.png"}`,
 		"empty images":       `{"images":[]}`,
 		"file_id instead":    `{"images":[{"file_id":"file-abc"}]}`,
@@ -202,20 +205,22 @@ func TestTransform_ImageEditPresignWithExpiringCredentials(t *testing.T) {
 		return n
 	}
 
-	t.Run("near-expiry keys are refreshed and the fresh ones sign", func(t *testing.T) {
+	// Keys near their end are used as they are rather than dropped for a
+	// refresh that might fail: the URL ends with them, a second before.
+	t.Run("near-expiry keys sign a URL that ends with them", func(t *testing.T) {
 		sts := &stsProvider{lifetimes: []time.Duration{30 * time.Second, time.Hour}}
 		q, err := presign(t, sts)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := expires(t, q); got != 300 && got != 301 {
-			t.Errorf("X-Amz-Expires = %d, want 300-301: refreshed keys cover the whole attempt", got)
+		if got := expires(t, q); got < 27 || got > 29 {
+			t.Errorf("X-Amz-Expires = %d, want just under the keys' 30s lifetime", got)
 		}
-		if !strings.HasPrefix(q.Get("X-Amz-Credential"), "sts-key-1/") || sts.calls.Load() != 2 {
-			t.Errorf("signed by %q after %d retrievals, want the refreshed sts-key-1 after 2", q.Get("X-Amz-Credential"), sts.calls.Load())
+		if !strings.HasPrefix(q.Get("X-Amz-Credential"), "sts-key-0/") || sts.calls.Load() != 1 {
+			t.Errorf("signed by %q after %d retrievals, want the cached sts-key-0 after 1", q.Get("X-Amz-Credential"), sts.calls.Load())
 		}
 	})
-	t.Run("keys shorter-lived than the refresh window still sign", func(t *testing.T) {
+	t.Run("keys shorter-lived than the attempt bound the URL", func(t *testing.T) {
 		sts := &stsProvider{lifetimes: []time.Duration{2 * time.Minute}}
 		q, err := presign(t, sts)
 		if err != nil {
@@ -243,6 +248,16 @@ func TestTransform_ImageEditPresignWithExpiringCredentials(t *testing.T) {
 		if got := signed.Query().Get("X-Amz-Credential"); !strings.HasPrefix(got, "sts-key-0/") {
 			t.Errorf("signed by %q, want sts-key-0, the keys whose 1h lifetime bounded the URL", got)
 		}
+	})
+	// A failed lookup fails the request, even when the cause is a network
+	// error the SDK would call retryable.
+	t.Run("failed credential lookup fails the request", func(t *testing.T) {
+		failing := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{}, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		})
+		p := newTestPlugin(t, store.URL, 0, func(o *s3.Options) { o.Credentials = aws.NewCredentialsCache(failing) })
+		_, _, _, err := p.TransformContext(ctx, payload, nil, editsURL)
+		assertCategory(t, err, asyncapi.ErrCategoryAuth)
 	})
 }
 

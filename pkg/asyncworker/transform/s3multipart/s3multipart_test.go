@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	asyncapi "github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
 	"github.com/llm-d/llm-d-async/pkg/plugins"
 )
 
@@ -46,7 +47,7 @@ type fakeS3 struct {
 	lastAuth atomic.Value
 }
 
-func newFakeS3(t *testing.T, objects map[string]object) *fakeS3 {
+func newFakeS3(t testing.TB, objects map[string]object) *fakeS3 {
 	t.Helper()
 	f := &fakeS3{objects: objects}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +85,7 @@ func newFakeS3(t *testing.T, objects map[string]object) *fakeS3 {
 
 // isolateAWSEnv points the SDK's default chain at test-only static credentials
 // so tests never read the developer's AWS config or reach a metadata service.
-func isolateAWSEnv(t *testing.T) {
+func isolateAWSEnv(t testing.TB) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))
@@ -95,11 +96,17 @@ func isolateAWSEnv(t *testing.T) {
 	t.Setenv("AWS_DEFAULT_REGION", "")
 	t.Setenv("AWS_PROFILE", "")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	// Credential sources the default chain would try before IMDS, so ambient
+	// CI credentials cannot answer for a test.
+	for _, name := range []string{"AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_AUTHORIZATION_TOKEN"} {
+		t.Setenv(name, "")
+	}
 }
 
 // newTestPlugin builds a plugin against the fake store, with SDK retries off so
 // error tests see the first response. optFns adjust the S3 client further.
-func newTestPlugin(t *testing.T, endpoint string, maxFileBytes int64, optFns ...func(*s3.Options)) *Plugin {
+func newTestPlugin(t testing.TB, endpoint string, maxFileBytes int64, optFns ...func(*s3.Options)) *Plugin {
 	t.Helper()
 	isolateAWSEnv(t)
 	p, err := newPlugin(context.Background(), "test", params{
@@ -176,9 +183,11 @@ func TestNew_ParsesOperatorStyleParameters(t *testing.T) {
 
 func TestNew_RejectsInvalidParameters(t *testing.T) {
 	tests := map[string]string{
-		"no buckets":         `{"region":"us-east-1"}`,
-		"empty bucket":       `{"region":"us-east-1","allowedBuckets":[""]}`,
-		"negative max":       `{"region":"us-east-1","allowedBuckets":["a"],"maxFileBytes":-1}`,
+		"no buckets":   `{"region":"us-east-1"}`,
+		"empty bucket": `{"region":"us-east-1","allowedBuckets":[""]}`,
+		"negative max": `{"region":"us-east-1","allowedBuckets":["a"],"maxFileBytes":-1}`,
+		// max+1 would wrap negative and read every file as empty.
+		"max overflows":      `{"region":"us-east-1","allowedBuckets":["a"],"maxFileBytes":9223372036854775807}`,
 		"endpoint no scheme": `{"region":"us-east-1","allowedBuckets":["a"],"endpoint":"seaweedfs:8333"}`,
 		"endpoint not http":  `{"region":"us-east-1","allowedBuckets":["a"],"endpoint":"ftp://seaweedfs:8333"}`,
 		"endpoint no host":   `{"region":"us-east-1","allowedBuckets":["a"],"endpoint":"http://"}`,
@@ -217,6 +226,46 @@ func TestTransform_LeavesOtherRequestsAlone(t *testing.T) {
 	// Without a dispatch URL the context-free entry point cannot match either.
 	if _, _, handled, err := p.Transform(payload, nil); handled || err != nil {
 		t.Errorf("Transform = handled %v err %v, want false/nil", handled, err)
+	}
+	if n := store.requests.Load(); n != 0 {
+		t.Errorf("storage requests = %d, want 0", n)
+	}
+}
+
+// nextTransform stands for the transform after this plugin in a chain.
+type nextTransform struct{ calls int }
+
+func (n *nextTransform) TypedName() plugins.TypedName {
+	return plugins.TypedName{Type: "next", Name: "next"}
+}
+func (n *nextTransform) Validate([]byte, map[string]string, int64) error { return nil }
+func (n *nextTransform) Transform([]byte, map[string]string) ([]byte, string, bool, error) {
+	n.calls++
+	return []byte("next"), "text/plain", true, nil
+}
+
+// TestTransform_LeavesRequestsWithoutItsFieldToTheNextTransform checks that on
+// its own paths the plugin only claims a body carrying the field it reads, so
+// a request meant for another transform (here a gcs_uri one) reaches it.
+func TestTransform_LeavesRequestsWithoutItsFieldToTheNextTransform(t *testing.T) {
+	store := newFakeS3(t, nil)
+	p := newTestPlugin(t, store.URL, 0)
+	cases := map[string]struct{ url, payload string }{
+		"transcription without file": {transcriptionsURL, `{"model":"whisper","gcs_uri":"gs://b/calls/42.wav"}`},
+		"image edit without images":  {editsURL, `{"prompt":"x","gcs_uri":"gs://b/in.png"}`},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, handled, err := p.TransformContext(context.Background(), []byte(tc.payload), nil, tc.url); handled || err != nil {
+				t.Fatalf("plugin alone: handled %v err %v, want false/nil", handled, err)
+			}
+			next := &nextTransform{}
+			chain := transform.NewChain([]transform.RequestTransform{p, next})
+			body, _, handled, err := chain.ApplyContext(context.Background(), []byte(tc.payload), nil, tc.url)
+			if err != nil || !handled || string(body) != "next" || next.calls != 1 {
+				t.Errorf("chain: body %q handled %v err %v next calls %d, want the next transform's body", body, handled, err, next.calls)
+			}
+		})
 	}
 	if n := store.requests.Load(); n != 0 {
 		t.Errorf("storage requests = %d, want 0", n)

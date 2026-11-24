@@ -78,6 +78,14 @@ ap:
   # env:
   #   - name: PUBSUB_EMULATOR_HOST
   #     value: "pubsub-emulator:8085"
+  #   # s3_multipart: storage keys from a Secret. Off EC2, skip the EC2
+  #   # metadata lookup (up to ~5s per request) when keys are missing.
+  #   - name: AWS_ACCESS_KEY_ID
+  #     valueFrom: {secretKeyRef: {name: s3-credentials, key: access-key-id}}
+  #   - name: AWS_SECRET_ACCESS_KEY
+  #     valueFrom: {secretKeyRef: {name: s3-credentials, key: secret-access-key}}
+  #   - name: AWS_EC2_METADATA_DISABLED
+  #     value: "true"
   env: []
   # Named worker pools configuration. When specified, overrides the global concurrency option.
   # workerPools:
@@ -98,6 +106,8 @@ ap:
   #         providers: ["whisper"]
   #     # JSON media requests (audio transcriptions/translations, vllm-omni image
   #     # edits) to multipart, reading s3:// media from the listed buckets.
+  #     # Credentials come from ap.env (see the env example above); a failure
+  #     # to get them fails the request rather than retrying it.
   #     - name: "media"
   #       type: "s3_multipart"
   #       parameters:
