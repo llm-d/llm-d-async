@@ -181,9 +181,12 @@ undeploy-ap-on-k8s:
 #   GAIE_VERSION     — GAIE release for CRD fetch       (default: v1.6.2; must match the EPP image's pinned gaie)
 #   SIM_IMAGE        — inference-sim image tag          (default: ghcr.io/llm-d/llm-d-inference-sim:v0.0.0-test)
 #   REDIS_IMAGE      — Redis/Valkey image for E2E MQ    (default: valkey/valkey:8-alpine)
+#   KIND_NODE_IMAGE  — Kind Kubernetes node image       (default: kindest/node:v1.32.2, pinned by digest)
 #   PUBSUB_IMAGE     — Pub/Sub emulator image tag       (default: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators)
 #   CONTAINER_TOOL   — container runtime                (default: docker)
 #   E2E_SKIP_CLEANUP — set "true" to keep the Kind cluster after tests
+#   E2E_MULTI_REPLICA_ONLY — omit unrelated services/releases for the focused
+#                            multi-replica suite (use with FOCUS)
 #
 # NodePort overrides (change if defaults conflict):
 #   E2E_INTEGRATION_REDIS_PORT, E2E_INTEGRATION_PROM_PORT,

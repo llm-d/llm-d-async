@@ -59,6 +59,7 @@ The architecture adheres to the following core principles:
 - [Request Merge Policy Reference](docs/merge-policies.md)
 - [Request Body Transform Reference](docs/request-body-transforms.md)
 - [Observability](docs/observability.md): Prometheus metrics and OpenTelemetry tracing
+- [Multi-replica Deployments](docs/guides/multi-replica.md): current validation status, replica semantics, and operational limits
 - [Development](docs/development.md)
 
 ## Concepts

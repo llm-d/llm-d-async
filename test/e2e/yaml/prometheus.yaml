@@ -42,6 +42,20 @@ data:
       - job_name: 'epp'
         static_configs:
           - targets: ['epp-svc.e2e-integration.svc.cluster.local:9090']
+      - job_name: 'async-processors'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ['e2e-integration']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            regex: llm-d-async
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: metrics
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
       - job_name: 'model-servers'
         kubernetes_sd_configs:
           - role: pod
