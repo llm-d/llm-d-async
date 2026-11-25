@@ -4,7 +4,7 @@
 // pointing at a signed object URL rather than a JSON payload.
 //
 // Producers can't put raw media bytes on the broker (size limits), so the queued
-// JSON carries a signed object URL (e.g. a GCS V4 signed URL) in a `gcs_uri`
+// JSON carries a signed HTTPS object URL (e.g. a GCS V4 signed URL) in a `gcs_uri`
 // field. This plugin, at dispatch time, emits multipart/form-data with that URL
 // as the `url` field and the remaining request fields as form fields. It also
 // performs a deadline-aware preflight: if the signed URL expires before the
@@ -28,6 +28,7 @@ import (
 	asyncapi "github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pkg/asyncworker/transform"
 	"github.com/llm-d/llm-d-async/pkg/plugins"
+	"github.com/llm-d/llm-d-async/pkg/util"
 )
 
 // PluginType is the registry key under which this plugin's factory is registered.
@@ -69,22 +70,13 @@ func init() {
 func New(name string, parameters json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
 	var p params
 	if len(parameters) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(parameters))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&p); err != nil {
+		if err := util.DecodeJSONDisallowUnknownFields(parameters, &p); err != nil {
 			return nil, fmt.Errorf("invalid parameters: %w", err)
 		}
 	}
-	if len(p.Providers) == 0 {
-		return nil, fmt.Errorf("at least one entry in %q is required", "providers")
-	}
-
-	providers := make(map[string]struct{}, len(p.Providers))
-	for _, provider := range p.Providers {
-		if provider == "" {
-			return nil, fmt.Errorf("%q entries must be non-empty", "providers")
-		}
-		providers[provider] = struct{}{}
+	providers, err := util.NewProviderSet(p.Providers)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Plugin{
@@ -103,20 +95,24 @@ func (p *Plugin) owns(metadata map[string]string) bool {
 }
 
 // Validate performs a deadline-aware preflight. When the plugin owns the message
-// and the signed URL's expiry can be parsed, it rejects the request fatally if
-// the URL expires at or before the request deadline. Messages the plugin does
-// not own, or whose URL has no parseable expiry, validate successfully.
+// and gcs_uri is set, it rejects a URL that is not absolute HTTPS. If the URL's
+// expiry can be parsed, it also rejects a URL that expires at or before the
+// request deadline. Messages the plugin does not own, messages without gcs_uri,
+// and URLs with no parseable expiry validate successfully.
 func (p *Plugin) Validate(payload []byte, metadata map[string]string, reqDeadline int64) error {
 	if !p.owns(metadata) {
 		return nil
 	}
 	fields, err := decodeFields(payload)
 	if err != nil {
-		return fatalf("failed to parse request body: %v", err)
+		return invalidRequestErrorf("failed to parse request body: %v", err)
 	}
 	signedURL := stringField(fields, gcsURIField)
 	if signedURL == "" {
 		return nil
+	}
+	if err := validateSignedGCSURL(signedURL); err != nil {
+		return err
 	}
 
 	expiry, ok := signedURLExpiry(signedURL)
@@ -125,7 +121,7 @@ func (p *Plugin) Validate(payload []byte, metadata map[string]string, reqDeadlin
 		return nil
 	}
 	if !expiry.After(time.Unix(reqDeadline, 0)) {
-		return fatalf("signed URL expires at %s, at or before the request deadline %s",
+		return invalidRequestErrorf("signed URL expires at %s, at or before the request deadline %s",
 			expiry.UTC().Format(time.RFC3339), time.Unix(reqDeadline, 0).UTC().Format(time.RFC3339))
 	}
 	return nil
@@ -134,8 +130,9 @@ func (p *Plugin) Validate(payload []byte, metadata map[string]string, reqDeadlin
 // Transform rewrites the JSON body into multipart/form-data when the plugin owns
 // the message and a non-empty gcs_uri is present: the gcs_uri value becomes the
 // `url` form field, the remaining fields pass through as form fields, and the
-// gcs_uri/file_base64 fields are dropped. A non-empty file_base64 is rejected
-// fatally (inline media is not supported on this path). Messages the plugin does
+// gcs_uri/file_base64 fields are dropped. A gcs_uri that is not an absolute
+// HTTPS URL, or a non-empty file_base64, is rejected as an invalid request
+// (inline media is not supported on this path). Messages the plugin does
 // not own, or that carry no gcs_uri, return handled=false unchanged.
 func (p *Plugin) Transform(payload []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error) {
 	if !p.owns(metadata) {
@@ -143,14 +140,17 @@ func (p *Plugin) Transform(payload []byte, metadata map[string]string) (body []b
 	}
 	fields, err := decodeFields(payload)
 	if err != nil {
-		return nil, "", false, fatalf("failed to parse request body: %v", err)
+		return nil, "", false, invalidRequestErrorf("failed to parse request body: %v", err)
 	}
 	signedURL := stringField(fields, gcsURIField)
 	if signedURL == "" {
 		return nil, "", false, nil
 	}
+	if err := validateSignedGCSURL(signedURL); err != nil {
+		return nil, "", false, err
+	}
 	if stringField(fields, fileBase64Field) != "" {
-		return nil, "", false, fatalf("%q is not supported on the multipart path", fileBase64Field)
+		return nil, "", false, invalidRequestErrorf("%q is not supported on the multipart path", fileBase64Field)
 	}
 
 	var buf bytes.Buffer
@@ -158,18 +158,18 @@ func (p *Plugin) Transform(payload []byte, metadata map[string]string) (body []b
 
 	// The signed URL is written as a plain form field, not a file upload.
 	if err := w.WriteField(urlFormField, signedURL); err != nil {
-		return nil, "", false, fatalf("failed to write %q field: %v", urlFormField, err)
+		return nil, "", false, invalidRequestErrorf("failed to write %q field: %v", urlFormField, err)
 	}
 	for name, raw := range fields {
 		if name == gcsURIField || name == fileBase64Field {
 			continue
 		}
 		if err := w.WriteField(name, asFormValue(raw)); err != nil {
-			return nil, "", false, fatalf("failed to write %q field: %v", name, err)
+			return nil, "", false, invalidRequestErrorf("failed to write %q field: %v", name, err)
 		}
 	}
 	if err := w.Close(); err != nil {
-		return nil, "", false, fatalf("failed to finalize multipart body: %v", err)
+		return nil, "", false, invalidRequestErrorf("failed to finalize multipart body: %v", err)
 	}
 
 	return buf.Bytes(), w.FormDataContentType(), true, nil
@@ -199,15 +199,22 @@ func stringField(fields map[string]json.RawMessage, name string) string {
 	return s
 }
 
-// asFormValue renders a raw JSON value as a multipart form field value: JSON
-// strings are unquoted, everything else (numbers, booleans, objects, arrays) is
-// passed through as its JSON encoding.
+// asFormValue renders JSON strings without quotes and preserves other JSON
+// values as their original JSON text.
 func asFormValue(raw json.RawMessage) string {
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return value
 	}
 	return string(raw)
+}
+
+func validateSignedGCSURL(signedURL string) error {
+	u, err := url.Parse(signedURL)
+	if err != nil || !util.IsAbsoluteHTTPSURL(u) {
+		return invalidRequestErrorf("%q must be an absolute HTTPS URL", gcsURIField)
+	}
+	return nil
 }
 
 // signedURLExpiry extracts the absolute expiry time of a signed object URL.
@@ -247,10 +254,9 @@ func signedURLExpiry(signedURL string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// fatalf builds a non-retryable invalid-request error. The worker treats any
-// transform error as fatal; the explicit category documents intent and is robust
-// to future changes in error handling.
-func fatalf(format string, args ...any) error {
+// invalidRequestErrorf builds a non-retryable invalid-request error. The worker
+// fails the request instead of retrying it.
+func invalidRequestErrorf(format string, args ...any) error {
 	return &asyncapi.ClientError{
 		ErrorCategory: asyncapi.ErrCategoryInvalidReq,
 		Message:       fmt.Sprintf(format, args...),

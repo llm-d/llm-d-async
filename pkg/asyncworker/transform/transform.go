@@ -59,12 +59,12 @@ type RequestTransform interface {
 // plugin implements it, the chain calls TransformContext instead of Transform,
 // so existing plugins keep working unchanged.
 type ContextTransform interface {
-	// TransformContext behaves like Transform, with two additions. ctx ends
-	// at the dispatch attempt's deadline, the earlier of request-timeout and
-	// the request's own deadline, and is cancelled on shutdown; any I/O the
-	// transform does (e.g. fetching an object) must honor it. A check against
-	// the request's own deadline (e.g. a signed URL's expiry) cannot rely on
-	// ctx.Deadline() alone. requestURL is the full URL the request will be
-	// sent to, so a transform can recognize messages by endpoint path.
-	TransformContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string) (body []byte, contentType string, handled bool, err error)
+	// TransformContext behaves like Transform, with request context and routing
+	// information. ctx ends at the attempt's deadline, the earlier of
+	// request-timeout and the request's own deadline, and is cancelled on
+	// shutdown or request cancellation. Any I/O must honor it. requestURL is
+	// the full dispatch URL. requestDeadline is the original request deadline
+	// in Unix seconds, or zero when there is no deadline; it can be later than
+	// ctx's deadline.
+	TransformContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string, requestDeadline int64) (body []byte, contentType string, handled bool, err error)
 }

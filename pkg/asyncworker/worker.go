@@ -320,18 +320,34 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 					// Apply the request body-transform chain. If a transform handles
 					// the message we send its body and Content-Type; otherwise the
 					// default JSON payload is sent unchanged. Transforms run under
-					// reqCtx, so their I/O is bounded by the request deadline. A
-					// transform error carrying a retryable InferenceError category is
-					// retried like a retryable send failure; any other error is fatal.
+					// reqCtx, so their I/O ends at the attempt deadline. When transforms
+					// are configured, the context is also cancelled if the producer
+					// cancels the request. A transform error carrying a retryable
+					// InferenceError category is retried like a retryable send
+					// failure; any other error is fatal.
 					sendPayload := payloadBytes
 					sendHeaders := msg.HttpHeaders
-					if body, contentType, handled, terr := transforms.ApplyContext(reqCtx, payloadBytes, msg.PublicRequest.ReqMetadata(), msg.RequestURL); terr != nil {
+					transformCtx := reqCtx
+					stopTransformCancellationWatch := func() bool { return false }
+					if transforms.Len() > 0 {
+						transformCtx, stopTransformCancellationWatch = watchInflightCancellation(reqCtx, logger, msg)
+					}
+					body, contentType, handled, terr := transforms.ApplyContext(transformCtx, payloadBytes, msg.PublicRequest.ReqMetadata(), msg.RequestURL, msg.PublicRequest.ReqDeadline())
+					cancelledDuringTransform := stopTransformCancellationWatch()
+					if requestCtx.Err() != nil {
 						// Shutdown interrupted the transform: re-enqueue without
 						// counting an attempt, as for an interrupted send.
-						if requestCtx.Err() != nil {
-							retryChannel <- pipeline.RetryMessage{EmbelishedRequestMessage: msg}
-							return
+						retryChannel <- pipeline.RetryMessage{EmbelishedRequestMessage: msg}
+						return
+					}
+					if cancelledDuringTransform {
+						select {
+						case resultChannel <- asyncapi.NewCancelledResult(msg.PublicRequest, msg.InternalRouting):
+						case <-requestCtx.Done():
 						}
+						return
+					}
+					if terr != nil {
 						if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
 							// reqCtx ends at the earlier of request-timeout (one
 							// attempt) and the request's own deadline. Only the
@@ -735,11 +751,11 @@ func emitCancelledResultIfNeeded(
 	return true
 }
 
-// watchInflightCancellation polls the request's cancellation marker while
-// inference is executing and cancels the returned context once the marker for
-// this request generation appears. The returned stop function ends polling and
-// reports whether the watcher cancelled the send; it must be called once the
-// send returns. Without a cancellation checker, ctx is returned unchanged.
+// watchInflightCancellation polls the request's cancellation marker while its
+// transform and inference request are executing. It cancels the returned context
+// once the marker for this request generation appears. The returned stop
+// function ends polling and reports whether the watcher cancelled the operation.
+// Without a cancellation checker, ctx is returned unchanged.
 func watchInflightCancellation(ctx context.Context, logger logr.Logger, msg pipeline.EmbelishedRequestMessage) (context.Context, func() bool) {
 	checker := cancellationCheckerFromContext(ctx)
 	if checker == nil || msg.PublicRequest == nil {

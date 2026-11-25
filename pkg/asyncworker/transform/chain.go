@@ -48,24 +48,24 @@ func (c *Chain) Validate(payload []byte, metadata map[string]string, reqDeadline
 // handled=false. An error from any transform short-circuits and is returned,
 // wrapped with %w so callers can still classify it with errors.As.
 //
-// Apply is ApplyContext without a request context or URL, so transforms
-// cannot see a deadline or cancellation.
+// Apply is ApplyContext without a request context, URL, or original request
+// deadline, so context transforms cannot see those values.
 //
 // Deprecated: use ApplyContext.
 func (c *Chain) Apply(payload []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error) {
-	return c.ApplyContext(context.Background(), payload, metadata, "")
+	return c.ApplyContext(context.Background(), payload, metadata, "", 0)
 }
 
-// ApplyContext is Apply for a request with a deadline and destination. A
-// transform that implements ContextTransform gets ctx and requestURL through
-// TransformContext; any other transform is called through Transform.
-func (c *Chain) ApplyContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string) (body []byte, contentType string, handled bool, err error) {
+// ApplyContext is Apply for a request with its attempt context, dispatch URL,
+// and original deadline. A transform that implements ContextTransform gets
+// them through TransformContext; any other transform is called through Transform.
+func (c *Chain) ApplyContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string, requestDeadline int64) (body []byte, contentType string, handled bool, err error) {
 	if c == nil {
 		return nil, "", false, nil
 	}
 	for _, t := range c.transforms {
 		if ct, ok := t.(ContextTransform); ok {
-			body, contentType, handled, err = ct.TransformContext(ctx, payload, metadata, requestURL)
+			body, contentType, handled, err = ct.TransformContext(ctx, payload, metadata, requestURL, requestDeadline)
 		} else {
 			body, contentType, handled, err = t.Transform(payload, metadata)
 		}

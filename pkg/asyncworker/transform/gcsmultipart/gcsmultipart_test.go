@@ -112,7 +112,7 @@ func TestTransform_BuildsMultipart(t *testing.T) {
 
 func TestTransform_PassesThroughNonStringFields(t *testing.T) {
 	p := newPlugin(t, "whisper")
-	payload := []byte(`{"gcs_uri":"https://signed/url","temperature":0.5,"stream":true}`)
+	payload := []byte(`{"gcs_uri":"https://signed/url","temperature":0.5,"stream":true,"timestamp_granularities":["word","segment"]}`)
 
 	body, contentType, handled, err := p.Transform(payload, map[string]string{"provider": "whisper"})
 	if err != nil || !handled {
@@ -124,6 +124,9 @@ func TestTransform_PassesThroughNonStringFields(t *testing.T) {
 	}
 	if got := fields["stream"]; len(got) != 1 || got[0] != "true" {
 		t.Errorf("stream field = %v, want [true]", got)
+	}
+	if got := fields["timestamp_granularities"]; len(got) != 1 || got[0] != `["word","segment"]` {
+		t.Errorf("timestamp_granularities = %v, want the original JSON array", got)
 	}
 }
 
@@ -166,6 +169,17 @@ func TestTransform_RejectsFileBase64(t *testing.T) {
 	assertFatal(t, err)
 }
 
+func TestTransform_RejectsHTTPURL(t *testing.T) {
+	p := newPlugin(t, "whisper")
+	payload := []byte(`{"gcs_uri":"http://storage.googleapis.com/bucket/object?sig=x"}`)
+
+	_, _, handled, err := p.Transform(payload, map[string]string{"provider": "whisper"})
+	if handled {
+		t.Error("handled = true, want false on rejection")
+	}
+	assertFatal(t, err)
+}
+
 func TestValidate(t *testing.T) {
 	p := newPlugin(t, "whisper")
 	whisper := map[string]string{"provider": "whisper"}
@@ -179,6 +193,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{"future expiry ok", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(time.Hour))), whisper, false},
 		{"expired before deadline", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(-time.Minute))), whisper, true},
+		{"http URL", `{"gcs_uri":"http://storage.googleapis.com/bucket/object?sig=x"}`, whisper, true},
 		{"no gcs_uri", `{"model":"whisper-1"}`, whisper, false},
 		{"provider mismatch", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(-time.Minute))), map[string]string{"provider": "other"}, false},
 		{"unparsable expiry", `{"gcs_uri":"https://signed/url?sig=x"}`, whisper, false},

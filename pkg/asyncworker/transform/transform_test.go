@@ -137,7 +137,7 @@ func (f *ctxFakeTransform) Transform(_ []byte, _ map[string]string) ([]byte, str
 	return nil, "", false, errors.New("Transform called instead of TransformContext")
 }
 
-func (f *ctxFakeTransform) TransformContext(ctx context.Context, _ []byte, _ map[string]string, requestURL string) ([]byte, string, bool, error) {
+func (f *ctxFakeTransform) TransformContext(ctx context.Context, _ []byte, _ map[string]string, requestURL string, _ int64) ([]byte, string, bool, error) {
 	f.gotURL = requestURL
 	_, f.gotDeadline = ctx.Deadline()
 	return f.body, f.contentType, f.handled, nil
@@ -151,7 +151,7 @@ func TestChain_ApplyContext_MixesContextAndPlainTransforms(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	body, ct, handled, err := c.ApplyContext(ctx, []byte(`{}`), nil, "http://gw/v1/audio/transcriptions")
+	body, ct, handled, err := c.ApplyContext(ctx, []byte(`{}`), nil, "http://gw/v1/audio/transcriptions", 0)
 	if err != nil || !handled || string(body) != "B" || ct != "ct" {
 		t.Fatalf("ApplyContext = (%q,%q,%v,%v), want (B,ct,true,nil)", body, ct, handled, err)
 	}
