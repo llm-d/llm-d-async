@@ -168,10 +168,12 @@ func TestClusterLayout_CancelAndResubmitUseSingleKeyWrites(t *testing.T) {
 	assert.InDelta(t, cancellationMarkerTTL.Seconds(), mr.TTL(api.RequestCancellationKey("r")).Seconds(), 2)
 	assert.False(t, mr.Exists(api.RequestCancellationKey("unknown")), "no marker without an active generation")
 
-	// Reusing the ID clears the stale marker before the new generation enqueues.
+	// Reusing the ID leaves the stale marker, which names only the old generation.
 	second := submit()
 	assert.NotEqual(t, first, second)
-	assert.False(t, mr.Exists(api.RequestCancellationKey("r")), "resubmission must clear the old cancellation marker")
+	marker, err = mr.Get(api.RequestCancellationKey("r"))
+	require.NoError(t, err)
+	assert.Equal(t, first, marker, "the stale marker must not name the new generation")
 }
 
 func TestClusterLayout_DurableResultRoundTrip(t *testing.T) {
