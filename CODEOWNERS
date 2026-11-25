@@ -1,2 +1,8 @@
 # Global owners for the entire repo
 * @shimib @ahg-g @jtechapps @RishabhSaini @evacchi
+
+# SQL transport
+/producer-sql/ @shimib @ahg-g @jtechapps @RishabhSaini @evacchi @wseaton
+/pkg/sqlflow/ @shimib @ahg-g @jtechapps @RishabhSaini @evacchi @wseaton
+/docs/sql-migrations.md @shimib @ahg-g @jtechapps @RishabhSaini @evacchi @wseaton
+/test/integration/sqlflow_test.go @shimib @ahg-g @jtechapps @RishabhSaini @evacchi @wseaton
