@@ -591,6 +591,7 @@ func (r *RedisSortedSetFlow) Shutdown() {
 		r.hbCancel()
 	}
 	r.hbWg.Wait()
+	r.dropParkedClaims(context.Background())
 	_ = r.rdb.Close()
 }
 
@@ -1245,6 +1246,13 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 			entry.requestID = msg.PublicRequest.ReqID()
 			entry.requestToken = msg.RequestToken
 			entry.requestDeadline = float64(msg.PublicRequest.ReqDeadline())
+			// Marked before the retry copy exists, so a later claim of that copy
+			// starts unmarked; a failed push below deletes the handle.
+			if v, ok := r.claimTokens.Load(claimKey(entry.requestID, entry.requestToken)); ok {
+				if h, ok := v.(*claimHandle); ok {
+					h.parked = true
+				}
+			}
 		}
 		entries = append(entries, entry)
 	}
