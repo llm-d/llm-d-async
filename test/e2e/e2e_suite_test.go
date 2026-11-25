@@ -18,7 +18,6 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	k8slog "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -27,8 +26,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/env"
-	testutils "sigs.k8s.io/gateway-api-inference-extension/test/utils"
 )
 
 const (
@@ -53,33 +50,33 @@ const (
 )
 
 var (
-	redisPort      string = env.GetEnvString("E2E_INTEGRATION_REDIS_PORT", "30480", ginkgo.GinkgoLogr)
-	pubsubPort     string = env.GetEnvString("E2E_INTEGRATION_PUBSUB_PORT", "30485", ginkgo.GinkgoLogr)
-	promPort       string = env.GetEnvString("E2E_INTEGRATION_PROM_PORT", "30491", ginkgo.GinkgoLogr)
-	simPort        string = env.GetEnvString("E2E_INTEGRATION_SIM_PORT", "30490", ginkgo.GinkgoLogr)
-	envoyPort      string = env.GetEnvString("E2E_INTEGRATION_ENVOY_PORT", "30492", ginkgo.GinkgoLogr)
-	envoyAdminPort string = env.GetEnvString("E2E_INTEGRATION_ENVOY_ADMIN_PORT", "30493", ginkgo.GinkgoLogr)
-	jaegerPort     string = env.GetEnvString("E2E_INTEGRATION_JAEGER_PORT", "30494", ginkgo.GinkgoLogr)
+	redisPort      string = getEnvString("E2E_INTEGRATION_REDIS_PORT", "30480")
+	pubsubPort     string = getEnvString("E2E_INTEGRATION_PUBSUB_PORT", "30485")
+	promPort       string = getEnvString("E2E_INTEGRATION_PROM_PORT", "30491")
+	simPort        string = getEnvString("E2E_INTEGRATION_SIM_PORT", "30490")
+	envoyPort      string = getEnvString("E2E_INTEGRATION_ENVOY_PORT", "30492")
+	envoyAdminPort string = getEnvString("E2E_INTEGRATION_ENVOY_ADMIN_PORT", "30493")
+	jaegerPort     string = getEnvString("E2E_INTEGRATION_JAEGER_PORT", "30494")
 
 	containerRuntime = detectContainerRuntime()
-	apImage          = env.GetEnvString("AP_IMAGE", "ghcr.io/llm-d/llm-d-async:e2e-test", ginkgo.GinkgoLogr)
-	oldAPImage       = env.GetEnvString("OLD_AP_IMAGE", "ghcr.io/llm-d/llm-d-async:v0.10.0", ginkgo.GinkgoLogr)
+	apImage          = getEnvString("AP_IMAGE", "ghcr.io/llm-d/llm-d-async:e2e-test")
+	oldAPImage       = getEnvString("OLD_AP_IMAGE", "ghcr.io/llm-d/llm-d-async:v0.10.0")
 	// TODO: switch EPP_IMAGE and ROUTER_VERSION to a release tag than "main"
-	eppImage = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:main", ginkgo.GinkgoLogr)
+	eppImage = getEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:main")
 	// gaieVersion selects the gateway-api-inference-extension release whose
 	// CRDs are fetched; decoupled from the EPP image tag because the image now
 	// comes from llm-d-router, which pins its own gaie version in go.mod.
-	gaieVersion = env.GetEnvString("GAIE_VERSION", "v1.6.2", ginkgo.GinkgoLogr)
-	simImage    = env.GetEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0", ginkgo.GinkgoLogr)
-	redisImage  = env.GetEnvString("REDIS_IMAGE", "valkey/valkey:8-alpine", ginkgo.GinkgoLogr)
-	pubsubImage = env.GetEnvString("PUBSUB_IMAGE", "gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators", ginkgo.GinkgoLogr)
-	gaieRoot    = os.Getenv("GAIE_ROOT")
-	routerRoot  = os.Getenv("ROUTER_ROOT")
+	gaieVersion      = getEnvString("GAIE_VERSION", "v1.6.2")
+	simImage         = getEnvString("SIM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.0")
+	redisImage       = getEnvString("REDIS_IMAGE", "valkey/valkey:8-alpine")
+	pubsubImage      = getEnvString("PUBSUB_IMAGE", "gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators")
+	kindNodeImage    = getEnvString("KIND_NODE_IMAGE", "kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f")
+	multiReplicaOnly = getEnvString("E2E_MULTI_REPLICA_ONLY", "false") == "true"
+	gaieRoot         = os.Getenv("GAIE_ROOT")
+	routerRoot       = os.Getenv("ROUTER_ROOT")
 	// Router main is required for EndpointPickerConfig at llm-d.ai/v1.
-	routerVersion = env.GetEnvString("ROUTER_VERSION", "main", ginkgo.GinkgoLogr)
+	routerVersion = getEnvString("ROUTER_VERSION", "main")
 	simRoot       = os.Getenv("SIM_ROOT")
-
-	testConfig *testutils.TestConfig
 
 	// kindKubeconfig is an isolated kubeconfig file for the Kind cluster,
 	// so we never modify the user's default ~/.kube/config or current context.
@@ -94,6 +91,17 @@ var (
 	jaegerURL     string
 )
 
+// getEnvString preserves an explicitly set empty value, matching the previous GAIE helper.
+func getEnvString(key, fallback string) string {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		ginkgo.GinkgoLogr.Info("Environment variable not set, using default value", "key", key, "defaultValue", fallback)
+		return fallback
+	}
+	ginkgo.GinkgoLogr.Info("Successfully loaded environment variable", "key", key, "value", value)
+	return value
+}
+
 func TestEndToEnd(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
 	ginkgo.RunSpecs(t,
@@ -105,7 +113,6 @@ var _ = ginkgo.BeforeSuite(func() {
 	setupK8sCluster()
 	gomega.Expect(os.Setenv("KUBECONFIG", kindKubeconfig)).To(gomega.Succeed())
 	gomega.Expect(os.Setenv("PUBSUB_EMULATOR_HOST", "localhost:"+pubsubPort)).To(gomega.Succeed())
-	testConfig = testutils.NewTestConfig(nsName, "")
 	setupK8sClient()
 	setupNameSpace()
 	applyManifests()
@@ -120,7 +127,7 @@ var _ = ginkgo.AfterSuite(func() {
 		rdb.Close() //nolint:errcheck
 	}
 
-	skipCleanup := env.GetEnvString("E2E_SKIP_CLEANUP", "false", ginkgo.GinkgoLogr)
+	skipCleanup := getEnvString("E2E_SKIP_CLEANUP", "false")
 	if skipCleanup == "true" {
 		fmt.Println("Skipping cluster cleanup (E2E_SKIP_CLEANUP=true)")
 		return
@@ -200,8 +207,10 @@ func setupK8sCluster() {
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 		kindLoadImage(apImage)
 		loadEPPImage()
-		pullIfMissing(oldAPImage)
-		kindLoadImage(oldAPImage)
+		if !multiReplicaOnly {
+			pullIfMissing(oldAPImage)
+			kindLoadImage(oldAPImage)
+		}
 		return
 	}
 
@@ -212,7 +221,8 @@ func setupK8sCluster() {
 
 	ginkgo.By("Creating Kind cluster " + kindClusterName)
 	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName,
-		"--kubeconfig", kindKubeconfig, "--wait", "120s", "--config", "-")
+		"--kubeconfig", kindKubeconfig, "--image", kindNodeImage,
+		"--wait", "120s", "--config", "-")
 	stdin, err := command.StdinPipe()
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	go func() {
@@ -254,14 +264,18 @@ func setupK8sCluster() {
 	kindLoadImage(apImage)
 	kindLoadImage(simImage)
 
-	pullIfMissing(oldAPImage)
-	kindLoadImage(oldAPImage)
+	if !multiReplicaOnly {
+		pullIfMissing(oldAPImage)
+		kindLoadImage(oldAPImage)
+	}
 
 	pullIfMissing(redisImage)
 	kindLoadImage(redisImage)
 
-	pullIfMissing(pubsubImage)
-	kindLoadImage(pubsubImage)
+	if !multiReplicaOnly {
+		pullIfMissing(pubsubImage)
+		kindLoadImage(pubsubImage)
+	}
 
 	pullIfMissing("docker.io/envoyproxy/envoy:distroless-v1.33.2")
 	kindLoadImage("docker.io/envoyproxy/envoy:distroless-v1.33.2")
@@ -269,8 +283,10 @@ func setupK8sCluster() {
 	pullIfMissing("prom/prometheus:v2.53.0")
 	kindLoadImage("prom/prometheus:v2.53.0")
 
-	pullIfMissing("jaegertracing/all-in-one:1.76.0")
-	kindLoadImage("jaegertracing/all-in-one:1.76.0")
+	if !multiReplicaOnly {
+		pullIfMissing("jaegertracing/all-in-one:1.76.0")
+		kindLoadImage("jaegertracing/all-in-one:1.76.0")
+	}
 
 	// The sim image is pulled with imagePullPolicy: Always directly by the cluster.
 }
@@ -330,11 +346,6 @@ func setupK8sClient() {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.ExpectWithOffset(1, k8sCfg).NotTo(gomega.BeNil())
 
-	err = clientgoscheme.AddToScheme(testConfig.Scheme)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	testConfig.CreateCli()
-
 	k8slog.SetLogger(ginkgo.GinkgoLogr)
 }
 
@@ -368,17 +379,19 @@ func applyManifests() {
 	ginkgo.By("Applying Redis manifest")
 	kubectlApplyFile(redisManifest, map[string]string{"${REDIS_IMAGE}": redisImage})
 
-	ginkgo.By("Applying PubSub emulator manifest")
-	kubectlApplyFile(pubsubManifest, map[string]string{"${PUBSUB_IMAGE}": pubsubImage})
+	if !multiReplicaOnly {
+		ginkgo.By("Applying PubSub emulator manifest")
+		kubectlApplyFile(pubsubManifest, map[string]string{"${PUBSUB_IMAGE}": pubsubImage})
 
-	ginkgo.By("Waiting for PubSub emulator deployment rollout")
-	cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
-		"-n", nsName, "rollout", "status", "deployment/pubsub-emulator", "--timeout=60s")
-	sess, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(sess).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+		ginkgo.By("Waiting for PubSub emulator deployment rollout")
+		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"-n", nsName, "rollout", "status", "deployment/pubsub-emulator", "--timeout=180s")
+		sess, err := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(sess).WithTimeout(210 * time.Second).Should(gexec.Exit(0))
 
-	setupPubSubEmulatorTopicsAndSubscriptions()
+		setupPubSubEmulatorTopicsAndSubscriptions()
+	}
 
 	ginkgo.By("Applying sim manifest")
 	kubectlApplyFile(simManifest, nil)
@@ -393,8 +406,10 @@ func applyManifests() {
 	ginkgo.By("Applying Prometheus manifest")
 	kubectlApplyFile(prometheusManifest, nil)
 
-	ginkgo.By("Applying Jaeger manifest")
-	kubectlApplyFile(jaegerManifest, nil)
+	if !multiReplicaOnly {
+		ginkgo.By("Applying Jaeger manifest")
+		kubectlApplyFile(jaegerManifest, nil)
+	}
 
 	ginkgo.By("Applying Envoy manifest")
 	kubectlApplyFile(envoyManifest, map[string]string{
@@ -406,8 +421,9 @@ func applyManifests() {
 
 	ginkgo.By("Installing llm-d-async helm releases")
 	imageRepo, imageTag := splitImage(apImage)
-	for _, r := range []struct{ name, values string }{
+	releases := []struct{ name, values string }{
 		{"integration", helmValuesDir + "/integration.yaml"},
+		{"multi-replica", helmValuesDir + "/multi-replica.yaml"},
 		{"pubsub", helmValuesDir + "/pubsub.yaml"},
 		{"saturation", helmValuesDir + "/saturation.yaml"},
 		{"budget", helmValuesDir + "/budget.yaml"},
@@ -423,17 +439,26 @@ func applyManifests() {
 		{"benchmark", helmValuesDir + "/benchmark.yaml"},
 		{"benchmark-pool-gate", helmValuesDir + "/benchmark-pool-gate.yaml"},
 		{"benchmark-pubsub", helmValuesDir + "/benchmark-pubsub.yaml"},
-	} {
+	}
+	if multiReplicaOnly {
+		releases = []struct{ name, values string }{
+			{"multi-replica", helmValuesDir + "/multi-replica.yaml"},
+			{"saturation", helmValuesDir + "/saturation.yaml"},
+		}
+	}
+	for _, r := range releases {
 		helmInstall(r.name, r.values, map[string]string{
 			"ap.image.repository": imageRepo,
 			"ap.image.tag":        imageTag,
 		})
 	}
-	oldRepo, oldTag := splitImage(oldAPImage)
-	helmInstall("old-dispatcher", helmValuesDir+"/old-dispatcher.yaml", map[string]string{
-		"ap.image.repository": oldRepo,
-		"ap.image.tag":        oldTag,
-	})
+	if !multiReplicaOnly {
+		oldRepo, oldTag := splitImage(oldAPImage)
+		helmInstall("old-dispatcher", helmValuesDir+"/old-dispatcher.yaml", map[string]string{
+			"ap.image.repository": oldRepo,
+			"ap.image.tag":        oldTag,
+		})
+	}
 }
 
 // kubectlPatchEnvoyNodePort patches the Envoy service to NodePort so test code
@@ -512,10 +537,12 @@ func setupClients() {
 		return rdb.Ping(context.Background()).Err()
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
 
-	ginkgo.By("Creating PubSub client on localhost:" + pubsubPort)
-	var err error
-	pubsubClient, err = pubsub.NewClient(context.Background(), pubsubProjectID)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	if !multiReplicaOnly {
+		ginkgo.By("Creating PubSub client on localhost:" + pubsubPort)
+		var err error
+		pubsubClient, err = pubsub.NewClient(context.Background(), pubsubProjectID)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}
 
 	ginkgo.By("Waiting for Prometheus to be ready")
 	gomega.Eventually(func(g gomega.Gomega) {
@@ -533,13 +560,15 @@ func setupClients() {
 		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 
-	ginkgo.By("Waiting for Jaeger to be ready")
-	gomega.Eventually(func(g gomega.Gomega) {
-		resp, err := http.Get(jaegerURL + "/")
-		g.Expect(err).NotTo(gomega.HaveOccurred())
-		defer resp.Body.Close() //nolint:errcheck
-		g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
-	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
+	if !multiReplicaOnly {
+		ginkgo.By("Waiting for Jaeger to be ready")
+		gomega.Eventually(func(g gomega.Gomega) {
+			resp, err := http.Get(jaegerURL + "/")
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			defer resp.Body.Close() //nolint:errcheck
+			g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+		}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
+	}
 
 	ginkgo.By("Waiting for Envoy to be ready")
 	gomega.Eventually(func(g gomega.Gomega) {
@@ -632,8 +661,9 @@ func doRedeployEPPWithFlowControl() {
 	// Restart all processor deployments so they get fresh connections to
 	// Envoy/EPP. Without this, processors that poll during the EPP restart
 	// window can get 404s from Envoy that are classified as non-retryable.
-	for _, deploy := range []string{
+	processorDeployments := []string{
 		"integration-llm-d-async",
+		"multi-replica-llm-d-async",
 		"pubsub-llm-d-async",
 		"saturation-llm-d-async",
 		"budget-llm-d-async",
@@ -649,31 +679,21 @@ func doRedeployEPPWithFlowControl() {
 		"benchmark-llm-d-async",
 		"benchmark-pool-gate-llm-d-async",
 		"benchmark-pubsub-llm-d-async",
-	} {
+	}
+	if multiReplicaOnly {
+		processorDeployments = []string{
+			"multi-replica-llm-d-async",
+			"saturation-llm-d-async",
+		}
+	}
+	for _, deploy := range processorDeployments {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "restart", "deployment/"+deploy)
 		s, e := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(e).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(s).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 	}
-	for _, deploy := range []string{
-		"integration-llm-d-async",
-		"pubsub-llm-d-async",
-		"saturation-llm-d-async",
-		"budget-llm-d-async",
-		"redis-gate-llm-d-async",
-		"quota-llm-d-async",
-		"composite-llm-d-async",
-		"prometheus-query-llm-d-async",
-		"endpoint-scrape-llm-d-async",
-		"short-drain-llm-d-async",
-		"multitenant-llm-d-async",
-		"tier-priority-llm-d-async",
-		"mt-merge-llm-d-async",
-		"benchmark-llm-d-async",
-		"benchmark-pool-gate-llm-d-async",
-		"benchmark-pubsub-llm-d-async",
-	} {
+	for _, deploy := range processorDeployments {
 		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 			"-n", nsName, "rollout", "status", "deployment/"+deploy, "--timeout=120s")
 		s, e := gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)

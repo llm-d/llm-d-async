@@ -23,7 +23,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 const (
@@ -364,7 +364,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 							}
 						}
 						select {
-						case resultChannel <- asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, resp.StatusCode, resp.Body):
+						case resultChannel <- asyncapi.NewResponseResult(msg.PublicRequest, msg.InternalRouting, *resp):
 						case <-requestCtx.Done():
 						}
 						return
@@ -421,7 +421,7 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 
 						var resultMsg asyncapi.ResultMessage
 						if resp != nil && resp.StatusCode > 0 {
-							resultMsg = asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, resp.StatusCode, resp.Body)
+							resultMsg = asyncapi.NewResponseResult(msg.PublicRequest, msg.InternalRouting, *resp)
 						} else {
 							resultMsg = asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting,
 								asyncapi.ErrCodeInferenceError,
@@ -582,7 +582,7 @@ func retryMessage(ctx context.Context, msg pipeline.EmbelishedRequestMessage, re
 // actual status/body). Otherwise emit a non-HTTP deadline-exceeded error.
 func deadlineExhaustedResult(msg pipeline.EmbelishedRequestMessage, lastResp asyncapi.InferenceResponse) asyncapi.ResultMessage {
 	if lastResp.StatusCode > 0 {
-		return asyncapi.NewHTTPResult(msg.PublicRequest, msg.InternalRouting, lastResp.StatusCode, lastResp.Body)
+		return asyncapi.NewResponseResult(msg.PublicRequest, msg.InternalRouting, lastResp)
 	}
 	return asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting)
 }

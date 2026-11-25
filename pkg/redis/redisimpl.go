@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 const (
@@ -154,7 +154,7 @@ type RedisMQFlow struct {
 // The config is expected to have had ApplyDefaults applied (LoadPubSubConfig
 // does this); workerPools resolves the named pool each queue routes to.
 func NewRedisMQFlow(cfg PubSubConfig, workerPools []pipeline.WorkerPoolConfig) (*RedisMQFlow, error) {
-	rdb, err := newUniversalClient(cfg.connection())
+	rdb, _, err := newUniversalClient(cfg.connection())
 	if err != nil {
 		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
 	}

@@ -34,6 +34,9 @@ type WorkerConfig struct {
 	GateWaitTimeout time.Duration
 	DrainTimeout    time.Duration
 	PoolConfigFile  string
+
+	ResultHeaderPrefixes []string
+	MaxResponseBytes     int64
 }
 
 // TransportOptions groups the transport selection and configuration flags.
@@ -54,6 +57,10 @@ type ObservabilityConfig struct {
 type PrometheusConfig struct {
 	URL      string
 	CacheTTL time.Duration
+	// CACertFile and BearerTokenFile authenticate metric-gate queries to a
+	// Prometheus API that needs them, such as OpenShift's Thanos Querier.
+	CACertFile      string
+	BearerTokenFile string
 }
 
 type Config struct {
@@ -138,6 +145,8 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&o.Worker.RequestTimeout, "request-timeout", o.Worker.RequestTimeout, "timeout for individual inference requests")
 	fs.DurationVar(&o.Worker.GateWaitTimeout, "gate-wait-timeout", o.Worker.GateWaitTimeout, "maximum time a worker parks one request at a pool gate before re-enqueueing it (0 waits until the request deadline)")
 	fs.DurationVar(&o.Worker.DrainTimeout, "drain-timeout", o.Worker.DrainTimeout, "maximum time to wait for in-flight requests to complete after SIGTERM")
+	fs.StringSliceVar(&o.Worker.ResultHeaderPrefixes, "result-header-prefixes", o.Worker.ResultHeaderPrefixes, "comma-separated inference response header name prefixes (case-insensitive) to forward in results, e.g. x-vllm-omni-,x-audio-")
+	fs.Int64Var(&o.Worker.MaxResponseBytes, "max-response-bytes", o.Worker.MaxResponseBytes, "fail requests whose inference response body exceeds this many bytes, without retrying (0 is unlimited)")
 	fs.StringVar(&o.Worker.PoolConfigFile, "pool-config-file", o.Worker.PoolConfigFile, "Path to the pools configuration JSON file")
 
 	fs.StringVar(&o.Transport.Type, "transport", o.Transport.Type, "The transport implementation to use. Supported: redis-pubsub, redis-sortedset, gcp-pubsub, sql")
@@ -162,6 +171,8 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 
 	fs.StringVar(&o.Prometheus.URL, "prometheus-url", o.Prometheus.URL, "Prometheus server URL for metric-based gates (e.g., http://localhost:9090)")
 	fs.DurationVar(&o.Prometheus.CacheTTL, "prometheus-cache-ttl", o.Prometheus.CacheTTL, "TTL for cached Prometheus metrics (e.g., 5s, 0s to disable)")
+	fs.StringVar(&o.Prometheus.CACertFile, "prometheus-ca-cert", o.Prometheus.CACertFile, "Path to CA certificate file (PEM) for verifying the Prometheus server; reloaded when it changes")
+	fs.StringVar(&o.Prometheus.BearerTokenFile, "prometheus-bearer-token-file", o.Prometheus.BearerTokenFile, "Path to a file holding the bearer token sent to Prometheus; re-read on every request so rotated tokens apply")
 
 	// Backend-specific flags
 	o.RedisConnection.AddFlags(fs)

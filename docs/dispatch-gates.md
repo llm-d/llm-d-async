@@ -11,6 +11,7 @@ The available gate types, at a glance:
 | `prometheus-saturation` | budget | Closes when a pool saturation metric reaches a threshold. |
 | `prometheus-budget` | budget | Computes a dispatch budget from a cascade of EPP/vLLM metrics. |
 | `prometheus-query` | budget | Evaluates a user-supplied PromQL expression as the budget. |
+| `inference-pool-ready` | budget | Holds requests while an InferencePool has fewer ready endpoints than required (e.g. scaled to zero). |
 | `endpoint-scrape` | budget | Scrapes a raw `/metrics` endpoint directly — no Prometheus server required. |
 | `local-max-concurrency` | admission | Caps concurrent in-flight requests per queue using in-process state. |
 | `redis-quota` | admission | Per-attribute quota (rate limit or concurrency) via Redis. |
@@ -114,11 +115,11 @@ The available gate types, at a glance:
 - `constant`: Always returns budget 1.0 (fully open). No parameters.
 
 - `redis`: Queries Redis for the dispatch budget (managed by an external system).
-  - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). Queues sharing the same address will share the same connection pool.
+  - `address` (**required**): Redis server address for the dispatch gate (e.g., `localhost:6379`). When it exactly matches the `redis-sortedset` transport's address, the gate reuses the transport's client, including its credentials, TLS settings and database (the `/N` in the transport URL). Otherwise it opens a standalone connection without credentials on DB 0, shared by gates with the same address.
   - `budget_key` (optional): Redis key to read the dispatch budget from. Default is `dispatch-gate-budget`.
 
 - `redis-leased-rate`:
-  - `address` (**required**): Redis server address. Gate instances using the same address share a client connection pool.
+  - `address` (**required**): Redis server address. Reuses the `redis-sortedset` transport's client when it matches, as described for the `redis` gate; otherwise gates with the same address share a standalone client.
   - `control_key` (**required**): Redis hash containing the controller's leased rate command.
   - `pool_id` (optional): Worker-pool ID the command must match. Defaults to the owning worker pool and is required when no owner is available.
   - `state_key` (optional): Redis hash used by the shared token bucket. Defaults to `<control_key>:state`.
@@ -193,9 +194,10 @@ The available gate types, at a glance:
   Sources 0 and 2 compute `max_SYS = ready_pods × max_concurrency` dynamically from the
   `llm_d_epp_ready_endpoints` metric. Source 1 averages over pods, so the `ready_pods` factor
   cancels and no join is needed. That also keeps it honest when the pool drains: EPP's metrics
-  refresh [returns early when the pool has no pods](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/v1.2.1/pkg/epp/backend/metrics/logger.go#L89-L91),
-  so `llm_d_epp_ready_endpoints` and `llm_d_epp_average_queue_size` freeze at their last
-  values and a scaled-to-zero pool would read as idle capacity. `llm_d_epp_per_endpoint_queue_size`
+  refresh [returns early when the pool has no pods](https://github.com/llm-d/llm-d-router/blob/fb9e9649a4e75ff3476196130affd78d43d20455/pkg/epp/datalayer/logger/logger.go#L113-L119),
+  so `llm_d_epp_average_queue_size` and the other pool averages freeze at their last
+  values and a scaled-to-zero pool would read as idle capacity. Since llm-d-router v0.9.0,
+  `llm_d_epp_ready_endpoints` is recorded before that early return and drops to `0`. `llm_d_epp_per_endpoint_queue_size`
   comes from a scrape-time collector that simply stops reporting, so the source yields no sample
   and the cascade moves on instead.
   The gate closes when `D ≤ baseline`; when open it returns `D − baseline`, so callers compute `N = max_SYS × (D − B)`.
@@ -296,6 +298,53 @@ The available gate types, at a glance:
     affect the query, it only sets the `inference_pool` label on `async_gate_metric_value` and
     `async_gate_metric_threshold` so you can tell which pool a gauge is reporting on.
 
+- `inference-pool-ready`: Holds requests while an InferencePool has fewer ready endpoints than
+  `min_ready_endpoints`, for example while its model servers are scaled to zero. It builds this
+  query from its parameters and runs it like `prometheus-query`:
+
+  ```promql
+  max(llm_d_epp_ready_endpoints{name="<pool>",namespace="<namespace>"}) >= bool <min_ready_endpoints>
+  ```
+
+  The budget is `1` when the pool has enough ready endpoints and `0` otherwise. `max` keeps an HA
+  EPP (several replicas reporting the same pool) behaving like a single one. The metric is absent
+  until the EPP has an InferencePool and absent when the EPP is down; both take the fallback.
+  Without `namespace`, the pool name must match a single namespace: when the same name is found in
+  several namespaces, the query returns no samples and also takes the fallback, so a ready pool
+  elsewhere cannot open the gate for one that is scaled to zero.
+
+  - `pool` (**required**): The InferencePool name, matched against the `name` label.
+  - `namespace` (optional): Adds a `namespace` label match. Set it whenever the Prometheus holds
+    pools with the same name in several namespaces; without it, such a name takes the fallback.
+  - `min_ready_endpoints` (optional): Ready endpoints needed to open the gate. Must be `>= 1`. Default is `1`.
+  - `fail_open` (optional): When `true`, a failed query, a missing metric, or an ambiguous pool
+    name lets requests through. Default is `false` (fail closed).
+
+  Configure it as a **pool-level** gate inside `wait-on-refuse` so held requests park in memory
+  instead of returning to the broker, and combine it with a saturation or budget gate in a
+  `composite` so "is anything there?" and "is there room?" are checked together:
+
+  ```json
+  {
+    "gate_type": "wait-on-refuse",
+    "gate_params": {
+      "gate": {
+        "gate_type": "composite",
+        "gate_params": {
+          "gates": [
+            {"gate_type": "inference-pool-ready", "gate_params": {"pool": "my-pool"}},
+            {"gate_type": "prometheus-budget", "gate_params": {"pool": "my-pool"}}
+          ]
+        }
+      }
+    }
+  }
+  ```
+
+  The gate lags the pool by roughly the EPP metrics refresh (5s by default), the Prometheus
+  scrape interval and the gate cache TTL. Requests dispatched inside that window take the
+  normal retry path. Held requests still expire at their deadline.
+
 - `endpoint-scrape`: Scrapes a raw Prometheus text-format `/metrics` endpoint directly.
   Normalizes the metric to `[0, 1]`, then interprets it as saturation by default or as a direct budget when `value_type` is `budget`. The final budget is `clamp(interpreted_budget - baseline, 0, 1)`. Saturation metrics use `1 - normalized_value`; budget metrics use `normalized_value`.
 
@@ -306,6 +355,8 @@ The available gate types, at a glance:
   - `max_count_per_pod` (optional): Per-pod capacity. When > 0, the normalized value is `value / max_count`. When 0, the metric value is assumed to already be in [0, 1]. Default is `0`.
   - `baseline` (optional): Reserved headroom subtracted from budget. Default is `0.0`.
   - `fallback` (optional): Budget returned when scrape fails or metric is missing. Default is `0.0` (fail closed).
+  - `absent_value` (optional): Raw metric value assumed when the scrape succeeds but no series matches, for gauges that exist only while there is something to count. EPP drops an idle priority band's `llm_d_epp_flow_control_queue_size` series, so a gate on that series needs `absent_value: 0`, or it falls back closed and never sends the traffic that would bring the series back. A failed scrape still uses `fallback`. A misspelled metric name or label reads the same as an idle series, so the first scrape that applies `absent_value` to a series the gate has never matched is logged. Unset by default.
+  - `admission` (optional): `budget` (default) admits every request while the latest reading's budget is above `baseline`. `counted` admits at most the reading's free slots (`max_count - value`, in the metric's units) until the next reading, one reading per `--prometheus-cache-ttl`; it needs `max_count_per_pod` with `value_type: saturation` and takes neither `baseline` nor `fallback` (a failed scrape admits nothing), and `--prometheus-cache-ttl` must be greater than 0. A request that finishes, is retried or loses its claim to another replica returns its slot to the reading that admitted it. Use `counted` to bound how much a fast dispatcher can send into a queue between readings.
   - `pods_url` (optional): URL to scrape for dynamic pod count (e.g., `http://epp-svc:9090/metrics`). When set with `pods_metric`, `max_count = ready_pods * max_count_per_pod`.
   - `pods_metric` (optional): Metric name for ready pods (e.g., `llm_d_epp_ready_endpoints`).
   - `pods_labels` (optional): JSON label filters for the pods metric (e.g., `{"name":"my-pool"}`).
@@ -315,6 +366,12 @@ The available gate types, at a glance:
   for dynamic scaling, or set `max_count_per_pod` to a static value for single-pod setups. For a
   readiness metric where `1` means ready and `0` means unavailable, set `value_type` to `budget`.
 
+  With `admission: counted`:
+
+  - Each dispatcher replica keeps its own count, so N replicas together admit up to N times the free slots per reading.
+  - `async_gate_metric_value` reports the free-slot count of the last reading, not a value in `[0, 1]`.
+  - The budget is `1` while the reading has a free slot and `0` otherwise. `gcp-pubsub` restarts its receiver whenever the budget changes, so a counted gate restarts it on most readings; use it with `redis-sortedset` or `sql`.
+
 ## Admission gates
 
 - `local-max-concurrency`: Limits the number of concurrent in-flight requests processed from a queue locally using thread-safe, in-process state.
@@ -322,9 +379,9 @@ The available gate types, at a glance:
   - `gating_mode` (optional): `blocking` or `classifying`. In `blocking` mode the worker blocks until capacity frees up; in `classifying` (non-blocking) mode a request over the limit is refused (returned to the broker for redelivery). Default is `classifying`.
 
 - `redis-quota`: Per-attribute quota management via Redis.
-  - `address` (**required**): Redis server address.
+  - `address` (**required**): Redis server address. Reuses the `redis-sortedset` transport's client when it matches, as described for the `redis` gate.
   - `attribute` (optional): The message attribute to use for quota (e.g., `userid`). Default is `userid`.
-  - `mode` (optional): `rate-limit` or `concurrency`. Default is `rate-limit`.
+  - `mode` (optional): `rate-limit` or `concurrency`. Default is `rate-limit`. In `concurrency` mode each admitted acquire and each release also writes a `quota-call:<counter key>:<token>` guard that expires after 2 minutes. These keys sit outside `prefix`, so a Redis ACL scoped by key pattern must allow them.
   - `limit` (**required**): The quota limit. Must be positive.
   - `window` (optional): The time window for rate limiting (e.g., `1m`, `10s`). Default is `1m`.
   - `prefix` (optional): Redis key prefix. Default is `quota:`.

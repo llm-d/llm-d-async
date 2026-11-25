@@ -22,8 +22,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 const testMetricsBody = `# HELP vllm:num_requests_waiting Number of requests waiting.
@@ -172,4 +175,84 @@ idle_metric 0
 		// value=0, maxCount=10 → saturation=0 → budget=1.0
 		assert.InDelta(t, 1.0, samples[0].Value, 0.001)
 	})
+}
+
+func TestScrapeMetricSourceAbsentValue(t *testing.T) {
+	server := newTestMetricsServer(testMetricsBody)
+	defer server.Close()
+	zero := 0.0
+
+	absent := NewScrapeMetricSource(ScrapeConfig{
+		URL:            server.URL,
+		MetricName:     "llm_d_epp_flow_control_queue_size",
+		Labels:         map[string]string{"priority": "-10"},
+		MaxCountPerPod: 1024,
+		AbsentValue:    &zero,
+	})
+	samples, err := absent.Query(context.Background())
+	require.NoError(t, err)
+	require.Len(t, samples, 1)
+	assert.InDelta(t, 1.0, samples[0].Value, 0.001, "an absent queue reads as empty")
+
+	unset := NewScrapeMetricSource(ScrapeConfig{
+		URL:        server.URL,
+		MetricName: "llm_d_epp_flow_control_queue_size",
+	})
+	samples, err = unset.Query(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, samples, "without absent_value a missing series stays missing")
+
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+	down := NewScrapeMetricSource(ScrapeConfig{
+		URL:         failing.URL,
+		MetricName:  "llm_d_epp_flow_control_queue_size",
+		AbsentValue: &zero,
+	})
+	_, err = down.Query(context.Background())
+	require.Error(t, err, "absent_value never covers a failed scrape")
+}
+
+func TestScrapeMetricSourceLogsOnceWhenAbsentValueCoversASeriesNeverSeen(t *testing.T) {
+	var logged []string
+	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{Verbosity: logutil.DEFAULT})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	m, url := newEPPMetrics(t, 0, 2)
+	m.absent.Store(true)
+	neverSeen := headroomSourceFor(url, 8)
+	for range 3 {
+		_, err := neverSeen.Query(ctx)
+		require.NoError(t, err)
+	}
+	require.Len(t, logged, 1, "one line per source, not one per scrape")
+	assert.Contains(t, logged[0], "has not matched a series yet")
+	assert.Contains(t, logged[0], "llm_d_epp_flow_control_queue_size")
+	assert.Contains(t, logged[0], `"priority"="-10"`)
+
+	m.absent.Store(false)
+	_, err := neverSeen.Query(ctx)
+	require.NoError(t, err)
+	m.absent.Store(true)
+	_, err = neverSeen.Query(ctx)
+	require.NoError(t, err)
+	assert.Len(t, logged, 1)
+
+	logged = nil
+	m.absent.Store(false)
+	seenFirst := headroomSourceFor(url, 8)
+	_, err = seenFirst.Query(ctx)
+	require.NoError(t, err)
+	m.absent.Store(true)
+	_, err = seenFirst.Query(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, logged, "a series that existed and then dropped is an idle one")
+
+	m.status.Store(http.StatusServiceUnavailable)
+	failed := headroomSourceFor(url, 8)
+	_, err = failed.Query(ctx)
+	require.Error(t, err)
+	assert.Empty(t, logged, "a failed scrape says nothing about the series")
 }

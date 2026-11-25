@@ -53,8 +53,24 @@ ap:
   # until the request's own deadline.
   gateWaitTimeout: "5m"
   drainTimeout: "2m"
+  # Inference response header name prefixes (case-insensitive) copied into each
+  # result's headers, e.g. ["x-vllm-omni-", "x-audio-"] for vllm-omni speech usage.
+  resultHeaderPrefixes: []
+  # Inference response body size limit in bytes. Larger responses fail with
+  # INFERENCE_ERROR and are not retried. 0 is unlimited.
+  maxResponseBytes: 0
   prometheusURL: ""
   prometheusCacheTTL: ""
+  # Authentication for metric gates whose Prometheus API needs it, such as
+  # OpenShift's Thanos Querier (https://thanos-querier.openshift-monitoring.svc:9091),
+  # which also requires the service account to hold cluster-monitoring-view.
+  # Paths are inside the container; on OpenShift the default service account
+  # mount provides both:
+  #   bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  #   caCertFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+  prometheusAuth:
+    bearerTokenFile: ""
+    caCertFile: ""
   # Extra environment variables to inject into the processor container.
   # Useful for passing backend-specific configuration like PUBSUB_EMULATOR_HOST.
   # Note: Avoid setting NAMESPACE or POD_NAME here as it will override the downward

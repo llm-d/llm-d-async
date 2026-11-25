@@ -97,11 +97,12 @@ func universalOptions(c ConnectionConfig) (*redis.UniversalOptions, error) {
 	}, nil
 }
 
-// newUniversalClient builds the go-redis client for the configured topology.
-func newUniversalClient(c ConnectionConfig) (redis.UniversalClient, error) {
+// newUniversalClient builds the go-redis client for the configured topology and
+// returns its options for matching queue-level gate configuration.
+func newUniversalClient(c ConnectionConfig) (redis.UniversalClient, *redis.UniversalOptions, error) {
 	opts, err := universalOptions(c)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return redis.NewUniversalClient(opts), nil
+	return redis.NewUniversalClient(opts), opts, nil
 }

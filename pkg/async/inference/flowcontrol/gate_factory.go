@@ -17,10 +17,15 @@ limitations under the License.
 package flowcontrol
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -28,6 +33,8 @@ import (
 	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
 	promapi "github.com/prometheus/client_golang/api"
 	goredis "github.com/redis/go-redis/v9"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // DefaultCacheTTL is the default TTL for cached Prometheus metric sources.
@@ -35,15 +42,39 @@ const DefaultCacheTTL = 5 * time.Second
 
 var _ pipeline.GateFactory = (*GateFactory)(nil)
 
+var _ redisgate.RedisClientRegistrar = (*GateFactory)(nil)
+
 var _ QuotaStore = (*redisgate.QuotaStore)(nil)
 
 // GateFactory creates DispatchGate instances based on configuration.
 type GateFactory struct {
 	prometheusURL string
-	cacheTTL      time.Duration
-	redisClients  map[string]*goredis.Client
-	sqlQuota      QuotaStore
-	logger        logr.Logger
+	// prometheusTransport carries the CA and bearer token for Prometheus
+	// queries; nil uses the Prometheus client's default transport.
+	prometheusTransport http.RoundTripper
+	cacheTTL            time.Duration
+	redisClients        map[string]*goredis.Client
+	// transportClients maps the Redis transport's primary address to its
+	// client, which the transport owns; Redis gates at that address reuse it.
+	transportClients map[string]goredis.UniversalClient
+	sqlQuota         QuotaStore
+	logger           logr.Logger
+	// gmpClientFn returns an authenticated HTTP client for GMP's Prometheus
+	// HTTP Query API plus the token source that backs it, so callers can
+	// prove the credentials actually mint tokens before using the client.
+	// Defaults to newGMPClient (Application Default Credentials / Workload
+	// Identity); overridable in same-package tests to avoid requiring live
+	// ADC in CI.
+	gmpClientFn func(ctx context.Context, scopes ...string) (*http.Client, oauth2.TokenSource, error)
+	// gmpTokenTimeout bounds the initial token acquisition so an unreachable
+	// token endpoint cannot hang gate creation.
+	gmpTokenTimeout time.Duration
+	// gmpMu guards gmpRT. A successfully built transport is cached so every
+	// Prometheus gate shares one ADC client; failures are not cached, so a
+	// later CreateGate — config reloads retry gate creation on each tick —
+	// can succeed once credentials are fixed, without a process restart.
+	gmpMu sync.Mutex
+	gmpRT http.RoundTripper
 }
 
 // NewGateFactory creates a new GateFactory with an optional Prometheus URL.
@@ -58,10 +89,13 @@ func NewGateFactory(prometheusURL string) *GateFactory {
 // for Prometheus metric sources. A TTL of 0 disables caching.
 func NewGateFactoryWithCacheTTL(prometheusURL string, cacheTTL time.Duration) *GateFactory {
 	return &GateFactory{
-		prometheusURL: prometheusURL,
-		cacheTTL:      cacheTTL,
-		redisClients:  make(map[string]*goredis.Client),
-		logger:        logr.Discard(),
+		prometheusURL:    prometheusURL,
+		cacheTTL:         cacheTTL,
+		redisClients:     make(map[string]*goredis.Client),
+		transportClients: make(map[string]goredis.UniversalClient),
+		logger:           logr.Discard(),
+		gmpClientFn:      newGMPClient,
+		gmpTokenTimeout:  defaultGMPTokenTimeout,
 	}
 }
 
@@ -74,6 +108,116 @@ func (f *GateFactory) WithLogger(logger logr.Logger) *GateFactory {
 	return f
 }
 
+// WithPrometheusTransport sets the HTTP transport Prometheus gates use, for
+// example one from NewPrometheusRoundTripper that adds a CA bundle and a
+// bearer token.
+func (f *GateFactory) WithPrometheusTransport(rt http.RoundTripper) *GateFactory {
+	f.prometheusTransport = rt
+	return f
+}
+
+// prometheusConfig is the client config every Prometheus gate uses. An
+// explicitly configured transport (bearer token and/or CA, see
+// NewPrometheusRoundTripper) takes precedence; otherwise a Google Managed
+// Prometheus URL gets GCP Application Default Credentials (e.g. GKE Workload
+// Identity). GMP URLs authenticate eagerly and fail closed at construction —
+// the scheme must be https, ADC discovery must succeed, and an initial token
+// must be mintable — rather than silently HTTP 401'ing on every query and
+// falling back to the configured fallback value (default 0.0, gate
+// perpetually closed). A successful transport is cached; authentication
+// failures are not, so the config reload path (which retries gate creation
+// every tick) can succeed once credentials are corrected. Plain prometheus /
+// mimir / victoria-metrics URLs keep the Prometheus client's default
+// transport.
+func (f *GateFactory) prometheusConfig() (promapi.Config, error) {
+	cfg := promapi.Config{Address: f.prometheusURL, RoundTripper: f.prometheusTransport}
+	if cfg.RoundTripper != nil || !IsGMPURL(f.prometheusURL) {
+		return cfg, nil
+	}
+	f.gmpMu.Lock()
+	defer f.gmpMu.Unlock()
+	if f.gmpRT == nil {
+		rt, err := f.newAuthedPrometheusClient(context.Background())
+		if err != nil {
+			return cfg, err
+		}
+		f.gmpRT = rt
+	}
+	cfg.RoundTripper = f.gmpRT
+	return cfg, nil
+}
+
+// defaultGMPTokenTimeout bounds the initial GMP token acquisition so an
+// unreachable token endpoint cannot hang gate creation.
+const defaultGMPTokenTimeout = 10 * time.Second
+
+// newGMPClient builds an HTTP client authenticated with GCP Application
+// Default Credentials for the given scopes, and returns the token source
+// backing it so callers can verify the credentials can actually mint tokens
+// before using the client. The credentials are built with a non-cancelling
+// context: x/oauth2 captures this context into the returned token source and
+// reuses it for every token refresh for the life of the client, so it must
+// not carry the caller's deadline or cancellation.
+func newGMPClient(ctx context.Context, scopes ...string) (*http.Client, oauth2.TokenSource, error) {
+	longCtx := context.WithoutCancel(ctx)
+	creds, err := google.FindDefaultCredentials(longCtx, scopes...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("finding GCP Application Default Credentials: %w", err)
+	}
+	return oauth2.NewClient(longCtx, creds.TokenSource), creds.TokenSource, nil
+}
+
+// newAuthedPrometheusClient builds the authenticated GMP RoundTripper that
+// prometheusConfig caches. It fails closed on non-https GMP URLs (the OAuth
+// access token would otherwise be sent in cleartext), on ADC discovery
+// failure, and on initial token-acquisition failure; none of those outcomes
+// are cached, so a later CreateGate retries them.
+func (f *GateFactory) newAuthedPrometheusClient(ctx context.Context) (http.RoundTripper, error) {
+	u, err := url.Parse(f.prometheusURL)
+	if err != nil || u.Scheme != "https" {
+		return nil, fmt.Errorf("prometheus-url %q targets Google Managed Prometheus but is "+
+			"not an https:// URL; refusing to send OAuth access tokens in cleartext",
+			f.prometheusURL)
+	}
+	ctx, cancel := context.WithTimeout(ctx, f.gmpTokenTimeout)
+	defer cancel()
+	gcpClient, tokenSource, err := f.gmpClientFn(ctx, gmpScope)
+	if err != nil {
+		return nil, f.gmpADCError(err)
+	}
+	if err := mintInitialToken(ctx, tokenSource); err != nil {
+		return nil, f.gmpADCError(fmt.Errorf("ADC was found, but an initial token could not be minted: %w", err))
+	}
+	return gcpClient.Transport, nil
+}
+
+// mintInitialToken acquires an initial token from ts, bounded by ctx. The
+// oauth2.TokenSource API takes no context, so the call runs in a goroutine
+// bounded by ctx; if ctx expires first, the straggler is left to finish
+// when the token endpoint answers — the client is discarded either way.
+func mintInitialToken(ctx context.Context, ts oauth2.TokenSource) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := ts.Token()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("acquiring initial token: %w", ctx.Err())
+	}
+}
+
+// gmpADCError wraps an authentication failure with the operator guidance for
+// either fixing ADC or switching to explicit bearer-token auth.
+func (f *GateFactory) gmpADCError(err error) error {
+	return fmt.Errorf("prometheus-url %q targets Google Managed Prometheus, "+
+		"which requires GCP Application Default Credentials (e.g. GKE Workload "+
+		"Identity); either configure ADC or set --prometheus-bearer-token-file "+
+		"and --prometheus-ca-cert: %w", f.prometheusURL, err)
+}
+
 // WithSQLQuota sets the store behind sql-quota gates, which share the sql
 // transport's database.
 func (f *GateFactory) WithSQLQuota(store QuotaStore) *GateFactory {
@@ -81,7 +225,29 @@ func (f *GateFactory) WithSQLQuota(store QuotaStore) *GateFactory {
 	return f
 }
 
-// Close closes all Redis clients created by this factory.
+// RegisterRedisClient registers the Redis transport's client for Redis gates
+// at its primary address. Those gates use the transport's credentials, TLS
+// settings and database. The transport keeps ownership of client.
+func (f *GateFactory) RegisterRedisClient(client goredis.UniversalClient, options *goredis.UniversalOptions) {
+	f.transportClients[options.Addrs[0]] = client
+}
+
+// redisClient returns the transport's client when addr matches its primary
+// address, otherwise a standalone client this factory owns, shared per address.
+func (f *GateFactory) redisClient(addr string) goredis.UniversalClient {
+	if client, ok := f.transportClients[addr]; ok {
+		return client
+	}
+	client, ok := f.redisClients[addr]
+	if !ok {
+		client = goredis.NewClient(&goredis.Options{Addr: addr})
+		f.redisClients[addr] = client
+	}
+	return client
+}
+
+// Close closes the standalone Redis clients created by this factory and
+// forgets every client, so a second Close is a no-op.
 func (f *GateFactory) Close() error {
 	var firstErr error
 	for addr, client := range f.redisClients {
@@ -89,6 +255,8 @@ func (f *GateFactory) Close() error {
 			firstErr = fmt.Errorf("failed to close Redis client for %s: %w", addr, err)
 		}
 	}
+	clear(f.redisClients)
+	clear(f.transportClients)
 	return firstErr
 }
 
@@ -131,12 +299,40 @@ func (f *GateFactory) Close() error {
 //     is in [0, 1]. Unlike prometheus-saturation and prometheus-budget, this gate does not
 //     construct queries internally — the user provides the complete PromQL expression.
 //     Params: query (required), fallback (default 0.0)
+//   - "inference-pool-ready": Opens when llm_d_epp_ready_endpoints for the pool (max across EPP
+//     replicas) is at least min_ready_endpoints, and holds requests otherwise, e.g. while the
+//     pool is scaled to zero. A missing metric holds unless fail_open is set, and so does a pool
+//     name that matches more than one namespace when namespace is not set.
+//     Params: pool (required), namespace, min_ready_endpoints (default 1), fail_open (default false)
 //   - "endpoint-scrape": Scrapes a metric endpoint and interprets the normalized value as
 //     saturation (default) or a direct budget. Params: url and metric (required),
 //     value_type (saturation or budget), fallback (default 0.0)
 //
 // For unsupported or unknown gate types, returns ConstOpenGate as a safe default.
 func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error) {
+	return f.createGate(cfg, "")
+}
+
+func (f *GateFactory) createGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
+	gate, err := f.buildGate(cfg, index)
+	if metric, ok := gate.(*MetricDispatchGate); ok {
+		metric.WithOwner(cfg.Owner)
+		metric.readings.Type = cfg.GateType
+		metric.readings.Index = index
+	}
+	return gate, err
+}
+
+func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
+	childGate := func(child pipeline.GateConfig, position int) (pipeline.Gate, error) {
+		child.Owner = cfg.Owner
+		path := strconv.Itoa(position)
+		if index != "" {
+			path = index + "." + path
+		}
+		return f.createGate(child, path)
+	}
+
 	params := cfg.GateParams
 	if params == nil {
 		params = map[string]any{}
@@ -150,9 +346,8 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		}
 
 		var innerGates []pipeline.Gate
-		for _, innerCfg := range configs {
-			innerCfg.Owner = cfg.Owner
-			gate, err := f.CreateGate(innerCfg)
+		for i, innerCfg := range configs {
+			gate, err := childGate(innerCfg, i)
 			if err != nil {
 				return nil, fmt.Errorf("composite gate failed to create inner gate %q: %w", innerCfg.GateType, err)
 			}
@@ -167,8 +362,7 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		innerCfg.Owner = cfg.Owner
-		innerGate, err := f.CreateGate(innerCfg)
+		innerGate, err := childGate(innerCfg, 0)
 		if err != nil {
 			return nil, fmt.Errorf("wait-on-refuse gate failed to create inner gate %q: %w", innerCfg.GateType, err)
 		}
@@ -185,11 +379,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("tier-priority-admission gate failed to parse 'saturation_gate_params': %w", err)
 		}
 
-		satGate, err := f.CreateGate(pipeline.GateConfig{
+		satGate, err := childGate(pipeline.GateConfig{
 			GateType:   satGateType,
 			GateParams: satGateParams,
-			Owner:      cfg.Owner,
-		})
+		}, 0)
 		if err != nil {
 			return nil, fmt.Errorf("tier-priority-admission gate failed to create saturation gate %q: %w", satGateType, err)
 		}
@@ -205,25 +398,14 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		if addr == "" {
 			return nil, fmt.Errorf("redis gate requires an 'address' in gate_params")
 		}
-		client, ok := f.redisClients[addr]
-		if !ok {
-			client = goredis.NewClient(&goredis.Options{Addr: addr})
-			f.redisClients[addr] = client
-		}
 		budgetKey := paramString(params, "budget_key", "dispatch-gate-budget")
-		return redisgate.NewRedisDispatchGate(client, budgetKey), nil
+		return redisgate.NewRedisDispatchGate(f.redisClient(addr), budgetKey), nil
 
 	case "redis-leased-rate":
 		addr := paramString(params, "address", "")
 		if addr == "" {
 			return nil, fmt.Errorf("redis-leased-rate gate requires an 'address' in gate_params")
 		}
-		client, ok := f.redisClients[addr]
-		if !ok {
-			client = goredis.NewClient(&goredis.Options{Addr: addr})
-			f.redisClients[addr] = client
-		}
-
 		poolID := paramString(params, "pool_id", cfg.Owner.WorkerPoolID)
 		if poolID == "" {
 			return nil, fmt.Errorf("redis-leased-rate gate requires a 'pool_id' in gate_params or a worker-pool owner")
@@ -240,23 +422,18 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("redis-leased-rate burst_seconds must be finite and positive, got %g", burstSeconds)
 		}
 		stateKey := paramString(params, "state_key", "")
-		return redisgate.NewRedisLeasedRateGate(client, controlKey, stateKey, poolID, burstSeconds), nil
+		return redisgate.NewRedisLeasedRateGate(f.redisClient(addr), controlKey, stateKey, poolID, burstSeconds), nil
 
 	case "redis-quota":
 		addr := paramString(params, "address", "")
 		if addr == "" {
 			return nil, fmt.Errorf("redis-quota gate requires an 'address' in gate_params")
 		}
-		client, ok := f.redisClients[addr]
-		if !ok {
-			client = goredis.NewClient(&goredis.Options{Addr: addr})
-			f.redisClients[addr] = client
-		}
 		q, err := quotaParams(cfg.GateType, params)
 		if err != nil {
 			return nil, err
 		}
-		return q.gate(redisgate.NewQuotaStore(client, q.window)), nil
+		return q.gate(redisgate.NewQuotaStore(f.redisClient(addr), q.window)), nil
 
 	case "sql-quota":
 		if f.sqlQuota == nil {
@@ -282,7 +459,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := promapi.Config{Address: f.prometheusURL}
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
 		source, err := NewSaturationPromQLSourceFromConfig(promConfig, params)
 		if err != nil {
 			return nil, err
@@ -294,7 +474,6 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			ms = NewCachedMetricSource(source, f.cacheTTL)
 		}
 		return NewSaturationDispatchGate(ms, threshold, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(paramString(params, "pool", "")), nil
 
 	case "prometheus-budget":
@@ -325,7 +504,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := promapi.Config{Address: f.prometheusURL}
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
 		namespace := paramString(params, "namespace", "")
 
 		flowControlSource, err := NewFlowControlQueueSizePromQL(promConfig, pool, maxConcurrency, namespace)
@@ -363,6 +545,59 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		)
 
 		return NewBudgetDispatchGate(ms, baseline, fallback).
+			WithInferencePool(pool), nil
+
+	case "inference-pool-ready":
+		if f.prometheusURL == "" {
+			return nil, fmt.Errorf("inference-pool-ready gate type requires --prometheus-url flag to be set")
+		}
+
+		pool := paramString(params, "pool", "")
+		if pool == "" {
+			return nil, fmt.Errorf("inference-pool-ready gate requires a 'pool' parameter")
+		}
+
+		namespace := paramString(params, "namespace", "")
+
+		minReady, err := paramInt(params, "min_ready_endpoints", 1)
+		if err != nil {
+			return nil, err
+		}
+		if minReady < 1 {
+			return nil, fmt.Errorf("inference-pool-ready gate requires 'min_ready_endpoints' >= 1, got %d", minReady)
+		}
+
+		failOpen, err := paramBool(params, "fail_open", false)
+		if err != nil {
+			return nil, err
+		}
+
+		labels := map[string]string{"name": pool}
+		if namespace != "" {
+			labels["namespace"] = namespace
+		}
+		readyMetric := buildPromQL("llm_d_epp_ready_endpoints", labels)
+		query := requireSingleNamespace(fmt.Sprintf(`max(%s) >= bool %d`, readyMetric, minReady), namespace, readyMetric)
+
+		// The query evaluates to 1 when the pool has enough ready endpoints and 0
+		// otherwise. A missing metric (no InferencePool yet, or the EPP is down)
+		// or an unscoped pool name found in several namespaces returns no samples
+		// and takes the fallback, which holds requests unless fail_open is set.
+		fallback := 0.0
+		if failOpen {
+			fallback = 1.0
+		}
+
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
+		source, err := NewPromQLMetricSource(promConfig, query)
+		if err != nil {
+			return nil, err
+		}
+		f.logger.Info("inference-pool-ready metric source", "pool", pool, "query", source.Expr())
+		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback).
 			WithOwner(cfg.Owner).
 			WithInferencePool(pool), nil
 
@@ -381,7 +616,10 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, err
 		}
 
-		promConfig := promapi.Config{Address: f.prometheusURL}
+		promConfig, err := f.prometheusConfig()
+		if err != nil {
+			return nil, err
+		}
 		source, err := NewPromQLMetricSource(promConfig, query)
 		if err != nil {
 			return nil, err
@@ -390,7 +628,6 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 		// the inference_pool label on async_gate_metric_value; it does not affect
 		// the query. pool_name comes from the queue or pool that owns the gate.
 		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(paramString(params, "pool", "")), nil
 
 	case "endpoint-scrape":
@@ -430,6 +667,15 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			return nil, fmt.Errorf("endpoint-scrape gate failed to parse 'pods_labels': %w", err)
 		}
 
+		var absentValue *float64
+		if _, ok := params["absent_value"]; ok {
+			v, err := paramFloat(params, "absent_value", 0)
+			if err != nil {
+				return nil, err
+			}
+			absentValue = &v
+		}
+
 		scrapeCfg := ScrapeConfig{
 			URL:            url,
 			MetricName:     metric,
@@ -439,6 +685,24 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 			PodsURL:        paramString(params, "pods_url", ""),
 			PodsMetric:     paramString(params, "pods_metric", ""),
 			PodsLabels:     podsLabels,
+			AbsentValue:    absentValue,
+		}
+
+		switch admission := paramString(params, "admission", "budget"); admission {
+		case "budget":
+		case "counted":
+			if maxCountPerPod <= 0 || valueType != "saturation" {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' needs a count metric: max_count_per_pod > 0 and value_type saturation")
+			}
+			if baseline != 0 || fallback != 0 {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' takes neither baseline nor fallback: size the headroom with max_count_per_pod; a failed scrape admits nothing")
+			}
+			if f.cacheTTL <= 0 {
+				return nil, fmt.Errorf("endpoint-scrape admission 'counted' takes one reading per --prometheus-cache-ttl, which must be greater than 0")
+			}
+			return NewHeadroomGate(NewScrapeMetricSource(scrapeCfg), f.cacheTTL).WithOwner(cfg.Owner), nil
+		default:
+			return nil, fmt.Errorf("endpoint-scrape admission must be either 'budget' or 'counted', got %q", admission)
 		}
 
 		var ms MetricSource = NewScrapeMetricSource(scrapeCfg)
@@ -513,6 +777,30 @@ func paramFloat(params map[string]any, key string, defaultVal float64) (float64,
 		return f, nil
 	default:
 		return 0, fmt.Errorf("invalid %s value: unsupported type %T", key, v)
+	}
+}
+
+// paramBool extracts a bool value from params. Accepts a bool or a string that
+// strconv.ParseBool understands; any other type is a config error.
+func paramBool(params map[string]any, key string, defaultVal bool) (bool, error) {
+	v, ok := params[key]
+	if !ok || v == nil {
+		return defaultVal, nil
+	}
+	switch val := v.(type) {
+	case bool:
+		return val, nil
+	case string:
+		if val == "" {
+			return defaultVal, nil
+		}
+		b, err := strconv.ParseBool(val)
+		if err != nil {
+			return false, fmt.Errorf("invalid %s value %q: %w", key, val, err)
+		}
+		return b, nil
+	default:
+		return false, fmt.Errorf("invalid %s value: expected bool, got %T", key, v)
 	}
 }
 
@@ -667,6 +955,22 @@ func cachedSource(s MetricSource, ttl time.Duration) MetricSource {
 		return NewCachedMetricSource(s, ttl)
 	}
 	return s
+}
+
+// IsGMPURL reports whether urlStr targets Google Managed Prometheus's
+// Prometheus HTTP Query API. Detection is host-based (exactly
+// monitoring.googleapis.com, ignoring any port — GMP encodes location in the
+// URL path, not the host), so an operator's plain prometheus / mimir /
+// victoria-metrics / grafana URL gets an unauthenticated client, preserving
+// prior behavior. A malformed URL falls back to a substring check so it still
+// gets the auth path, yielding a clearer ADC error than a silent HTTP 401 at
+// query time. The function never panics.
+func IsGMPURL(urlStr string) bool {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return strings.Contains(urlStr, "monitoring.googleapis.com")
+	}
+	return strings.EqualFold(u.Hostname(), "monitoring.googleapis.com")
 }
 
 // paramMapAny extracts a map[string]any from params.

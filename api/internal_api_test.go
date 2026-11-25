@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -167,6 +168,31 @@ func TestRoundTrip_PubSubRequest(t *testing.T) {
 	}
 	if ps.ID != "ps-1" || ps.PubSubID != "pub-abc" || ps.ResultQueueName != "per-msg-results" {
 		t.Errorf("field mismatch: %+v", ps)
+	}
+}
+
+func TestRoundTrip_DeliveryTokenNotPersisted(t *testing.T) {
+	ir := NewInternalRequest(
+		InternalRouting{TransportCorrelationID: "corr-123", DeliveryToken: 7},
+		&PubSubRequest{RequestMessage: RequestMessage{ID: "ps-1", Created: 10, Deadline: 20}},
+	)
+	b, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "delivery_token") || strings.Contains(string(b), "DeliveryToken") {
+		t.Errorf("delivery token leaked into the wire format: %s", b)
+	}
+
+	var got InternalRequest
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.DeliveryToken != 0 {
+		t.Errorf("DeliveryToken = %d, want 0 after a round trip", got.DeliveryToken)
+	}
+	if got.TransportCorrelationID != "corr-123" {
+		t.Errorf("TransportCorrelationID = %q, want corr-123", got.TransportCorrelationID)
 	}
 }
 

@@ -643,11 +643,91 @@ func TestGateWaitBackoffIsBoundedAndJittered(t *testing.T) {
 	}
 }
 
+func TestTransportError_Retries(t *testing.T) {
+	inferenceClient := NewHTTPInferenceClient(&http.Client{})
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "transport",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
+	}, closedServerURL(t), map[string]string{})
+
+	select {
+	case r := <-retryChannel:
+		if r.PublicRequest.ReqID() != "transport" {
+			t.Errorf("retried message id = %q, want transport", r.PublicRequest.ReqID())
+		}
+		if r.BackoffDurationSeconds <= 0 {
+			t.Errorf("retry backoff = %v, want > 0", r.BackoffDurationSeconds)
+		}
+	case r := <-resultChannel:
+		t.Errorf("transport error produced a final result instead of a retry: %+v", r)
+	case <-time.After(time.Second):
+		t.Errorf("timeout waiting for the retry")
+	}
+}
+
+func TestPermanentTransportError_NoRetry(t *testing.T) {
+	inferenceClient := NewHTTPInferenceClient(&http.Client{})
+	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
+	retryChannel := make(chan pipeline.RetryMessage, 1)
+	resultChannel := make(chan asyncapi.ResultMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
+
+	requestChannel <- newEmb(asyncapi.RequestMessage{
+		ID:       "permanent",
+		Created:  time.Now().Unix(),
+		Deadline: time.Now().Add(100 * time.Second).Unix(),
+		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
+	}, "ftp://127.0.0.1/v1/completions", map[string]string{})
+
+	select {
+	case r := <-retryChannel:
+		t.Errorf("permanent transport error was retried: %+v", r)
+	case r := <-resultChannel:
+		if r.ID != "permanent" {
+			t.Errorf("result id = %q, want permanent", r.ID)
+		}
+		if r.StatusCode != 0 {
+			t.Errorf("StatusCode = %d, want 0 when no HTTP response was received", r.StatusCode)
+		}
+		if r.ErrorCode != asyncapi.ErrCodeInferenceError {
+			t.Errorf("ErrorCode = %q, want %q", r.ErrorCode, asyncapi.ErrCodeInferenceError)
+		}
+		if r.ErrorMessage == "" {
+			t.Error("ErrorMessage is empty")
+		}
+		var resultMap map[string]any
+		if err := json.Unmarshal([]byte(r.Payload), &resultMap); err != nil {
+			t.Fatalf("unmarshal result payload %q: %v", r.Payload, err)
+		}
+		if _, hasError := resultMap["error"]; !hasError {
+			t.Errorf("result payload has no error field: %s", r.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("timeout waiting for the result")
+	}
+}
+
 func TestFatalError_NoRetry(t *testing.T) {
 	msgId := "456"
-	// Simulate a transport error (fatal)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("network unreachable")
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error": "invalid request"}`)),
+			Header:     make(http.Header),
+		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
@@ -657,12 +737,10 @@ func TestFatalError_NoRetry(t *testing.T) {
 
 	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, defaultRequestTimeout, nil)
 
-	deadline := time.Now().Add(time.Second * 100).Unix()
-
 	requestChannel <- newEmb(asyncapi.RequestMessage{
 		ID:       msgId,
 		Created:  time.Now().Unix(),
-		Deadline: deadline,
+		Deadline: time.Now().Add(time.Second * 100).Unix(),
 		Payload:  testPayload(map[string]any{"model": "food-review", "prompt": "hi", "max_tokens": 10, "temperature": 0}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
 
@@ -673,22 +751,8 @@ func TestFatalError_NoRetry(t *testing.T) {
 		if r.ID != msgId {
 			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
 		}
-		if r.StatusCode != 0 {
-			t.Errorf("Expected StatusCode 0 for non-HTTP error, got %d", r.StatusCode)
-		}
-		if r.ErrorCode != asyncapi.ErrCodeInferenceError {
-			t.Errorf("Expected ErrorCode %q, got %q", asyncapi.ErrCodeInferenceError, r.ErrorCode)
-		}
-		if r.ErrorMessage == "" {
-			t.Errorf("Expected non-empty ErrorMessage for non-HTTP error")
-		}
-		var resultMap map[string]any
-		err := json.Unmarshal([]byte(r.Payload), &resultMap)
-		if err != nil {
-			t.Errorf("Failed to unmarshal result payload: %s. Payload was: %s", err, r.Payload)
-		}
-		if _, hasError := resultMap["error"]; !hasError {
-			t.Errorf("Expected error in result payload, got: %s", r.Payload)
+		if r.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected StatusCode %d, got %d", http.StatusBadRequest, r.StatusCode)
 		}
 	case <-time.After(time.Second):
 		t.Errorf("Timeout waiting for result")
@@ -1837,7 +1901,11 @@ func TestMetrics_FatalError(t *testing.T) {
 	queueName := "metrics-fatal-queue"
 
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("connection refused")
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error": "invalid request"}`)),
+			Header:     make(http.Header),
+		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
@@ -2133,7 +2201,11 @@ func TestWorker_SpanOmitsUnavailableModel(t *testing.T) {
 func TestWorker_SpanOnFatalError(t *testing.T) {
 	exporter := setupTestTracer(t)
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("network unreachable")
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error": "invalid request"}`)),
+			Header:     make(http.Header),
+		}, nil
 	})
 	inferenceClient := NewHTTPInferenceClient(httpclient)
 	requestChannel := make(chan pipeline.EmbelishedRequestMessage, 1)
@@ -2164,8 +2236,8 @@ func TestWorker_SpanOnFatalError(t *testing.T) {
 		t.Error("expected error status on fatal error span")
 	}
 	assertSpanAttributes(t, s,
-		attribute.String("llm_d.async.error.category", "UNKNOWN"),
-		attribute.String("error.category", "UNKNOWN"),
+		attribute.String("llm_d.async.error.category", "INVALID_REQ"),
+		attribute.String("error.category", "INVALID_REQ"),
 	)
 	if len(s.Events) == 0 {
 		t.Error("expected recorded error event on span")

@@ -181,9 +181,12 @@ undeploy-ap-on-k8s:
 #   GAIE_VERSION     — GAIE release for CRD fetch       (default: v1.6.2; must match the EPP image's pinned gaie)
 #   SIM_IMAGE        — inference-sim image tag          (default: ghcr.io/llm-d/llm-d-inference-sim:v0.0.0-test)
 #   REDIS_IMAGE      — Redis/Valkey image for E2E MQ    (default: valkey/valkey:8-alpine)
+#   KIND_NODE_IMAGE  — Kind Kubernetes node image       (default: kindest/node:v1.32.2, pinned by digest)
 #   PUBSUB_IMAGE     — Pub/Sub emulator image tag       (default: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators)
 #   CONTAINER_TOOL   — container runtime                (default: docker)
 #   E2E_SKIP_CLEANUP — set "true" to keep the Kind cluster after tests
+#   E2E_MULTI_REPLICA_ONLY — omit unrelated services/releases for the focused
+#                            multi-replica suite (use with FOCUS)
 #
 # NodePort overrides (change if defaults conflict):
 #   E2E_INTEGRATION_REDIS_PORT, E2E_INTEGRATION_PROM_PORT,
@@ -319,7 +322,7 @@ ENVTEST_VERSION := $(ENVTEST_VERSION)
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 ENVTEST_K8S_VERSION := $(ENVTEST_K8S_VERSION)
-GOLANGCI_LINT_VERSION ?= v2.11.4
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -347,7 +350,7 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 GOIMPORTS_VERSION ?= v0.34.0
-GOSEC_VERSION ?= v2.22.4
+GOSEC_VERSION ?= v2.30.0
 
 .PHONY: install-pre-commit-tools
 install-pre-commit-tools: golangci-lint ## Install tools required by pre-commit hooks.

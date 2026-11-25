@@ -27,6 +27,7 @@ spec:
             - "8000"
             - --fake-metrics
             - '{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}'
+            - --log-http
           env:
             - name: POD_NAME
               valueFrom:
