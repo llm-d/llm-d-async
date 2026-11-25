@@ -68,7 +68,7 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `gate_index` | Zero-based child positions from the root, separated by dots. The root uses an empty string. For a composite inside `wait-on-refuse`, its two children are `0.0` and `0.1`. Reordering children changes their indexes. |
 | `direction` | Token direction (only on `async_tokens_total`): `input` or `output` |
 
-The four-label `async_gate_metric_*` gauges keep their v1 label names. An `endpoint-scrape` gate reports its queue and worker-pool labels on both gauge families.
+The four-label `async_gate_metric_*` gauges keep their v1 label names. An `endpoint-scrape` gate reports its queue and worker-pool labels on both gauge families. With `admission: counted`, the instance value is the free-slot estimate from the last successful scrape and the threshold is zero.
 Gates with the same owner and inference pool share the last usable value and threshold, and the availability of the last evaluation.
 Use the six-label instance gauges to distinguish children of a composite, including two gates of the same type.
 Replacing or removing a sorted-set queue retires its instance series. Retiring an individual gate leaves the shared gauges intact for its siblings.

@@ -69,6 +69,55 @@ func sharedGaugeLabels(t *testing.T, owner pipeline.GateOwner, inferencePool str
 	return labels
 }
 
+func TestCountedEndpointGateInstanceMetrics(t *testing.T) {
+	_, firstURL := newEPPMetrics(t, 2, 1)
+	secondSource, secondURL := newEPPMetrics(t, 6, 1)
+	child := func(url string) pipeline.GateConfig {
+		return pipeline.GateConfig{GateType: "endpoint-scrape", GateParams: map[string]any{
+			"url": url, "metric": "llm_d_epp_flow_control_queue_size", "admission": "counted", "max_count_per_pod": 8,
+		}}
+	}
+	owner := pipeline.GateOwner{QueueID: t.Name(), QueueName: "requests", WorkerPoolID: "default"}
+	labels := sharedGaugeLabels(t, owner, "")
+	factory := NewGateFactoryWithCacheTTL("", time.Minute)
+	gate, err := factory.CreateGate(pipeline.GateConfig{GateType: "composite", Owner: owner,
+		GateParams: map[string]any{"gates": []pipeline.GateConfig{child(firstURL), child(secondURL)}}})
+	require.NoError(t, err)
+	t.Cleanup(func() { metrics.RetireGateMetrics(gate) })
+	children := gate.(*CompositeGate).gates
+	now := time.Unix(1000, 0)
+	for _, child := range children {
+		child.(*HeadroomGate).now = func() time.Time { return now }
+	}
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(metrics.GetAsyncProcessorCollectors(false)...)
+	samples := func(suffix string) map[string]float64 {
+		t.Helper()
+		return gateInstanceSamples(t, registry, suffix, owner, "")
+	}
+	const first, second = "endpoint-scrape/0", "endpoint-scrape/1"
+	gate.Budget(t.Context())
+	values := map[string]float64{first: 6, second: 2}
+	require.Equal(t, values, samples("value"))
+	require.Equal(t, map[string]float64{first: 0, second: 0}, samples("threshold"))
+	require.Equal(t, map[string]float64{first: 1, second: 1}, samples("source_available"))
+	require.Equal(t, 2.0, testutil.ToFloat64(metrics.GateMetricValue.WithLabelValues(labels...)))
+
+	secondSource.status.Store(http.StatusServiceUnavailable)
+	now = now.Add(time.Minute)
+	require.Zero(t, children[1].Budget(t.Context()))
+	require.Equal(t, values, samples("value"))
+	require.Equal(t, map[string]float64{first: 1, second: 0}, samples("source_available"))
+	require.Zero(t, testutil.ToFloat64(metrics.GateMetricSourceAvailable.WithLabelValues(labels...)))
+
+	metrics.RetireGateMetrics(children[0])
+	children[0].Budget(t.Context()) // A later reading must not recreate the retired child's series.
+	require.Equal(t, map[string]float64{second: 2}, samples("value"))
+	require.Equal(t, map[string]float64{second: 0}, samples("threshold"))
+	require.Equal(t, map[string]float64{second: 0}, samples("source_available"))
+	require.Equal(t, 6.0, testutil.ToFloat64(metrics.GateMetricValue.WithLabelValues(labels...)))
+}
+
 func TestGateInstanceMetricsAcrossQueueReload(t *testing.T) {
 	var holdOldQuery atomic.Bool
 	started, release := make(chan struct{}), make(chan struct{})
