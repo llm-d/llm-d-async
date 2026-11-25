@@ -534,8 +534,8 @@ func (s *Store) PopResults(ctx context.Context, route string, now int64, limit i
 	return out, nil
 }
 
-// ClaimResults leases up to limit of the oldest results on route that are unclaimed or whose
-// claim lapsed, without deleting them. Leases run on the database clock.
+// ClaimResults leases up to limit results on route without deleting them: lapsed claims first,
+// oldest lapse first, then unclaimed results oldest first. Leases run on the database clock.
 func (s *Store) ClaimResults(ctx context.Context, route, owner string, lease time.Duration, limit int) ([]Result, error) {
 	ctx, span := s.span(ctx, "ClaimResults")
 	defer span.End()

@@ -285,8 +285,8 @@ func toResult(row sqlqueue.Result) *api.ResultMessage {
 			ErrorCode:    api.ErrCodeInferenceError,
 			ErrorMessage: fmt.Sprintf("unparsable result payload: %v", err),
 		}
-		res.Routing.RequestToken = row.Token
 	}
+	res.Routing.RequestToken = row.Token
 	return res
 }
 
@@ -339,7 +339,6 @@ func parseResult(data string) (*api.ResultMessage, error) {
 	if result.ID == "" {
 		return nil, errors.New("result missing 'id' field")
 	}
-	result.Routing.RequestToken = result.RequestToken
 	return &result.ResultMessage, nil
 }
 

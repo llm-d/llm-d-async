@@ -193,8 +193,10 @@ func TestGetResultsTurnsUnparsableResultsIntoErrorResults(t *testing.T) {
 	require.NoError(t, p.SubmitRequests(ctx, []api.Request{message("good"), message("bad")}))
 	c, rows := dispatchAll(t, store, "requests")
 	require.Len(t, rows, 2)
+	tokens := map[string]string{}
 	var completions []sqlqueue.Completion
 	for _, row := range rows {
+		tokens[row.ID] = row.Token
 		payload := `{"id":"good"}`
 		if row.ID == "bad" {
 			payload = `not json`
@@ -212,10 +214,38 @@ func TestGetResultsTurnsUnparsableResultsIntoErrorResults(t *testing.T) {
 		byID[r.ID] = r
 	}
 	assert.Empty(t, byID["good"].ErrorCode)
+	assert.Equal(t, tokens["good"], byID["good"].Routing.RequestToken, "a payload without request_token takes the row's")
 	require.Contains(t, byID, "bad")
 	assert.Equal(t, api.ErrCodeInferenceError, byID["bad"].ErrorCode)
 	assert.Contains(t, byID["bad"].ErrorMessage, "unparsable result payload")
-	assert.NotEmpty(t, byID["bad"].Routing.RequestToken)
+	assert.Equal(t, tokens["bad"], byID["bad"].Routing.RequestToken)
+}
+
+func TestReceiveResultsTakeTheTokenFromTheRow(t *testing.T) {
+	p, store := newProducer(t)
+	ctx := context.Background()
+	require.NoError(t, p.SubmitRequests(ctx, []api.Request{message("legacy"), message("stale")}))
+	c, rows := dispatchAll(t, store, "requests")
+	require.Len(t, rows, 2)
+	tokens := map[string]string{}
+	var completions []sqlqueue.Completion
+	for _, row := range rows {
+		tokens[row.ID] = row.Token
+		payload := `{"id":"legacy"}`
+		if row.ID == "stale" {
+			payload = `{"id":"stale","request_token":"not-this-generation"}`
+		}
+		completions = append(completions, sqlqueue.Completion{Key: row.Key(), Attempt: row.Attempt, Route: "results", Payload: payload})
+	}
+	_, err := c.Ack(ctx, completions)
+	require.NoError(t, err)
+
+	got, err := p.ReceiveResults(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, d := range got {
+		assert.Equal(t, tokens[d.Result.ID], d.Result.Routing.RequestToken, "the row's token identifies the generation for %s", d.Result.ID)
+	}
 }
 
 func publish(t *testing.T, p *Producer, store *sqlqueue.Store, ids ...string) []sqlqueue.Request {
