@@ -114,6 +114,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	gomega.Expect(os.Setenv("KUBECONFIG", kindKubeconfig)).To(gomega.Succeed())
 	gomega.Expect(os.Setenv("PUBSUB_EMULATOR_HOST", "localhost:"+pubsubPort)).To(gomega.Succeed())
 	setupK8sClient()
+	configureE2ENodes()
 	setupNameSpace()
 	applyManifests()
 	setupClients()
@@ -327,17 +328,46 @@ func kindLoadImage(image string) {
 		// fails for multi-arch images when only one platform's layers are
 		// present locally (e.g. arm64-only pull on Apple Silicon).
 		//
-		// This applies to ALL images loaded into the cluster (not just the
-		// MQ image). It assumes a single-node Kind cluster with the default
-		// control-plane node name and overlayfs snapshotter.
-		node := kindClusterName + "-control-plane"
-		shell := fmt.Sprintf(
-			"docker save %s | docker exec -i %s ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -",
-			image, node)
-		command := exec.Command("bash", "-c", shell)
-		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		// This applies to ALL images loaded into the cluster (not just the MQ
+		// image). Import into every node so the dedicated lifecycle workers can
+		// run the local AP image with imagePullPolicy: Never.
+		nodes, err := exec.Command("kind", "get", "nodes", "--name", kindClusterName).Output()
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+		for _, node := range strings.Fields(string(nodes)) {
+			shell := fmt.Sprintf(
+				"docker save %s | docker exec -i %s ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -",
+				image, node)
+			command := exec.Command("bash", "-c", shell)
+			session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+		}
+	}
+}
+
+// configureE2ENodes keeps the ordinary suite on the control-plane and reserves
+// two tainted workers for multi-replica lifecycle tests. This prevents a worker
+// drain from also evicting Redis, Envoy, EPP, Prometheus, or the simulator.
+func configureE2ENodes() {
+	controlPlane := kindClusterName + "-control-plane"
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"patch", "node", controlPlane, "--type=merge", "-p", `{"spec":{"taints":[]}}`)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+
+	for _, worker := range []string{kindClusterName + "-worker", kindClusterName + "-worker2"} {
+		command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"label", "node", worker, "e2e.llm-d.ai/processor=true", "--overwrite")
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+
+		command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"taint", "node", worker, "e2e.llm-d.ai/processor=true:NoSchedule", "--overwrite")
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 	}
 }
 
@@ -726,7 +756,8 @@ const kindClusterConfig = `
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
-- extraPortMappings:
+- role: control-plane
+  extraPortMappings:
   - containerPort: 30480
     hostPort: ${REDIS_PORT}
     protocol: TCP
@@ -748,6 +779,8 @@ nodes:
   - containerPort: 30494
     hostPort: ${JAEGER_PORT}
     protocol: TCP
+- role: worker
+- role: worker
 `
 
 func setupPubSubEmulatorTopicsAndSubscriptions() {

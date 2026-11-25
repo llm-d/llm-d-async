@@ -68,10 +68,20 @@ The Redis/Valkey E2E exercises these invariants:
    bounded scheduling allowance.
 4. A three-replica saturation-gate deployment leaves the full batch pending
    and unclaimed while saturated and completes it after the signal clears.
+5. A same-build rolling update replaces three replicas while requests are
+   actively dispatched. Every tracked request completes successfully and
+   within the lease TTL plus reclaim and scheduling allowance.
+6. In a dedicated two-worker Kind topology, a test-only PodDisruptionBudget
+   with `minAvailable: 2` permits one worker drain while preserving two ready
+   replicas. The evicted replica is replaced on the surviving worker, and all
+   tracked requests complete within the same recovery bound.
 
 These checks establish focused Redis/Valkey evidence. They do not yet cover
-rolling upgrades, node drains, PodDisruptionBudgets, topology spreading, or
-cross-version compatibility.
+cross-version upgrades or rollback compatibility, production chart controls
+for replica count, PodDisruptionBudgets or topology spreading, involuntary node
+failure, or larger production topologies. A PDB constrains voluntary eviction;
+it does not place replicas on separate nodes, so production deployments also
+need an explicit topology-spread or anti-affinity policy.
 
 ## Metrics aggregation
 

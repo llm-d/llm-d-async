@@ -34,6 +34,7 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 	ginkgo.BeforeAll(func() {
 		ctx = context.Background()
 		redeployEPPWithFlowControl()
+		configureMultiReplicaLifecycleScheduling()
 		scaleAsyncDeployment(multiReplicaDeployment, 2)
 	})
 
@@ -175,7 +176,308 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 		assertExactResultsFromQueue(ctx, saturationResultQueue, "multi-saturation-", requests, 90*time.Second)
 		assertSimulatorDispatchesExactlyOnce("multi-saturation-", requests)
 	})
+
+	ginkgo.It("keeps requests within the lease bound during a rolling update", func() {
+		setSimulatorLatency(2 * time.Second)
+		ginkgo.DeferCleanup(func() { setSimulatorLatency(0) })
+
+		// Two waves of aggregate worker capacity keep every replica active while
+		// avoiding a backlog whose ordinary service time would be mistaken for a
+		// disruption stall.
+		const requests = 2 * 3 * multiReplicaWorkers
+		scaleAsyncDeployment(multiReplicaDeployment, 3)
+		initialPods := asyncPodNames(multiReplicaInstance)
+		gomega.Expect(initialPods).To(gomega.HaveLen(3))
+		dispatchBaseline := asyncMetricByPod(multiReplicaInstance,
+			"llm_d_async_async_dispatched_requests_total")
+
+		for i := range requests {
+			enqueueMessage(ctx, rdb, multiReplicaRequestQueue,
+				makeTrackedRequestMessage(fmt.Sprintf("multi-rollout-%02d", i), 5*time.Minute))
+		}
+		assertPodsDispatchingAtCapacity(multiReplicaInstance, initialPods, dispatchBaseline, multiReplicaWorkers)
+
+		started := time.Now()
+		rolloutGeneration := fmt.Sprintf("%d", started.UnixNano())
+		patchDeploymentAnnotation(multiReplicaDeployment, "e2e.llm-d.ai/rollout", rolloutGeneration)
+		waitForReplacementPod(multiReplicaInstance, initialPods)
+
+		completionBound := multiReplicaLeaseTTL + multiReplicaReclaim + reclaimScheduleBound
+		assertExactTerminalResults(ctx, "multi-rollout-", requests, completionBound)
+		gomega.Expect(time.Since(started)).To(gomega.BeNumerically("<", completionBound),
+			"rolling-update work must complete within lease TTL + reclaim + scheduling allowance")
+		waitForDeploymentRollout(multiReplicaDeployment)
+		gomega.Expect(asyncPodNames(multiReplicaInstance)).NotTo(gomega.ContainElement(initialPods[0]))
+		assertSimulatorDispatchesExactlyOnce("multi-rollout-", requests)
+	})
+
+	ginkgo.It("honors a PDB while draining a worker under load", func() {
+		setSimulatorLatency(2 * time.Second)
+		ginkgo.DeferCleanup(func() { setSimulatorLatency(0) })
+
+		const requests = 18
+		scaleAsyncDeployment(multiReplicaDeployment, 3)
+		applyMultiReplicaPDB(2)
+		ginkgo.DeferCleanup(func() {
+			uncordonLifecycleWorkers()
+			deleteMultiReplicaPDB()
+		})
+
+		gomega.Eventually(pdbDisruptionsAllowed, 30*time.Second, time.Second).
+			Should(gomega.BeNumerically(">=", 1))
+		targetNode := leastLoadedMultiReplicaNode()
+		initialPods := asyncPodNames(multiReplicaInstance)
+		dispatchBaseline := asyncMetricByPod(multiReplicaInstance,
+			"llm_d_async_async_dispatched_requests_total")
+		for i := range requests {
+			enqueueMessage(ctx, rdb, multiReplicaRequestQueue,
+				makeTrackedRequestMessage(fmt.Sprintf("multi-drain-%02d", i), 5*time.Minute))
+		}
+		assertPodsDispatchingAtCapacity(multiReplicaInstance, initialPods, dispatchBaseline, multiReplicaWorkers)
+
+		started := time.Now()
+		drain := startNodeDrain(targetNode)
+		waitForTerminatingMultiReplicaPod(targetNode)
+		gomega.Consistently(func() int {
+			return readyReplicaCount(multiReplicaDeployment)
+		}, 5*time.Second, 250*time.Millisecond).Should(gomega.BeNumerically(">=", 2),
+			"the PDB must preserve two ready replicas during voluntary disruption")
+
+		completionBound := multiReplicaLeaseTTL + multiReplicaReclaim + reclaimScheduleBound
+		assertExactTerminalResults(ctx, "multi-drain-", requests, completionBound-5*time.Second)
+		gomega.Expect(time.Since(started)).To(gomega.BeNumerically("<", completionBound),
+			"node-drain work must complete within lease TTL + reclaim + scheduling allowance")
+		gomega.Eventually(drain).WithTimeout(120 * time.Second).Should(gexec.Exit(0))
+		gomega.Eventually(func() int {
+			return readyReplicaCount(multiReplicaDeployment)
+		}, 90*time.Second, time.Second).Should(gomega.Equal(3))
+		gomega.Expect(multiReplicaPodsOnNode(targetNode)).To(gomega.BeEmpty())
+		assertSimulatorDispatchesExactlyOnce("multi-drain-", requests)
+	})
 })
+
+func configureMultiReplicaLifecycleScheduling() {
+	patch := `{"spec":{"template":{"metadata":{"annotations":{"e2e.llm-d.ai/lifecycle":"enabled"}},"spec":{"nodeSelector":{"e2e.llm-d.ai/processor":"true"},"tolerations":[{"key":"e2e.llm-d.ai/processor","operator":"Equal","value":"true","effect":"NoSchedule"}],"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app.kubernetes.io/instance":"multi-replica"}}}]}}}}`
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "patch", "deployment", multiReplicaDeployment,
+		"--type=merge", "-p", patch)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	gomega.EventuallyWithOffset(1, session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+	waitForDeploymentRollout(multiReplicaDeployment)
+}
+
+func setSimulatorLatency(latency time.Duration) {
+	args := []string{
+		"--model", "test-model",
+		"--port", "8000",
+		"--fake-metrics", `{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}`,
+		"--log-http",
+	}
+	if latency > 0 {
+		args = append(args, "--time-to-first-token", latency.String())
+	}
+	encoded, err := json.Marshal(args)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"e2e.llm-d.ai/latency":%q}},"spec":{"containers":[{"name":"sim","args":%s}]}}}}`,
+		latency.String(), encoded)
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "patch", "deployment", "llm-sim", "--type=strategic", "-p", patch)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	gomega.EventuallyWithOffset(1, session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+	waitForDeploymentRollout("llm-sim")
+	gomega.EventuallyWithOffset(1, func() error {
+		resp, err := http.Get(simAdminURL + "/metrics")
+		if err != nil {
+			return err
+		}
+		resp.Body.Close() //nolint:errcheck
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("sim returned %d, want 200", resp.StatusCode)
+		}
+		return nil
+	}, 30*time.Second, time.Second).Should(gomega.Succeed())
+}
+
+func patchDeploymentAnnotation(deployment, key, value string) {
+	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`, key, value)
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "patch", "deployment", deployment, "--type=merge", "-p", patch)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	gomega.EventuallyWithOffset(1, session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+}
+
+func waitForReplacementPod(instance string, oldPods []string) {
+	old := make(map[string]struct{}, len(oldPods))
+	for _, pod := range oldPods {
+		old[pod] = struct{}{}
+	}
+	gomega.EventuallyWithOffset(1, func() bool {
+		for _, pod := range asyncPodNames(instance) {
+			if _, existed := old[pod]; !existed {
+				return true
+			}
+		}
+		return false
+	}, 60*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(),
+		"the rolling update must start a replacement pod")
+}
+
+func waitForDeploymentRollout(deployment string) {
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "rollout", "status", "deployment/"+deployment, "--timeout=120s")
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	gomega.EventuallyWithOffset(1, session).WithTimeout(150 * time.Second).Should(gexec.Exit(0))
+}
+
+func applyMultiReplicaPDB(minAvailable int) {
+	yaml := fmt.Sprintf(`apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: multi-replica-lifecycle
+  namespace: %s
+spec:
+  minAvailable: %d
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: multi-replica
+`, nsName, minAvailable)
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig, "apply", "-f", "-")
+	command.Stdin = strings.NewReader(yaml)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	gomega.EventuallyWithOffset(1, session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+}
+
+func deleteMultiReplicaPDB() {
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "delete", "pdb", "multi-replica-lifecycle", "--ignore-not-found")
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	gomega.EventuallyWithOffset(1, session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+}
+
+func pdbDisruptionsAllowed() int {
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "get", "pdb", "multi-replica-lifecycle",
+		"-o", "jsonpath={.status.disruptionsAllowed}")
+	out, err := command.Output()
+	if err != nil || len(out) == 0 {
+		return 0
+	}
+	allowed, err := strconv.Atoi(string(out))
+	if err != nil {
+		return 0
+	}
+	return allowed
+}
+
+func leastLoadedMultiReplicaNode() string {
+	counts := make(map[string]int)
+	for _, pod := range multiReplicaPodStates() {
+		if pod.DeletionTimestamp == nil && pod.Ready {
+			counts[pod.Node]++
+		}
+	}
+	gomega.ExpectWithOffset(1, counts).To(gomega.HaveLen(2),
+		"three replicas must be spread across both lifecycle workers")
+	var target string
+	for node, count := range counts {
+		if target == "" || count < counts[target] {
+			target = node
+		}
+	}
+	return target
+}
+
+type multiReplicaPodState struct {
+	Name              string
+	Node              string
+	Ready             bool
+	DeletionTimestamp *string
+}
+
+func multiReplicaPodStates() []multiReplicaPodState {
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "get", "pods", "-l", "app.kubernetes.io/instance="+multiReplicaInstance,
+		"-o", "json")
+	out, err := command.Output()
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	var pods struct {
+		Items []struct {
+			Metadata struct {
+				Name              string  `json:"name"`
+				DeletionTimestamp *string `json:"deletionTimestamp"`
+			} `json:"metadata"`
+			Spec struct {
+				NodeName string `json:"nodeName"`
+			} `json:"spec"`
+			Status struct {
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	gomega.ExpectWithOffset(1, json.Unmarshal(out, &pods)).To(gomega.Succeed())
+	states := make([]multiReplicaPodState, 0, len(pods.Items))
+	for _, pod := range pods.Items {
+		ready := false
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				ready = true
+			}
+		}
+		states = append(states, multiReplicaPodState{
+			Name: pod.Metadata.Name, Node: pod.Spec.NodeName, Ready: ready,
+			DeletionTimestamp: pod.Metadata.DeletionTimestamp,
+		})
+	}
+	return states
+}
+
+func multiReplicaPodsOnNode(node string) []string {
+	var pods []string
+	for _, pod := range multiReplicaPodStates() {
+		if pod.Node == node && pod.DeletionTimestamp == nil {
+			pods = append(pods, pod.Name)
+		}
+	}
+	return pods
+}
+
+func startNodeDrain(node string) *gexec.Session {
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"drain", node, "--ignore-daemonsets", "--delete-emptydir-data", "--timeout=120s")
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	return session
+}
+
+func waitForTerminatingMultiReplicaPod(node string) {
+	gomega.EventuallyWithOffset(1, func() bool {
+		for _, pod := range multiReplicaPodStates() {
+			if pod.Node == node && pod.DeletionTimestamp != nil {
+				return true
+			}
+		}
+		return false
+	}, 60*time.Second, 250*time.Millisecond).Should(gomega.BeTrue(),
+		"the drain must begin evicting the processor on the target worker")
+}
+
+func uncordonLifecycleWorkers() {
+	for _, node := range []string{kindClusterName + "-worker", kindClusterName + "-worker2"} {
+		command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig, "uncordon", node)
+		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+		gomega.EventuallyWithOffset(1, session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+	}
+}
 
 func scaleAsyncDeployment(deployment string, replicas int) {
 	cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
