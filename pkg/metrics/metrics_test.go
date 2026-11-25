@@ -100,6 +100,16 @@ func TestRemoveQueueSnapshots(t *testing.T) {
 	}
 }
 
+// The required-replicas gauge is per queue: with a pool_name label, a sum by
+// pool would over-count replicas for queues that share a deployment.
+func TestDeadlineRequiredReplicasHasNoPoolLabel(t *testing.T) {
+	labels := prometheus.Labels{LabelQueueID: "q-replicas", LabelQueueName: "queue-replicas"}
+	if _, err := DeadlineRequiredReplicas.GetMetricWith(labels); err != nil {
+		t.Fatalf("want only queue_id and queue_name labels: %v", err)
+	}
+	DeadlineRequiredReplicas.Delete(labels)
+}
+
 func TestSetPoolWorkerLimit(t *testing.T) {
 	SetPoolWorkerLimit("pool-a", 8)
 	got := testutil.ToFloat64(PoolWorkerLimit.WithLabelValues("pool-a"))

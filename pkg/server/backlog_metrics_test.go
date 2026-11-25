@@ -84,25 +84,25 @@ func TestPollBacklogPublishesDeadlineRequiredReplicas(t *testing.T) {
 			"q-pubsub": {ThroughputRPS: 2, ColdStartSeconds: 60, MaxReplicas: 10},
 		},
 	}
-	metrics.SetDeadlineRequiredReplicas("q-plain", "queue-plain", "pool-scale", 3) // left from settings a reload removed
+	metrics.SetDeadlineRequiredReplicas("q-plain", "queue-plain", 3) // left from settings a reload removed
 
 	pollBacklog(ctx, reporter, time.Hour)
 
 	// 240 items due within 2m, 2 per second per replica after a 60s cold start: 2 replicas.
-	if got := testutil.ToFloat64(metrics.DeadlineRequiredReplicas.WithLabelValues("q-scale", "queue-scale", "pool-scale")); got != 2 {
+	if got := testutil.ToFloat64(metrics.DeadlineRequiredReplicas.WithLabelValues("q-scale", "queue-scale")); got != 2 {
 		t.Fatalf("required replicas = %v, want 2", got)
 	}
-	for _, queue := range [][3]string{{"q-plain", "queue-plain", "pool-scale"}, {"q-pubsub", "queue-pubsub", "pool-scale"}} {
-		if metrics.DeadlineRequiredReplicas.DeleteLabelValues(queue[0], queue[1], queue[2]) {
+	for _, queue := range [][2]string{{"q-plain", "queue-plain"}, {"q-pubsub", "queue-pubsub"}} {
+		if metrics.DeadlineRequiredReplicas.DeleteLabelValues(queue[0], queue[1]) {
 			t.Fatalf("queue %s has a required-replicas series; only queues with deadline_scaling and deadline counts get one", queue[0])
 		}
 	}
 }
 
 func TestRemoveQueueSnapshotsDropsDeadlineRequiredReplicas(t *testing.T) {
-	metrics.SetDeadlineRequiredReplicas("q-gone", "queue-gone", "pool-gone", 4)
+	metrics.SetDeadlineRequiredReplicas("q-gone", "queue-gone", 4)
 	metrics.RemoveQueueSnapshots("q-gone", "queue-gone", "pool-gone")
-	if metrics.DeadlineRequiredReplicas.DeleteLabelValues("q-gone", "queue-gone", "pool-gone") {
+	if metrics.DeadlineRequiredReplicas.DeleteLabelValues("q-gone", "queue-gone") {
 		t.Fatal("a removed queue kept its required-replicas series")
 	}
 }
@@ -117,14 +117,14 @@ func TestPollBacklogDropsDeadlineRequiredReplicasOnFailedRead(t *testing.T) {
 		}},
 		configs: map[string]deadlinescaling.Config{"q-read-ok": cfg, "q-read-bad": cfg},
 	}
-	metrics.SetDeadlineRequiredReplicas("q-read-bad", "queue-read-bad", "pool-read", 3) // from the previous poll
+	metrics.SetDeadlineRequiredReplicas("q-read-bad", "queue-read-bad", 3) // from the previous poll
 
 	pollBacklog(ctx, reporter, time.Hour)
 
-	if got := testutil.ToFloat64(metrics.DeadlineRequiredReplicas.WithLabelValues("q-read-ok", "queue-read-ok", "pool-read")); got != 2 {
+	if got := testutil.ToFloat64(metrics.DeadlineRequiredReplicas.WithLabelValues("q-read-ok", "queue-read-ok")); got != 2 {
 		t.Fatalf("required replicas = %v, want 2", got)
 	}
-	if metrics.DeadlineRequiredReplicas.DeleteLabelValues("q-read-bad", "queue-read-bad", "pool-read") {
+	if metrics.DeadlineRequiredReplicas.DeleteLabelValues("q-read-bad", "queue-read-bad") {
 		t.Fatal("the queue whose deadline read failed kept its required-replicas series")
 	}
 }

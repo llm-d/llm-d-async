@@ -29,6 +29,10 @@ const (
 
 var queueLabels = []string{LabelQueueID, LabelQueueName, LabelPoolName}
 
+// queueOnlyLabels leaves out pool_name, for a per-queue value that over-counts
+// when summed by pool.
+var queueOnlyLabels = []string{LabelQueueID, LabelQueueName}
+
 // gateLabels is queueLabels plus the queried InferencePool. Gate gauges carry
 // the full queue triple so they join with the queue's other series; a
 // pool-level gate leaves queue_id and queue_name empty.
@@ -123,8 +127,8 @@ var (
 	}, queueLabels)
 	DeadlineRequiredReplicas = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_deadline_required_replicas",
-		Help: "Replicas needed to finish the queue's queued items before their deadlines, from the latest deadline-proximity snapshot and the queue's deadline_scaling settings: the maximum over horizons t of B(t) / (throughput_rps * (t - cold_start_seconds) * safety_factor), where B(t) leaves out expired items, rounded up and capped at max_replicas. Only set for queues with deadline_scaling, on brokers that expose per-item deadlines, and not after a failed deadline read.",
-	}, queueLabels)
+		Help: "Experimental. Replicas needed to finish the queue's queued items before their deadlines, from the latest deadline-proximity snapshot and the queue's deadline_scaling settings: the maximum over horizons t of B(t) / (throughput_rps * (t - cold_start_seconds) * safety_factor), where B(t) leaves out expired items, rounded up and capped at max_replicas. Only set for queues with deadline_scaling, on brokers that expose per-item deadlines, and not after a failed deadline read.",
+	}, queueOnlyLabels)
 	BrokerBacklogSourceAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SchedulerSubsystem, Name: "async_broker_backlog_source_available",
 		Help: "1 when the most recent broker-backlog read for the queue succeeded; 0 when the source was unavailable or returned an error.",
@@ -462,14 +466,14 @@ func SetBrokerBacklog(queueID, queueName, poolName string, n float64) {
 }
 
 // SetDeadlineRequiredReplicas sets the replicas a queue needs to meet its deadlines.
-func SetDeadlineRequiredReplicas(queueID, queueName, poolName string, replicas int) {
-	DeadlineRequiredReplicas.WithLabelValues(queueID, queueName, poolName).Set(float64(replicas))
+func SetDeadlineRequiredReplicas(queueID, queueName string, replicas int) {
+	DeadlineRequiredReplicas.WithLabelValues(queueID, queueName).Set(float64(replicas))
 }
 
 // RemoveDeadlineRequiredReplicas deletes the series of a queue whose
 // deadline_scaling settings were removed.
-func RemoveDeadlineRequiredReplicas(queueID, queueName, poolName string) {
-	DeadlineRequiredReplicas.DeleteLabelValues(queueID, queueName, poolName)
+func RemoveDeadlineRequiredReplicas(queueID, queueName string) {
+	DeadlineRequiredReplicas.DeleteLabelValues(queueID, queueName)
 }
 
 // SetBrokerBacklogSourceAvailable records whether the most recent broker-side
@@ -494,7 +498,7 @@ func RemoveQueueSnapshots(queueID, queueName, poolName string) {
 	BrokerBacklogSourceAvailable.DeleteLabelValues(queueID, queueName, poolName)
 	DispatchBudget.DeleteLabelValues(queueID, queueName, poolName)
 	DeadlineProximity.Delete(queueID, queueName, poolName)
-	DeadlineRequiredReplicas.DeleteLabelValues(queueID, queueName, poolName)
+	DeadlineRequiredReplicas.DeleteLabelValues(queueID, queueName)
 }
 
 // SetPoolWorkerLimit sets the configured worker concurrency limit for a pool.

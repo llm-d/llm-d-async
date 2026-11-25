@@ -57,6 +57,7 @@ The architecture adheres to the following core principles:
 - [Request Merge Policy Reference](docs/merge-policies.md)
 - [Request Body Transform Reference](docs/request-body-transforms.md)
 - [Observability](docs/observability.md): Prometheus metrics and OpenTelemetry tracing
+- [Deadline Scaling](docs/deadline-scaling.md) (**experimental**): the per-queue `deadline_scaling` settings and the required-replicas gauge for KEDA
 - [Development](docs/development.md)
 
 ## Concepts
