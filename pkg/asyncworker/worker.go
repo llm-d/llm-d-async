@@ -319,20 +319,84 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 
 					// Apply the request body-transform chain. If a transform handles
 					// the message we send its body and Content-Type; otherwise the
-					// default JSON payload is sent unchanged. A transform error is
-					// fatal/non-retryable.
+					// default JSON payload is sent unchanged. Transforms run under
+					// reqCtx, so their I/O is bounded by the request deadline. A
+					// transform error carrying a retryable InferenceError category is
+					// retried like a retryable send failure; any other error is fatal.
 					sendPayload := payloadBytes
 					sendHeaders := msg.HttpHeaders
-					if body, contentType, handled, terr := transforms.Apply(payloadBytes, msg.PublicRequest.ReqMetadata()); terr != nil {
-						span.RecordError(terr)
+					if body, contentType, handled, terr := transforms.ApplyContext(reqCtx, payloadBytes, msg.PublicRequest.ReqMetadata(), msg.RequestURL); terr != nil {
+						// Shutdown interrupted the transform: re-enqueue without
+						// counting an attempt, as for an interrupted send.
+						if requestCtx.Err() != nil {
+							retryChannel <- pipeline.RetryMessage{EmbelishedRequestMessage: msg}
+							return
+						}
+						if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+							// reqCtx ends at the earlier of request-timeout (one
+							// attempt) and the request's own deadline. Only the
+							// deadline ends the request; when the attempt timeout
+							// fired first, retry, as #584 does for a timed-out send.
+							// terr is not recorded: once ctx is done, a plugin may
+							// return a raw SDK error.
+							if requestDeadlineReached(msg.PublicRequest, time.Now()) {
+								span.RecordError(errors.New("request transform did not finish before the request deadline"))
+								span.SetStatus(codes.Error, "request transform hit the request deadline")
+								metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
+								select {
+								case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
+								case <-requestCtx.Done():
+								}
+								return
+							}
+							span.RecordError(errors.New("request transform did not finish before request-timeout"))
+							span.SetStatus(codes.Error, "request transform hit request-timeout; retrying")
+							span.SetAttributes(
+								attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryServer)),
+								attribute.String(uotel.LegacyAttrErrorCategory, string(asyncapi.ErrCategoryServer)),
+							)
+							logger.V(logutil.DEBUG).Info("Retrying request after the transform hit request-timeout", "id", msg.PublicRequest.ReqID())
+							retryMessage(requestCtx, msg, retryChannel, resultChannel, 0, asyncapi.InferenceResponse{})
+							return
+						}
+						summary := transformErrorSummary(terr)
+						var inferenceErr asyncapi.InferenceError
+						if errors.As(terr, &inferenceErr) && !inferenceErr.Category().Fatal() {
+							span.RecordError(errors.New(summary))
+							span.SetStatus(codes.Error, "request transform failed; retrying")
+							// As on the send path: a store answering "slow down"
+							// counts as a shed request.
+							if inferenceErr.Category().Sheddable() {
+								metrics.RecordSheddedReq(queueID, queueName, msg.WorkerPoolID)
+							}
+							span.SetAttributes(
+								attribute.String(uotel.AttrErrorCategory, string(inferenceErr.Category())),
+								attribute.String(uotel.LegacyAttrErrorCategory, string(inferenceErr.Category())),
+							)
+							logger.V(logutil.DEBUG).Info("Retrying request after a transform error", "id", msg.PublicRequest.ReqID(), "error", summary)
+							var retryAfter time.Duration
+							var clientErr *asyncapi.ClientError
+							if errors.As(terr, &clientErr) {
+								retryAfter = clientErr.RetryAfter
+							}
+							retryMessage(requestCtx, msg, retryChannel, resultChannel, retryAfter, asyncapi.InferenceResponse{})
+							return
+						}
+						// The result keeps the documented INVALID_REQUEST code; the
+						// span records the transform's own category.
+						category := asyncapi.ErrCategoryInvalidReq
+						if inferenceErr != nil {
+							category = inferenceErr.Category()
+						}
+						span.RecordError(errors.New(summary))
 						span.SetStatus(codes.Error, "request transform failed")
 						span.SetAttributes(
-							attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
-							attribute.String(uotel.LegacyAttrErrorCategory, string(asyncapi.ErrCategoryInvalidReq)),
+							attribute.String(uotel.AttrErrorCategory, string(category)),
+							attribute.String(uotel.LegacyAttrErrorCategory, string(category)),
 						)
 						metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
 						select {
-						case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, fmt.Sprintf("Failed to transform request body: %s", terr.Error())):
+						case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInvalidRequest, "Failed to transform request body: "+summary):
 						case <-requestCtx.Done():
 						}
 						return
@@ -585,6 +649,23 @@ func deadlineExhaustedResult(msg pipeline.EmbelishedRequestMessage, lastResp asy
 		return asyncapi.NewResponseResult(msg.PublicRequest, msg.InternalRouting, lastResp)
 	}
 	return asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting)
+}
+
+// transformErrorSummary describes a transform error for the error result, the
+// span and the log. A ClientError contributes its category and its own message,
+// keeping any prefix the chain or plugin wrapped around it, but not the raw
+// cause it carries: storage SDK errors can include response bodies and URLs.
+// Any other error is reported as it is.
+func transformErrorSummary(err error) string {
+	var clientErr *asyncapi.ClientError
+	if !errors.As(err, &clientErr) {
+		return err.Error()
+	}
+	prefix := ""
+	if full, inner := err.Error(), clientErr.Error(); strings.HasSuffix(full, inner) {
+		prefix = strings.TrimSuffix(full, inner)
+	}
+	return fmt.Sprintf("%s%s: %s", prefix, clientErr.ErrorCategory, clientErr.Message)
 }
 
 // headersWithContentType returns a copy of headers with Content-Type set to
