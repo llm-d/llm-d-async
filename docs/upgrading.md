@@ -1,6 +1,6 @@
 # Upgrade or roll back a single-replica Async Processor
 
-Use this procedure for a patch or an upgrade from the previous release (N−1 to N) of the `llm-d-async` Helm chart. Multiple active processor replicas are outside the supported topology. Even with `replicas: 1`, the default Kubernetes rolling update can start the new Pod while the old one is still consuming work.
+Use this procedure for a patch or an upgrade from the previous release (N−1 to N) of the `llm-d-async` Helm chart. One replica is the supported production topology. The [multi-replica validation matrix](https://github.com/llm-d/llm-d-async/blob/main/docs/guides/multi-replica.md#current-validation-matrix) tracks coverage by transport. Even with `replicas: 1`, the default Kubernetes rolling update can start the new Pod while the old one is still consuming work.
 
 ## Before changing the release
 
@@ -32,7 +32,7 @@ Record the healthy `deployed` revision as `good_revision` for rollback. Compare 
 | Transport | During the handover |
 |---|---|
 | `redis-sortedset` | Keep the same queue, retry queue and Redis database. A claimed request is fenced by its owner token. An unfinished claim can wait for the remaining lease and the next reclaim scan, even after graceful shutdown. Allow that time in request deadlines. A crash after a destructive pop can lose a request on v0.9.0 and earlier. [v0.9.1](https://github.com/llm-d/llm-d-async/releases/tag/v0.9.1) introduced leased dequeue. [Durable dequeue](guides/durable-dequeue.md) |
-| `gcp-pubsub` | Keep the same subscription and result topic. The processor ACKs valid requests after the result is published. NACKs and expired ACK deadlines permit redelivery. Keep the result consumer running and deduplicate redeliveries. On v0.11.0 and v1.0.0, overlapping deliveries of the same message ID to one processor can stall shutdown before `ap.drainTimeout` starts. [Pub/Sub shutdown issue](https://github.com/llm-d/llm-d-async/issues/576) |
+| `gcp-pubsub` | Keep the same subscription and result topic. The processor ACKs valid requests after the result is published. NACKs and expired ACK deadlines permit redelivery. Keep the result consumer running and deduplicate redeliveries. On v0.11.0 and v1.0.0, overlapping deliveries of the same message ID to one processor can stall shutdown before `ap.drainTimeout` starts. Builds that include [the fix for #576](https://github.com/llm-d/llm-d-async/pull/577) use a separate result signal for each delivery. |
 | `sql` (experimental) | The new processor applies expand-first migrations before new SQL producers start. A clean handover drains in-flight work on leased partitions. After a crash, work can wait for lease expiry and be delivered again. Both versions must implement the SQL transport and its migration contract. The previous processor then accepts a newer schema. Leave it in place on rollback and check the release notes for exceptions. [SQL migrations](sql-migrations.md) |
 | `redis-pubsub` (deprecated) | Pause publishers and finish outstanding requests with the original processor and result subscribers connected. Two subscribed processors can both receive a publication, and publications during a subscriber gap have no replay. Resume publishers only after the replacement is subscribed. |
 
@@ -69,6 +69,7 @@ Check that only the intended processor image is running and ready. Submit one re
 
    | Feature | Handoff to the old version |
    |---|---|
+   | Binary response bodies | Upgrade consumers before submitting requests that return non-UTF-8 bodies. When `payload_encoding` is `base64`, decode `payload` with `ResultMessage.Body()` in Go or the equivalent in your client. Before rolling back to a processor or consumer that lacks binary support, pause those requests and drain their jobs and results with the compatible versions. [Result messages](transports.md#result-messages) |
    | Redis payload references | Disable `WithPayloadKeys` on all producers. Finish queued, delayed and claimed requests that refer to external payloads. Older dispatchers can send a null body. [Transport configuration](transports.md) |
    | Durable Redis results | Keep a durable consumer on its route until pending results are checkpointed and all claims ACKed (or reclaimed and ACKed). Stop that consumer before switching the same route to destructive `GetResult`. When upgrading, roll out enriched result publishers before durable consumers. [Result delivery](guides/durable-result-delivery.md#rollout) |
    | Redis Cluster key layout | Drain requests, retries, claims and outstanding results on the active backend before switching clients or key mode. Cluster and standalone/Sentinel use different private claim keys. Move producers, processor and consumers together. [Cluster cutover](transports.md#redis-cluster-and-sentinel) |
