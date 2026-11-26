@@ -68,13 +68,15 @@ The Redis/Valkey E2E exercises these invariants:
    bounded scheduling allowance.
 4. A three-replica saturation-gate deployment leaves the full batch pending
    and unclaimed while saturated and completes it after the signal clears.
-5. A same-build rolling update replaces three replicas while requests are
-   actively dispatched. Every tracked request completes successfully and
-   within the lease TTL plus reclaim and scheduling allowance.
+5. A same-build rolling update starts after all three replicas reach their
+   configured in-flight capacity. The first original pod begins terminating
+   before the queued batch completes, every original pod is replaced, and
+   every tracked request completes successfully exactly once.
 6. In a dedicated two-worker Kind topology, a test-only PodDisruptionBudget
-   with `minAvailable: 2` permits one worker drain while preserving two ready
-   replicas. The evicted replica is replaced on the surviving worker, and all
-   tracked requests complete within the same recovery bound.
+   with `minAvailable: 2` allows the first eviction from the worker holding two
+   replicas, blocks the second until a replacement is ready, and preserves two
+   ready replicas. The drain completes, and every tracked request completes
+   successfully exactly once.
 
 These checks establish focused Redis/Valkey evidence. They do not yet cover
 cross-version upgrades or rollback compatibility, production chart controls

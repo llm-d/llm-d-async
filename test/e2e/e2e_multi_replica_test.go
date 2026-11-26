@@ -177,14 +177,13 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 		assertSimulatorDispatchesExactlyOnce("multi-saturation-", requests)
 	})
 
-	ginkgo.It("keeps requests within the lease bound during a rolling update", func() {
+	ginkgo.It("completes queued work exactly once during a rolling update", func() {
 		setSimulatorLatency(2 * time.Second)
 		ginkgo.DeferCleanup(func() { setSimulatorLatency(0) })
 
-		// Two waves of aggregate worker capacity keep every replica active while
-		// avoiding a backlog whose ordinary service time would be mistaken for a
-		// disruption stall.
-		const requests = 2 * 3 * multiReplicaWorkers
+		// Eight waves outlast the surge pod's readiness delay, so the first old
+		// pod begins terminating before the batch can finish normally.
+		const requests = 8 * 3 * multiReplicaWorkers
 		scaleAsyncDeployment(multiReplicaDeployment, 3)
 		initialPods := asyncPodNames(multiReplicaInstance)
 		gomega.Expect(initialPods).To(gomega.HaveLen(3))
@@ -197,17 +196,21 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 		}
 		assertPodsDispatchingAtCapacity(multiReplicaInstance, initialPods, dispatchBaseline, multiReplicaWorkers)
 
-		started := time.Now()
-		rolloutGeneration := fmt.Sprintf("%d", started.UnixNano())
+		rolloutGeneration := fmt.Sprintf("%d", time.Now().UnixNano())
 		patchDeploymentAnnotation(multiReplicaDeployment, "e2e.llm-d.ai/rollout", rolloutGeneration)
-		waitForReplacementPod(multiReplicaInstance, initialPods)
+		terminatingPod := waitForTerminatingInitialPod(initialPods)
+		gomega.Expect(terminatingPod).NotTo(gomega.BeEmpty())
+		gomega.Expect(getResultCount(ctx, rdb, multiReplicaResultQueue)).To(gomega.BeNumerically("<", requests),
+			"the first old pod must begin terminating before the queued batch completes")
 
-		completionBound := multiReplicaLeaseTTL + multiReplicaReclaim + reclaimScheduleBound
-		assertExactTerminalResults(ctx, "multi-rollout-", requests, completionBound)
-		gomega.Expect(time.Since(started)).To(gomega.BeNumerically("<", completionBound),
-			"rolling-update work must complete within lease TTL + reclaim + scheduling allowance")
 		waitForDeploymentRollout(multiReplicaDeployment)
-		gomega.Expect(asyncPodNames(multiReplicaInstance)).NotTo(gomega.ContainElement(initialPods[0]))
+		currentPods := asyncPodNames(multiReplicaInstance)
+		gomega.Expect(currentPods).To(gomega.HaveLen(3))
+		for _, initialPod := range initialPods {
+			gomega.Expect(currentPods).NotTo(gomega.ContainElement(initialPod),
+				"the rolling update must replace every original pod")
+		}
+		assertExactTerminalResults(ctx, "multi-rollout-", requests, 90*time.Second)
 		assertSimulatorDispatchesExactlyOnce("multi-rollout-", requests)
 	})
 
@@ -225,7 +228,7 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 
 		gomega.Eventually(pdbDisruptionsAllowed, 30*time.Second, time.Second).
 			Should(gomega.BeNumerically(">=", 1))
-		targetNode := leastLoadedMultiReplicaNode()
+		targetNode := mostLoadedMultiReplicaNode()
 		initialPods := asyncPodNames(multiReplicaInstance)
 		dispatchBaseline := asyncMetricByPod(multiReplicaInstance,
 			"llm_d_async_async_dispatched_requests_total")
@@ -235,18 +238,23 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 		}
 		assertPodsDispatchingAtCapacity(multiReplicaInstance, initialPods, dispatchBaseline, multiReplicaWorkers)
 
-		started := time.Now()
 		drain := startNodeDrain(targetNode)
+		ginkgo.DeferCleanup(func() {
+			if drain.ExitCode() == -1 {
+				drain.Kill()
+			}
+		})
 		waitForTerminatingMultiReplicaPod(targetNode)
+		gomega.Eventually(func() bool {
+			return pdbDisruptionsAllowed() == 0 && len(multiReplicaPodsOnNode(targetNode)) > 0
+		}, 60*time.Second, 250*time.Millisecond).Should(gomega.BeTrue(),
+			"the PDB must block the second eviction while a pod remains on the target worker")
 		gomega.Consistently(func() int {
 			return readyReplicaCount(multiReplicaDeployment)
 		}, 5*time.Second, 250*time.Millisecond).Should(gomega.BeNumerically(">=", 2),
 			"the PDB must preserve two ready replicas during voluntary disruption")
 
-		completionBound := multiReplicaLeaseTTL + multiReplicaReclaim + reclaimScheduleBound
-		assertExactTerminalResults(ctx, "multi-drain-", requests, completionBound-5*time.Second)
-		gomega.Expect(time.Since(started)).To(gomega.BeNumerically("<", completionBound),
-			"node-drain work must complete within lease TTL + reclaim + scheduling allowance")
+		assertExactTerminalResults(ctx, "multi-drain-", requests, 90*time.Second)
 		gomega.Eventually(drain).WithTimeout(120 * time.Second).Should(gexec.Exit(0))
 		gomega.Eventually(func() int {
 			return readyReplicaCount(multiReplicaDeployment)
@@ -257,7 +265,7 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 })
 
 func configureMultiReplicaLifecycleScheduling() {
-	patch := `{"spec":{"template":{"metadata":{"annotations":{"e2e.llm-d.ai/lifecycle":"enabled"}},"spec":{"nodeSelector":{"e2e.llm-d.ai/processor":"true"},"tolerations":[{"key":"e2e.llm-d.ai/processor","operator":"Equal","value":"true","effect":"NoSchedule"}],"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app.kubernetes.io/instance":"multi-replica"}}}]}}}}`
+	patch := `{"spec":{"template":{"metadata":{"annotations":{"e2e.llm-d.ai/lifecycle":"enabled"}},"spec":{"nodeSelector":{"e2e.llm-d.ai/processor":"true"},"tolerations":[{"key":"e2e.llm-d.ai/processor","operator":"Equal","value":"true","effect":"NoSchedule"}],"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule","nodeTaintsPolicy":"Honor","labelSelector":{"matchLabels":{"app.kubernetes.io/instance":"multi-replica"}}}]}}}}`
 	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
 		"-n", nsName, "patch", "deployment", multiReplicaDeployment,
 		"--type=merge", "-p", patch)
@@ -268,12 +276,7 @@ func configureMultiReplicaLifecycleScheduling() {
 }
 
 func setSimulatorLatency(latency time.Duration) {
-	args := []string{
-		"--model", "test-model",
-		"--port", "8000",
-		"--fake-metrics", `{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}`,
-		"--log-http",
-	}
+	args := defaultSimulatorArgs()
 	if latency > 0 {
 		args = append(args, "--time-to-first-token", latency.String())
 	}
@@ -309,20 +312,23 @@ func patchDeploymentAnnotation(deployment, key, value string) {
 	gomega.EventuallyWithOffset(1, session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 }
 
-func waitForReplacementPod(instance string, oldPods []string) {
+func waitForTerminatingInitialPod(oldPods []string) string {
 	old := make(map[string]struct{}, len(oldPods))
 	for _, pod := range oldPods {
 		old[pod] = struct{}{}
 	}
-	gomega.EventuallyWithOffset(1, func() bool {
-		for _, pod := range asyncPodNames(instance) {
-			if _, existed := old[pod]; !existed {
-				return true
+	var terminating string
+	gomega.EventuallyWithOffset(1, func() string {
+		for _, pod := range multiReplicaPodStates() {
+			if _, existed := old[pod.Name]; existed && pod.DeletionTimestamp != nil {
+				terminating = pod.Name
+				return terminating
 			}
 		}
-		return false
-	}, 60*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(),
-		"the rolling update must start a replacement pod")
+		return ""
+	}, 90*time.Second, 250*time.Millisecond).ShouldNot(gomega.BeEmpty(),
+		"the rolling update must begin terminating an original pod")
+	return terminating
 }
 
 func waitForDeploymentRollout(deployment string) {
@@ -375,7 +381,7 @@ func pdbDisruptionsAllowed() int {
 	return allowed
 }
 
-func leastLoadedMultiReplicaNode() string {
+func mostLoadedMultiReplicaNode() string {
 	counts := make(map[string]int)
 	for _, pod := range multiReplicaPodStates() {
 		if pod.DeletionTimestamp == nil && pod.Ready {
@@ -386,7 +392,7 @@ func leastLoadedMultiReplicaNode() string {
 		"three replicas must be spread across both lifecycle workers")
 	var target string
 	for node, count := range counts {
-		if target == "" || count < counts[target] {
+		if target == "" || count > counts[target] {
 			target = node
 		}
 	}
