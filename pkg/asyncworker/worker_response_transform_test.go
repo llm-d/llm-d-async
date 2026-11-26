@@ -107,7 +107,7 @@ func TestWorker_ResponseTransformRewritesResult(t *testing.T) {
 		t.Errorf("result content type = %q, want the backend Content-Type", res.ContentType)
 	}
 	if !rt.gotDeadline {
-		t.Error("transform ctx has no deadline, want the request deadline")
+		t.Error("transform ctx has no deadline, want the dispatch attempt's deadline")
 	}
 	if rt.gotBody != `{"original":true}` {
 		t.Errorf("transform saw body %q, want the backend body", rt.gotBody)

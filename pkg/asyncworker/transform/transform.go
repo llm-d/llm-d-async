@@ -80,8 +80,10 @@ type ResponseTransform interface {
 	// response it returns the new body and handled=true; a non-empty
 	// contentType replaces the result's content type, and an empty one keeps
 	// the response's. Otherwise it returns handled=false and the original body
-	// is published unchanged. ctx carries the request deadline and is cancelled
-	// on shutdown. An error is fatal: the worker publishes an error result and
-	// does not retry, since the inference call already succeeded.
+	// is published unchanged. ctx is the dispatch attempt's context: it ends at
+	// the earlier of request-timeout and the request's own deadline, so the
+	// inference call has already used part of that time, and it is cancelled on
+	// shutdown. An error is fatal: the worker publishes an error result and does
+	// not retry, since the inference call already succeeded.
 	Transform(ctx context.Context, responseBody []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error)
 }

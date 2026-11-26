@@ -77,7 +77,7 @@ Response body-transform plugins rewrite a successful response body before it is 
 - **Activation:** only 2xx responses are passed to the chain; 3xx and error responses are published unchanged. Each plugin receives the response body and the message's `metadata`.
 - **Ordering:** plugins run in order and the first one that handles the response wins. When no plugin handles it, the body is published byte-for-byte.
 - **Content type:** a plugin may return a content type along with the new body; it replaces the result's `content_type`. An empty value keeps the response's. The status code and forwarded headers are always published unchanged.
-- **Context:** each plugin receives the request's context, which carries the request deadline and is cancelled on shutdown.
+- **Context:** each plugin receives the dispatch attempt's context, the same one request transforms get: it ends at the earlier of `--request-timeout` and the request's own deadline, so the inference call has already used part of that time, and it is cancelled on shutdown.
 - **Errors:** a transform error publishes an `INFERENCE_ERROR` result and is not retried, since the inference call already succeeded.
 - **Names:** plugin names must be unique across `requestTransforms` and `responseTransforms`.
 
