@@ -42,10 +42,11 @@ func TestPresignExpiry(t *testing.T) {
 		// before the 12:00:01.3 deadline.
 		{name: "counts from the whole-second signing time", now: frac, deadline: whole.Add(1300 * time.Millisecond), creds: static, want: 2 * time.Second, wantOK: true},
 		{name: "far deadline clamps to 7 days", now: whole, deadline: whole.Add(30 * 24 * time.Hour), creds: static, want: 7 * 24 * time.Hour, wantOK: true},
-		{name: "no deadline uses default", now: whole, creds: static, want: defaultPresignExpiry, wantOK: true},
+		{name: "no deadline uses default", now: whole, creds: static, want: 15 * time.Minute, wantOK: true},
 		{name: "ends a second before expiring credentials", now: frac, deadline: whole.Add(5 * time.Minute), creds: expiringAt(whole.Add(31 * time.Second)), want: 30 * time.Second, wantOK: true},
 		{name: "credentials outlive deadline", now: whole, deadline: whole.Add(5 * time.Minute), creds: expiringAt(whole.Add(time.Hour)), want: 5 * time.Minute, wantOK: true},
 		{name: "credentials about to expire", now: whole, deadline: whole.Add(5 * time.Minute), creds: expiringAt(whole.Add(1500 * time.Millisecond)), wantOK: false},
+		{name: "exactly a second left is enough", now: whole, deadline: whole.Add(5 * time.Minute), creds: expiringAt(whole.Add(2 * time.Second)), want: time.Second, wantOK: true},
 		{name: "deadline passed", now: whole, deadline: whole.Add(-time.Second), creds: static, wantOK: false},
 	}
 	for _, tc := range tests {

@@ -215,9 +215,13 @@ func TestNew_RegionFromEnvironment(t *testing.T) {
 func TestTransform_LeavesOtherRequestsAlone(t *testing.T) {
 	store := newFakeS3(t, nil)
 	p := newTestPlugin(t, store.URL, 0)
-	payload := []byte(`{"model":"whisper","file":"s3://audio/a.wav"}`)
+	payload := []byte(`{"model":"whisper","file":"s3://audio/a.wav","images":[{"image_url":"s3://audio/a.png"}]}`)
 
-	for _, u := range []string{"http://gw/v1/chat/completions", "http://gw/v1/audio/speech", "http://gw/v1/images/generations", "", "::bad"} {
+	for _, u := range []string{
+		"http://gw/v1/chat/completions", "http://gw/v1/audio/speech", "http://gw/v1/images/generations", "", "::bad",
+		// The endpoint must end the path: not a query string, not a prefix.
+		"http://gw/v1/chat/completions?next=/v1/images/edits", "http://gw/v1/audio/transcriptions/x",
+	} {
 		_, _, handled, err := p.TransformContext(context.Background(), payload, nil, u)
 		if handled || err != nil {
 			t.Errorf("TransformContext(%q) = handled %v err %v, want false/nil", u, handled, err)

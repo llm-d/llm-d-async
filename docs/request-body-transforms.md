@@ -99,7 +99,7 @@ Turns JSON media requests into the `multipart/form-data` bodies their endpoints 
 | `allowedBuckets` | required | The only buckets an `s3://` reference may name. Other buckets are rejected. |
 | `endpoint` | AWS S3 | S3 API URL of a non-AWS store. |
 | `region` | `AWS_REGION` | Signing region. Startup fails if neither is set. |
-| `usePathStyle` | `false` | Address objects as `<endpoint>/<bucket>/<key>`, which most S3-compatible stores require. |
+| `usePathStyle` | `false` | Put the bucket in the URL path, `http://seaweedfs:8333/batch-files/a.wav`, instead of the host name, `https://batch-files.s3.amazonaws.com/a.wav`. Most S3-compatible stores (SeaweedFS, MinIO) need `true`, since they don't serve a host name per bucket; leave it `false` for AWS S3. |
 | `maxFileBytes` | 25 MiB | Largest file read into a request body, matching vLLM's default `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB`. |
 
 - **Credentials** come from the AWS SDK default chain, never from the parameters: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, shared config files, or a workload identity. With the Helm chart, set them through `ap.env` from a Secret. Only read access to the allowed buckets is needed.

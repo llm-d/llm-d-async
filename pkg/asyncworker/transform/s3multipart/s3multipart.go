@@ -292,7 +292,13 @@ func credentialsError(ctx context.Context, ref string, err error) error {
 }
 
 // decodeFields parses the JSON body into its top-level fields, preserving each
-// value's raw JSON.
+// value's raw JSON. For example,
+//
+//	{"model":"whisper","file":"s3://b/a.wav","timestamp_granularities":["word"],"temperature":0.2}
+//
+// gives model → `"whisper"`, file → `"s3://b/a.wav"` (quotes kept),
+// timestamp_granularities → `["word"]` and temperature → `0.2`. A body that
+// is not a JSON object fails as INVALID_REQ.
 func decodeFields(payload []byte) (map[string]json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &fields); err != nil {

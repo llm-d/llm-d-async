@@ -33,9 +33,14 @@ const (
 // not an s3:// reference or a base64 data URL fails the request, since anything
 // else would make the worker fetch arbitrary URLs.
 //
-// TransformContext calls it when the dispatch URL ends in
-// /v1/audio/transcriptions or /v1/audio/translations. payload is the queued
-// request's JSON body, e.g. {"model":"whisper","file":"s3://bucket/a.wav"}.
+// TransformContext (s3multipart.go), the plugin's entry point for every
+// request, calls it when the dispatch URL ends in /v1/audio/transcriptions or
+// /v1/audio/translations. payload is the queued request's JSON body, e.g.
+// {"model":"whisper","file":"s3://bucket/a.wav"}.
+//
+// It returns the multipart body, its Content-Type (multipart/form-data with
+// the boundary), and handled=true. A body without `file` returns
+// handled=false and a nil error; a request it cannot convert returns an error.
 //
 // The audio is copied straight into a body buffer sized up front, so the
 // request holds the multipart body and no separate copy of the file.
@@ -46,15 +51,19 @@ func (p *Plugin) transformAudio(ctx context.Context, payload []byte) ([]byte, st
 		// request fails instead of being retried or sent as JSON.
 		return nil, "", false, err
 	}
-	raw, present := fields[fileField]
+	// fileJSON is the `file` value as JSON text, e.g. `"s3://bucket/a.wav"`
+	// with its quotes.
+	fileJSON, present := fields[fileField]
 	if !present {
+		// Not an audio upload this plugin handles: handled=false passes the
+		// request on unchanged to the next transform in the chain.
 		return nil, "", false, nil
 	}
-	// raw is the field's JSON text, not yet a Go value: `"s3://b/k"` decodes
-	// to a string, but `42`, `true`, `[...]` or `{...}` fail. (`null` decodes
+	// Only a JSON string decodes: `"s3://b/k"` does, while a number
+	// ({"file": 42}), `true`, a list or an object fail here. (`null` decodes
 	// to "" and is rejected below as neither s3:// nor data:.)
 	var ref string
-	if json.Unmarshal(raw, &ref) != nil {
+	if json.Unmarshal(fileJSON, &ref) != nil {
 		return nil, "", false, fatalf("%q must be an s3:// reference or a base64 data URL", fileField)
 	}
 
@@ -74,6 +83,10 @@ func (p *Plugin) transformAudio(ctx context.Context, payload []byte) ([]byte, st
 		if err != nil {
 			return nil, "", false, err
 		}
+		// Fetches the object's headers and an open body stream. It fails when
+		// the object is missing (fatal), access is denied (fatal), the store
+		// is throttling or down (retried), credentials are missing (fatal),
+		// or the declared size is over maxFileBytes (fatal); see storageError.
 		body, stored, n, err := p.openObject(ctx, bucket, key)
 		if err != nil {
 			return nil, "", false, err
@@ -87,7 +100,15 @@ func (p *Plugin) transformAudio(ctx context.Context, payload []byte) ([]byte, st
 		if mediaType, ok = canonicalMediaType(stored); !ok {
 			mediaType = defaultMediaType
 		}
-		filename = path.Base(key)
+		// Go writes a non-ASCII filename only as RFC 2231 filename*, which
+		// python-multipart drops, so vLLM's FastAPI server would read the
+		// part as a text field and reject the request: keep it ASCII.
+		filename = strings.Map(func(r rune) rune {
+			if r < 0x20 || r > 0x7e {
+				return '_'
+			}
+			return r
+		}, path.Base(key))
 	case strings.HasPrefix(ref, "data:"):
 		encoded, dataType, err := p.parseDataURL(ref)
 		if err != nil {
@@ -103,7 +124,7 @@ func (p *Plugin) transformAudio(ctx context.Context, payload []byte) ([]byte, st
 	}
 
 	var buf bytes.Buffer
-	buf.Grow(bodyCapacity(size, p.maxFileBytes, len(payload)-len(raw), len(fields)))
+	buf.Grow(bodyCapacity(size, p.maxFileBytes, len(payload)-len(fileJSON), len(fields)))
 	w := multipart.NewWriter(&buf)
 	// Both header values are built by mime.FormatMediaType, which quotes or
 	// RFC 2231-encodes anything unsafe, so request data cannot inject headers.
@@ -175,7 +196,12 @@ func (p *Plugin) parseDataURL(ref string) (string, string, error) {
 // canonicalMediaType parses a media type and re-serializes it, so only a
 // well-formed value (no CR/LF or other header syntax) reaches the part's
 // Content-Type. An empty input yields defaultMediaType; ok is false when the
-// input does not parse.
+// input does not parse. For example:
+//
+//	"audio/WAV; Charset=UTF-8"    → "audio/wav; charset=UTF-8", true
+//	""                            → "application/octet-stream", true
+//	"audio/wav\r\nX-Injected: yes" → "", false (would add a header)
+//	"not a media type"            → "", false
 func canonicalMediaType(s string) (string, bool) {
 	if s == "" {
 		return defaultMediaType, true

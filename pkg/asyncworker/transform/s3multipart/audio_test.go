@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,7 +68,7 @@ func TestTransform_AudioFromS3(t *testing.T) {
 		"prompt": null
 	}`)
 
-	for _, endpoint := range []string{transcriptionsURL, "http://gw/v1/audio/translations"} {
+	for _, endpoint := range []string{transcriptionsURL, "http://gw/v1/audio/translations", transcriptionsURL + "?api-version=1"} {
 		body, contentType, handled, err := p.TransformContext(context.Background(), payload, nil, endpoint)
 		if err != nil || !handled {
 			t.Fatalf("%s: handled %v err %v, want true/nil", endpoint, handled, err)
@@ -79,6 +81,10 @@ func TestTransform_AudioFromS3(t *testing.T) {
 		}
 		if file.filename != "42.wav" || file.contentType != "audio/wav" {
 			t.Errorf("file part filename %q type %q, want 42.wav audio/wav", file.filename, file.contentType)
+		}
+		// Part.FileName() applies filepath.Base, so check the header as sent.
+		if cd := file.header.Get("Content-Disposition"); cd != `form-data; filename=42.wav; name=file` {
+			t.Errorf("file part Content-Disposition = %q, want only the key's base name", cd)
 		}
 		want := map[string][]string{
 			"model":                     {"openai/whisper-large-v3"},
@@ -157,11 +163,12 @@ func TestTransform_AudioDataURLDecodesLikeOneDecode(t *testing.T) {
 
 func TestTransform_AudioRejectsBadInput(t *testing.T) {
 	store := newFakeS3(t, map[string]object{
-		"/audio/big.wav":         {body: bytes.Repeat([]byte("x"), 64)},
-		"/audio/big-chunked.wav": {body: bytes.Repeat([]byte("x"), 64), chunked: true},
+		// One byte over the 32-byte limit.
+		"/audio/big.wav":         {body: bytes.Repeat([]byte("x"), 33)},
+		"/audio/big-chunked.wav": {body: bytes.Repeat([]byte("x"), 33), chunked: true},
 		// Declares more than the limit, then sends less: only the declared
 		// length shows the object is too big, before the body is read.
-		"/audio/big-declared.wav": {body: []byte("x"), declaredLength: 64},
+		"/audio/big-declared.wav": {body: []byte("x"), declaredLength: 33},
 	})
 	p := newTestPlugin(t, store.URL, 32)
 	tests := map[string]string{
@@ -198,6 +205,46 @@ func TestTransform_AudioRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestTransform_AudioAtTheSizeLimit(t *testing.T) {
+	limit := bytes.Repeat([]byte("x"), 32)
+	store := newFakeS3(t, map[string]object{
+		"/audio/max.wav":         {body: limit},
+		"/audio/max-chunked.wav": {body: limit, chunked: true},
+	})
+	p := newTestPlugin(t, store.URL, 32)
+	for _, file := range []string{"s3://audio/max.wav", "s3://audio/max-chunked.wav", "data:audio/wav;base64," + base64.StdEncoding.EncodeToString(limit)} {
+		payload, _ := json.Marshal(map[string]string{"file": file})
+		body, contentType, handled, err := p.TransformContext(context.Background(), payload, nil, transcriptionsURL)
+		if err != nil || !handled {
+			t.Fatalf("%.30s: handled %v err %v, want a file of exactly the limit accepted", file, handled, err)
+		}
+		if got := parseParts(t, contentType, body)["file"]; got == nil || got.values[0] != string(limit) {
+			t.Errorf("%.30s: file part = %+v, want the 32 bytes", file, got)
+		}
+	}
+}
+
+// TestTransform_AudioFilenameIsASCII checks that a non-ASCII object name is
+// sent as a plain ASCII filename: Go would otherwise write only RFC 2231
+// filename*, which python-multipart ignores, and vLLM would read the part as
+// a text field instead of an upload.
+func TestTransform_AudioFilenameIsASCII(t *testing.T) {
+	store := newFakeS3(t, map[string]object{
+		"/audio/録音.wav": {body: []byte("a")},
+		"/audio/é.wav":  {body: []byte("a")},
+	})
+	p := newTestPlugin(t, store.URL, 0)
+	for key, want := range map[string]string{"録音.wav": "__.wav", "é.wav": "_.wav"} {
+		body, contentType, handled, err := p.TransformContext(context.Background(), []byte(`{"file":"s3://audio/`+key+`"}`), nil, transcriptionsURL)
+		if err != nil || !handled {
+			t.Fatalf("%s: handled %v err %v, want true/nil", key, handled, err)
+		}
+		if cd := parseParts(t, contentType, body)["file"].header.Get("Content-Disposition"); cd != "form-data; filename="+want+"; name=file" {
+			t.Errorf("%s: Content-Disposition = %q, want a plain filename=%s", key, cd, want)
+		}
+	}
+}
+
 // TestTransform_AudioHeadersCannotBeInjected checks that object names and stored
 // metadata, which the request does not control the format of, cannot add
 // headers to the file part.
@@ -222,14 +269,15 @@ func TestTransform_AudioHeadersCannotBeInjected(t *testing.T) {
 	if file.contentType != defaultMediaType {
 		t.Errorf("file part Content-Type = %q, want %q for unusable stored metadata", file.contentType, defaultMediaType)
 	}
-	if file.filename != "a\r\nX-Injected: yes.wav" {
-		t.Errorf("filename = %q, want the key's base name round-tripped intact", file.filename)
+	if file.filename != "a__X-Injected: yes.wav" {
+		t.Errorf("filename = %q, want the key's base name with CR/LF replaced", file.filename)
 	}
 }
 
 func TestTransform_AudioStorageErrors(t *testing.T) {
 	store := newFakeS3(t, map[string]object{
 		"/audio/denied.wav":    {status: http.StatusForbidden, code: "AccessDenied"},
+		"/audio/badkey.wav":    {status: http.StatusUnauthorized, code: "InvalidAccessKeyId"},
 		"/audio/throttled.wav": {status: http.StatusTooManyRequests, code: "SlowDown"},
 		"/audio/down.wav":      {status: http.StatusServiceUnavailable, code: "ServiceUnavailable"},
 		// S3 reports an idle client socket as a 400 the SDK itself retries.
@@ -245,6 +293,7 @@ func TestTransform_AudioStorageErrors(t *testing.T) {
 	}{
 		"missing.wav":   {asyncapi.ErrCategoryInvalidReq, ": NoSuchKey"},
 		"denied.wav":    {asyncapi.ErrCategoryAuth, ": AccessDenied"},
+		"badkey.wav":    {asyncapi.ErrCategoryAuth, ": InvalidAccessKeyId"},
 		"throttled.wav": {asyncapi.ErrCategoryRateLimit, ": SlowDown"},
 		"down.wav":      {asyncapi.ErrCategoryServer, ": ServiceUnavailable"},
 		"timeout.wav":   {asyncapi.ErrCategoryServer, ": RequestTimeout"},
@@ -256,8 +305,15 @@ func TestTransform_AudioStorageErrors(t *testing.T) {
 			_, _, _, err := p.TransformContext(context.Background(), payload, nil, transcriptionsURL)
 			assertCategory(t, err, want.category)
 			var cerr *asyncapi.ClientError
-			if errors.As(err, &cerr) && cerr.Message != "read s3://audio/"+key+want.code {
+			if !errors.As(err, &cerr) {
+				t.Fatalf("err = %v, want a ClientError", err)
+			}
+			if cerr.Message != "read s3://audio/"+key+want.code {
 				t.Errorf("message = %q, want %q", cerr.Message, "read s3://audio/"+key+want.code)
+			}
+			// The SDK error stays available to errors.Is/As, just not in the message.
+			if cerr.RawError == nil {
+				t.Error("RawError = nil, want the storage error kept")
 			}
 		})
 	}
@@ -279,9 +335,8 @@ func TestTransform_AudioStorageErrors(t *testing.T) {
 		assertCategory(t, err, asyncapi.ErrCategoryServer)
 	})
 
-	// Missing credentials fail the request instead of retrying it until its
-	// deadline, as on a non-AWS cluster whose key Secret is missing.
-	noCredentials := func(t *testing.T, env map[string]string) error {
+	// A plugin whose default chain finds no credentials.
+	noCredentialsPlugin := func(t *testing.T, env map[string]string) *Plugin {
 		t.Helper()
 		isolateAWSEnv(t)
 		t.Setenv("AWS_ACCESS_KEY_ID", "")
@@ -294,9 +349,16 @@ func TestTransform_AudioStorageErrors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		return p
+	}
+	// Missing credentials fail the request instead of retrying it until its
+	// deadline, as on a non-AWS cluster whose key Secret is missing.
+	noCredentials := func(t *testing.T, env map[string]string) error {
+		t.Helper()
+		p := noCredentialsPlugin(t, env)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		_, _, _, err = p.TransformContext(ctx, []byte(`{"file":"s3://audio/down.wav"}`), nil, transcriptionsURL)
+		_, _, _, err := p.TransformContext(ctx, []byte(`{"file":"s3://audio/down.wav"}`), nil, transcriptionsURL)
 		var cerr *asyncapi.ClientError
 		if !errors.As(err, &cerr) || cerr.Message != "get credentials for s3://audio/down.wav" {
 			t.Errorf("err = %v, want a credentials error for s3://audio/down.wav", err)
@@ -320,6 +382,18 @@ func TestTransform_AudioStorageErrors(t *testing.T) {
 			assertCategory(t, noCredentials(t, env), asyncapi.ErrCategoryAuth)
 		})
 	}
+	// Once the request context is done the worker reports shutdown or the
+	// deadline from its own context, so the failure must carry no category.
+	t.Run("no credentials, request context done", func(t *testing.T) {
+		p := noCredentialsPlugin(t, map[string]string{"AWS_EC2_METADATA_DISABLED": "true"})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, _, err := p.TransformContext(ctx, []byte(`{"file":"s3://audio/down.wav"}`), nil, transcriptionsURL)
+		var cerr *asyncapi.ClientError
+		if err == nil || errors.As(err, &cerr) {
+			t.Errorf("err = %v, want an error without a category", err)
+		}
+	})
 }
 
 func TestTransform_AudioHonorsContext(t *testing.T) {
@@ -337,5 +411,47 @@ func TestTransform_AudioHonorsContext(t *testing.T) {
 	var cerr *asyncapi.ClientError
 	if errors.As(err, &cerr) {
 		t.Errorf("err carries category %s, want a bare context error", cerr.ErrorCategory)
+	}
+}
+
+// closeCounter is an S3 HTTP client that counts response bodies opened and
+// closed, so a test can tell when an object's connection is left open.
+type closeCounter struct{ opened, closed atomic.Int32 }
+
+func (c *closeCounter) Do(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultClient.Do(r)
+	if err == nil {
+		c.opened.Add(1)
+		resp.Body = countedBody{resp.Body, c}
+	}
+	return resp, err
+}
+
+type countedBody struct {
+	io.ReadCloser
+	c *closeCounter
+}
+
+func (b countedBody) Close() error {
+	b.c.closed.Add(1)
+	return b.ReadCloser.Close()
+}
+
+func TestTransform_AudioClosesTheObjectBody(t *testing.T) {
+	store := newFakeS3(t, map[string]object{
+		"/audio/ok.wav":           {body: []byte("audio")},
+		"/audio/big-chunked.wav":  {body: bytes.Repeat([]byte("x"), 33), chunked: true},
+		"/audio/big-declared.wav": {body: []byte("x"), declaredLength: 33},
+		"/audio/truncated.wav":    {body: []byte("short"), declaredLength: 30},
+	})
+	for _, key := range []string{"ok.wav", "big-chunked.wav", "big-declared.wav", "truncated.wav"} {
+		t.Run(key, func(t *testing.T) {
+			c := &closeCounter{}
+			p := newTestPlugin(t, store.URL, 32, func(o *s3.Options) { o.HTTPClient = c })
+			_, _, _, _ = p.TransformContext(context.Background(), []byte(`{"file":"s3://audio/`+key+`"}`), nil, transcriptionsURL)
+			if opened, closed := c.opened.Load(), c.closed.Load(); opened != 1 || closed != opened {
+				t.Errorf("response bodies opened %d, closed %d, want 1 and 1", opened, closed)
+			}
+		})
 	}
 }
