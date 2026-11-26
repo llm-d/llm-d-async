@@ -344,9 +344,8 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 		return errors.New("marshaled request is missing the enqueue_seq placeholder")
 	}
 
-	// Clear any stale cancellation marker for this request ID before enqueue.
-	// This prevents a previously cancelled/completed request ID from poisoning
-	// a later submission that legitimately reuses the same ID.
+	// The standalone script clears any stale cancellation marker for this
+	// request ID before enqueue; enqueueCluster leaves it in place.
 	targetQueue := ir.RequestQueueName
 	seqExpireAt := time.Unix(deadline, 0).Add(enqueueSeqGrace).Unix()
 	payloadTTL := activeTTL + payloadTTLGrace
@@ -385,13 +384,17 @@ func (p *RedisSortedSetProducer) SubmitRequest(ctx context.Context, req api.Requ
 }
 
 // enqueueCluster is SubmitRequest's write path when the keys cannot share a
-// slot. The markers and the payload are written first with single-key
-// commands, then the sequence stamp and ZADD run in one script on the queue's
-// slot. If the script fails, the marker and payload merely outlive a request
-// that never enqueued, and expire with the deadline.
+// slot. The active-token marker and the payload are written first with
+// single-key commands, then the sequence stamp and ZADD run in one script on
+// the queue's slot. If the script fails, the marker and payload merely outlive
+// a request that never enqueued, and expire with the deadline.
+//
+// A stale cancellation marker is not deleted: it holds an earlier
+// generation's token, which the dispatcher does not match against this
+// request. A delete here would be retried with the pipeline and could remove
+// a cancel issued between the attempts.
 func (p *RedisSortedSetProducer) enqueueCluster(ctx context.Context, reqID, token, queue string, deadline int64, activeTTL time.Duration, seqExpireAt int64, jsonBefore, jsonAfter []byte, payloadRef string, payload []byte, payloadTTL time.Duration) error {
 	pipe := p.client.Pipeline()
-	pipe.Del(ctx, api.RequestCancellationKey(reqID))
 	pipe.Set(ctx, api.RequestActiveTokenKey(reqID), token, activeTTL)
 	if payloadRef != "" {
 		pipe.Set(ctx, payloadRef, payload, payloadTTL)
