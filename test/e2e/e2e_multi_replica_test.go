@@ -26,6 +26,9 @@ const (
 	multiReplicaLeaseTTL   = 6 * time.Second
 	multiReplicaReclaim    = 500 * time.Millisecond
 	reclaimScheduleBound   = 5 * time.Second
+	// Keep observing after a graceful lifecycle disruption long enough for a
+	// stale claim to expire, be reclaimed, be scheduled, and reach the simulator.
+	lifecycleDuplicateObservation = multiReplicaLeaseTTL + multiReplicaReclaim + reclaimScheduleBound + 2*time.Second
 )
 
 var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, func() {
@@ -204,6 +207,7 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 			"the first old pod must begin terminating before the queued batch completes")
 
 		waitForDeploymentRollout(multiReplicaDeployment)
+		waitForPodsDeleted(initialPods)
 		currentPods := asyncPodNames(multiReplicaInstance)
 		gomega.Expect(currentPods).To(gomega.HaveLen(3))
 		for _, initialPod := range initialPods {
@@ -212,6 +216,7 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 		}
 		assertExactTerminalResults(ctx, "multi-rollout-", requests, 90*time.Second)
 		assertSimulatorDispatchesExactlyOnce("multi-rollout-", requests)
+		assertNoLateLifecycleDuplicates(ctx, "multi-rollout-", requests)
 	})
 
 	ginkgo.It("honors a PDB while draining a worker under load", func() {
@@ -254,13 +259,14 @@ var _ = ginkgo.Describe("Multi-replica Redis Sorted Set E2E", ginkgo.Ordered, fu
 		}, 5*time.Second, 250*time.Millisecond).Should(gomega.BeNumerically(">=", 2),
 			"the PDB must preserve two ready replicas during voluntary disruption")
 
-		assertExactTerminalResults(ctx, "multi-drain-", requests, 90*time.Second)
 		gomega.Eventually(drain).WithTimeout(120 * time.Second).Should(gexec.Exit(0))
 		gomega.Eventually(func() int {
 			return readyReplicaCount(multiReplicaDeployment)
 		}, 90*time.Second, time.Second).Should(gomega.Equal(3))
 		gomega.Expect(multiReplicaPodsOnNode(targetNode)).To(gomega.BeEmpty())
+		assertExactTerminalResults(ctx, "multi-drain-", requests, 90*time.Second)
 		assertSimulatorDispatchesExactlyOnce("multi-drain-", requests)
+		assertNoLateLifecycleDuplicates(ctx, "multi-drain-", requests)
 	})
 })
 
@@ -337,6 +343,23 @@ func waitForDeploymentRollout(deployment string) {
 	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	gomega.EventuallyWithOffset(1, session).WithTimeout(150 * time.Second).Should(gexec.Exit(0))
+}
+
+func waitForPodsDeleted(names []string) {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
+	gomega.EventuallyWithOffset(1, func() []string {
+		remaining := make([]string, 0, len(wanted))
+		for _, pod := range multiReplicaPodStates() {
+			if _, ok := wanted[pod.Name]; ok {
+				remaining = append(remaining, pod.Name)
+			}
+		}
+		return remaining
+	}, 150*time.Second, 250*time.Millisecond).Should(gomega.BeEmpty(),
+		"every original pod must exit before the late-duplicate observation window")
 }
 
 func applyMultiReplicaPDB(minAvailable int) {
@@ -682,32 +705,43 @@ func makeTrackedRequestMessage(id string, deadlineOffset time.Duration) api.Requ
 }
 
 func assertSimulatorDispatchesExactlyOnce(prefix string, count int) {
-	pattern := regexp.MustCompile(regexp.QuoteMeta(prefix) + `[0-9]{2}`)
 	gomega.EventuallyWithOffset(1, func() bool {
-		cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
-			"-n", nsName, "logs", "deployment/llm-sim")
-		out, err := cmd.Output()
-		if err != nil {
-			return false
-		}
-		dispatches := make(map[string]int, count)
-		for _, line := range strings.Split(string(out), "\n") {
-			for _, id := range pattern.FindAllString(line, -1) {
-				dispatches[id]++
-			}
-		}
-		if len(dispatches) != count {
-			return false
-		}
-		for i := range count {
-			id := fmt.Sprintf("%s%02d", prefix, i)
-			if dispatches[id] != 1 {
-				return false
-			}
-		}
-		return true
+		return simulatorDispatchesExactlyOnce(prefix, count)
 	}, 30*time.Second, time.Second).Should(gomega.BeTrue(),
 		"the simulator must observe exactly one dispatch for every request ID")
+}
+
+func assertNoLateLifecycleDuplicates(ctx context.Context, prefix string, count int) {
+	gomega.ConsistentlyWithOffset(1, func() bool {
+		return getResultCount(ctx, rdb, multiReplicaResultQueue) == 0 &&
+			simulatorDispatchesExactlyOnce(prefix, count)
+	}, lifecycleDuplicateObservation, time.Second).Should(gomega.BeTrue(),
+		"no additional terminal result or simulator dispatch may arrive after lifecycle completion")
+}
+
+func simulatorDispatchesExactlyOnce(prefix string, count int) bool {
+	cmd := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "logs", "deployment/llm-sim")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	pattern := regexp.MustCompile(regexp.QuoteMeta(prefix) + `[0-9]{2}`)
+	dispatches := make(map[string]int, count)
+	for _, line := range strings.Split(string(out), "\n") {
+		for _, id := range pattern.FindAllString(line, -1) {
+			dispatches[id]++
+		}
+	}
+	if len(dispatches) != count {
+		return false
+	}
+	for i := range count {
+		if dispatches[fmt.Sprintf("%s%02d", prefix, i)] != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 func clearMultiReplicaState(ctx context.Context) {
