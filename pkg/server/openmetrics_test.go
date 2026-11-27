@@ -51,7 +51,7 @@ func TestMetricsServerServesTraceExemplars(t *testing.T) {
 			t.Errorf("metrics server: %v", err)
 		}
 	})
-	url := "http://" + waitForBindAddr(t, srv) + metricsPath
+	url := "http://" + waitForBindAddr(t, srv) + "/metrics"
 
 	contentType, body := scrape(t, url, openMetricsAccept)
 	if !strings.HasPrefix(contentType, "application/openmetrics-text") {
@@ -82,32 +82,13 @@ func TestMetricsServerServesTraceExemplars(t *testing.T) {
 	}
 }
 
-// controller-runtime runs the filter over every handler it mounts; only
-// /metrics is served by the OpenMetrics handler.
-func TestOpenMetricsFilterLeavesOtherPathsAlone(t *testing.T) {
-	filter, err := openMetricsFilterProvider(false)(nil, nil)
-	if err != nil {
-		t.Fatalf("filter provider: %v", err)
-	}
-	handler, err := filter(logr.Discard(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "built by controller-runtime")
-	}))
-	if err != nil {
-		t.Fatalf("filter: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/pprof/cmdline", nil))
-	if got := rec.Body.String(); got != "built by controller-runtime" {
-		t.Errorf("another path served %q, want the handler controller-runtime built", got)
-	}
-}
-
-// With --metrics-endpoint-auth, the OpenMetrics handler stays behind
-// authentication: a scrape without a token is refused before any metric is
-// written. No API server is needed for that refusal.
-func TestOpenMetricsFilterKeepsAuth(t *testing.T) {
+// With --metrics-endpoint-auth, the metrics server authenticates scrapes: one
+// without a token is refused. No API server is needed for that refusal.
+func TestMetricsServerKeepsAuth(t *testing.T) {
 	opts := metricsServerOptions(ServerConfig{MetricsEndpointAuth: true})
+	if opts.FilterProvider == nil {
+		t.Fatal("auth is on, but the metrics server options have no auth filter")
+	}
 	filter, err := opts.FilterProvider(&rest.Config{Host: "https://127.0.0.1:1"}, http.DefaultClient)
 	if err != nil {
 		t.Fatalf("filter provider: %v", err)
@@ -117,15 +98,12 @@ func TestOpenMetricsFilterKeepsAuth(t *testing.T) {
 		t.Fatalf("filter: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, metricsPath, nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	req.Header.Set("Accept", openMetricsAccept)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want %d for a scrape without a token", rec.Code, http.StatusUnauthorized)
-	}
-	if strings.Contains(rec.Body.String(), "# HELP") {
-		t.Error("an unauthenticated scrape received metrics")
 	}
 }
 

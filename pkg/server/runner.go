@@ -25,9 +25,11 @@ import (
 	"github.com/llm-d/llm-d-async/pkg/redis"
 	"github.com/llm-d/llm-d-async/pkg/sqlflow"
 	"github.com/llm-d/llm-d-async/pkg/version"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -370,10 +372,16 @@ func startMetricsServer(ctx context.Context, serverCfg ServerConfig) error {
 // metricsServerOptions configures the metrics server: serverCfg's port, and
 // /metrics served with OpenMetrics, behind auth when it is on.
 func metricsServerOptions(serverCfg ServerConfig) metricsserver.Options {
-	return metricsserver.Options{
-		BindAddress:    fmt.Sprintf(":%d", serverCfg.MetricsPort),
-		FilterProvider: openMetricsFilterProvider(serverCfg.MetricsEndpointAuth),
+	opts := metricsserver.Options{
+		BindAddress: fmt.Sprintf(":%d", serverCfg.MetricsPort),
+		HandlerOpts: []func(*promhttp.HandlerOpts){
+			func(o *promhttp.HandlerOpts) { o.EnableOpenMetrics = true },
+		},
 	}
+	if serverCfg.MetricsEndpointAuth {
+		opts.FilterProvider = filters.WithAuthenticationAndAuthorization
+	}
+	return opts
 }
 
 func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int, worker WorkerConfig) (*asyncworker.HTTPInferenceClient, error) {
