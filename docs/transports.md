@@ -46,6 +46,8 @@ Queue hot reload is enabled with `--transport redis-sortedset --transport-config
 
 The `sql` transport stores requests, results, and partition leases in tables it creates on startup (`async_requests`, `async_results`, `async_partitions`, `async_dispatchers`, and the `async_quota_*` tables behind `sql-quota`). Each request hashes by ID into one of 64 partitions per queue, and processors sharing a database split the partitions evenly between them, so they never contend for the same requests. Each processor dispatches earliest-deadline-first from its own partitions. When a processor joins or stops, the partitions it gives up stop taking new work and move once their in-flight requests finish, so a rolling restart redelivers nothing. If a processor dies, its partitions move after `lease_ttl_seconds` and the new owner redelivers whatever it had in flight. A processor that is alive but not dispatching (its gate closed, its workers stuck) keeps its partitions, so requests hashed to them wait even when peers are idle. A request its queue gate refuses is held back past the next poll before it is offered again, so refused requests at the head of the queue do not block the ones behind them. `url` accepts `postgres://` (via pgx). Producers use the `producer-sql` module against the same database and can submit a batch of requests in one transaction with `SubmitRequests`.
 
+Producers read results one of two ways. `GetResult`/`GetResults` delete the results they return, so a consumer that fails before recording one loses it. `ReceiveResult`/`ReceiveResults` instead lease results to the caller and leave them in `async_results` until `AckResult`; a delivery that is not acknowledged within `ResultLeaseTTL` (default five minutes) is delivered again, to the same or another producer, and the late acknowledgement of the original receiver returns `ErrResultDeliveryOwnershipLost`. Leases run on the database clock. Delivery is at least once, so consumers must deduplicate by `(Result.ID, Result.Routing.RequestToken)` before producing output. Unlike `redis-sortedset`, the two read paths may share a route: `GetResults` skips results held under a live lease, and takes them once the lease lapses. See [durable result delivery](guides/durable-result-delivery.md).
+
 **`gcp-pubsub`:**
 ```json
 {
@@ -198,8 +200,19 @@ Results are written to the result queue/topic with the following structure:
 | `id` | string | The originating request's `id` |
 | `status_code` | int | HTTP status code of the inference response. Present (> 0) whenever an HTTP response was received — including error statuses. |
 | `payload` | string | The response body. On non-HTTP failures it carries a JSON `{"error": "<message>"}` object. |
-| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE` |
+| `payload_encoding` | string | Absent when `payload` is the body itself. `base64` when the body was not valid UTF-8 (audio, images) and `payload` holds its standard base64. Go consumers can call `ResultMessage.Body()`. |
+| `content_type` | string | The inference response's `Content-Type` header, when it had one. |
+| `headers` | object | Inference response headers matching `--result-header-prefixes` (chart: `ap.resultHeaderPrefixes`), keyed by lowercase name. Repeated headers are joined with `, `. Absent when none match. |
+| `error_code` | string | Set for non-HTTP failures (when `status_code` is absent): `DEADLINE_EXCEEDED`, `CANCELLED`, `GATE_DROPPED`, `GATE_ERROR`, `INFERENCE_ERROR`, `INVALID_REQUEST`, `PAYLOAD_UNAVAILABLE`. A response larger than `--max-response-bytes` (chart: `ap.maxResponseBytes`) is not retried and yields `INFERENCE_ERROR`. |
 | `error_message` | string | Human-readable description accompanying `error_code` |
+
+`--max-response-bytes` limits the response body before encoding. A base64-encoded body is about 4/3 of that size on the result transport, so size the limit to what the transport can deliver:
+
+- `redis-pubsub`: Redis disconnects a subscriber whose output buffer passes 32 MB, or stays above 8 MB for 60 seconds (the default `client-output-buffer-limit pubsub 32mb 8mb 60`), and the result is lost. Keep binary results under about 6 MB (`--max-response-bytes=6000000`), or raise the Redis limit.
+- `gcp-pubsub`: a message is at most 10 MB, so keep binary results under about 7 MB (`--max-response-bytes=7000000`).
+- `redis-sortedset` (a Redis value is at most 512 MB) and `sql` (a `TEXT` value is at most 1 GB) store results without a lower limit.
+
+[`examples/speech`](../examples/speech/main.go) submits a `/v1/audio/speech` request and writes the audio from its result to a file.
 
 ### Internal Wire Format
 
@@ -219,6 +232,12 @@ The `url` field in the transport configuration (see [Transport Configuration](#t
 
 > **Note:** The `url`/`redis.*` naming is retained because it refers to the wire protocol, not a specific product.
 
+### Licensing
+
+llm-d-async does not include or distribute a Redis or Valkey server. The container image holds only the processor binary, and the Helm chart connects to a server you provide. The client library, [go-redis](https://github.com/redis/go-redis), is BSD-2-Clause.
+
+The server's license is that of the server you run. Valkey is BSD-3-Clause. Redis is BSD-3-Clause up to 7.2, RSALv2 or SSPLv1 for 7.4 to 7.8, and RSALv2, SSPLv1 or AGPLv3 from 8.0 (see [Redis licenses](https://redis.io/legal/licenses/)). The e2e tests and `deploy/install.sh` use Valkey.
+
 ### Redis Cluster and Sentinel
 
 The Redis transports connect to a standalone server by default. Set `mode` in the transport config to use a different topology; the deprecated `--redis.*` flags are standalone only.
@@ -233,11 +252,11 @@ The Redis transports connect to a standalone server by default. Set `mode` in th
 
 Producers must use the same topology: `producer.RedisSortedSetConfig` has matching `RedisMode`, `RedisAddrs` and `RedisMasterName` fields, and an injected cluster client is detected automatically.
 
-In cluster mode every multi-key Lua script must stay within one hash slot. The shared keys keep their names: request queues, the retry queue, result lists and the per-request `request-active:<id>` / `request-cancel:<id>` markers and `request-payload:<id>:<token>` keys are exactly what they are in standalone mode. The private bookkeeping keys are hash-tagged onto the shared key they belong to, so a queue named `request-sortedset` keeps its claims under `{request-sortedset}:claimed` rather than `request-sortedset:claimed` (a tagged key hashes like the bare key, so the pair shares a slot). Standalone and sentinel deployments keep today's key names, so switching an existing deployment to cluster mode is a cutover: drain the queues first, because in-flight claims under the old names are not migrated.
+In cluster mode every multi-key Lua script must stay within one hash slot. The shared keys keep their names: request queues, the retry queue, result lists and the per-request `request-active:<id>` / `request-cancel:<id>` markers and `request-payload:<id>:<token>` keys are exactly what they are in standalone mode. The private bookkeeping keys are hash-tagged onto the shared key they belong to, so a queue named `request-sortedset` keeps its claims under `{request-sortedset}:claimed` rather than `request-sortedset:claimed` (a tagged key hashes like the bare key, so the pair shares a slot). The producer's per-queue `request-seq:<queue>:<deadline>` counters, which expire an hour after their deadline, and its `request-enqueued:<queue>:<token>` enqueue guards, one per submitted request for 2 minutes, follow the same rule. Standalone and sentinel deployments keep today's key names, so switching an existing deployment to cluster mode is a cutover: drain the queues first, because in-flight claims under the old names are not migrated.
 
 A result list usually lands in a different slot than its request queue. Publishing a result then takes two single-slot steps instead of one atomic script: the dispatcher renews its lease, pushes the record, then drops the claim. A crash between the push and the drop leaves the claim to expire and be redelivered, so a consumer can see that result twice. This is within the transport's documented at-least-once contract, and [durable result delivery](guides/durable-result-delivery.md) de-duplicates it by `(ID, RequestToken)`; name the result list with the queue's hash tag (for example `{request-sortedset}:results`) if you want the atomic path back. A payload stored apart with `WithPayloadKeys` lives in its own slot too, so in cluster mode it is deleted with a separate command after the ack, and the producer writes it before the enqueue; a payload key that outlives a crash expires on its own.
 
-The `redis`, `redis-quota` and `redis-leased-rate` dispatch gates take a single `address` and open a standalone connection to it. Against a cluster, point them at a node that owns the slot of their key (or front the cluster with a proxy); a key on another node answers `MOVED` and the gate fails closed.
+The `redis`, `redis-quota` and `redis-leased-rate` gates reuse this transport's client, including its credentials and database, when their `address` matches (see [dispatch gates](dispatch-gates.md)); otherwise they open a standalone connection. Against a cluster, point standalone gates at a node that owns the key's slot or front them with a proxy, because a `MOVED` response fails the gate closed.
 
 ## Implementations
 
@@ -301,7 +320,7 @@ This transport does not support per-queue dispatch gates (see [Queue and Topic E
 
 ### SQL (Postgres)
 
-> **Experimental:** opt in with `--transport sql`. Its tables and config may change between releases without a migration or deprecation period. The database records the schema version that created it, and a processor or producer from a build with a different schema refuses to start against it; drop the `async_*` tables before upgrading to such a release.
+> **Experimental:** opt in with `--transport sql`. Its config may change between releases without a deprecation period. The schema is versioned: the processor applies pending migrations at startup, and a producer refuses to start against a database that is missing the schema or behind it. See [SQL Transport Schema Migrations](sql-migrations.md).
 
 A persisted implementation on Postgres, selected with `--transport sql`. It keeps the `redis-sortedset` semantics (earliest-deadline-first dispatch, fenced claims with lease-based redelivery, per-queue gates, exact backlog and deadline-proximity metrics) without a Redis dependency: several processors share one database. Producers submit with the `producer-sql` module against the same database. The `redis` and `redis-leased-rate` gate types still need Redis; use `sql-quota` in place of `redis-quota`. Every other gate type works unchanged.
 

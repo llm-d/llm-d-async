@@ -1,6 +1,6 @@
 module github.com/llm-d/llm-d-async/test/e2e/oldproducer
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/llm-d/llm-d-async/api v0.10.0

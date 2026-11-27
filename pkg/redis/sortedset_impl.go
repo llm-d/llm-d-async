@@ -20,7 +20,7 @@ import (
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 // SortedSetQueueConfig defines a single queue entry in the sorted-set transport config.
@@ -271,10 +271,19 @@ func (r *RedisSortedSetFlow) newRequestChannel(cfg SortedSetQueueConfig) (reques
 	}, nil
 }
 
+// RedisClientRegistrar is implemented by gate factories that let redis gates
+// reuse the sorted-set transport's authenticated client.
+type RedisClientRegistrar interface {
+	RegisterRedisClient(client redis.UniversalClient, options *redis.UniversalOptions)
+}
+
 func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoolConfig, gateFactory pipeline.GateFactory) (*RedisSortedSetFlow, error) {
-	rdb, err := newUniversalClient(cfg.connection())
+	rdb, redisOptions, err := newUniversalClient(cfg.connection())
 	if err != nil {
 		return nil, fmt.Errorf("invalid Redis connection config: %w", err)
+	}
+	if registrar, ok := gateFactory.(RedisClientRegistrar); ok {
+		registrar.RegisterRedisClient(rdb, redisOptions)
 	}
 	r := &RedisSortedSetFlow{
 		rdb:                    rdb,
@@ -536,6 +545,9 @@ func (r *RedisSortedSetFlow) ReconfigureQueues(queues []SortedSetQueueConfig, be
 		if old.cancel != nil {
 			old.cancel()
 		}
+		if r.gateFactory != nil && old.config.GateType != "" {
+			metrics.RetireGateMetrics(old.data.gate)
+		}
 	}
 	for _, queueCfg := range normalized {
 		old, exists := r.queues[queueCfg.ID]
@@ -591,6 +603,7 @@ func (r *RedisSortedSetFlow) Shutdown() {
 		r.hbCancel()
 	}
 	r.hbWg.Wait()
+	_ = r.rdb.Close()
 }
 
 func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {

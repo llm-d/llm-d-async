@@ -518,7 +518,7 @@ func proxiedStore(t *testing.T) (*replyDropper, *sqlqueue.Store) {
 	query.Set("default_query_exec_mode", "exec")
 	u.RawQuery = query.Encode()
 	ctx := context.Background()
-	store, err := sqlqueue.Open(ctx, u.String())
+	store, err := sqlqueue.Open(ctx, u.String(), sqlqueue.WithMigrate())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	require.NoError(t, store.TruncateForTest(ctx))

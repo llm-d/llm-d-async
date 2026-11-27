@@ -9,6 +9,7 @@ import (
 
 	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/api"
 )
 
@@ -104,9 +105,7 @@ func TestProcessMessages_ResultRouting(t *testing.T) {
 				select {
 				case ir := <-ch:
 					got = ir
-					if val, ok := resultChannels.Load(ir.TransportCorrelationID); ok {
-						val.(chan bool) <- true
-					}
+					flow.deliveries.signal(logr.Discard(), ir.DeliveryToken, true)
 				case <-ctx.Done():
 				}
 			}()
@@ -149,12 +148,13 @@ func TestResultWorker_RoutesPerDestination(t *testing.T) {
 		{ID: "r-b", Routing: api.InternalRouting{TransportCorrelationID: "c-b", ResultQueueName: "team-b-results"}},
 		{ID: "r-a2", Routing: api.InternalRouting{TransportCorrelationID: "c-a2", ResultQueueName: "team-a-results"}},
 	}
-	signals := make(map[string]chan bool, len(results))
-	for _, r := range results {
-		sig := make(chan bool, 1)
-		signals[r.Routing.TransportCorrelationID] = sig
-		resultChannels.Store(r.Routing.TransportCorrelationID, sig)
-		t.Cleanup(func() { resultChannels.Delete(r.Routing.TransportCorrelationID) })
+	var deliveries deliveryRegistry
+	signals := make(map[string]<-chan bool, len(results))
+	for i := range results {
+		token, sig, closeDelivery := deliveries.open()
+		t.Cleanup(closeDelivery)
+		results[i].Routing.DeliveryToken = token
+		signals[results[i].Routing.TransportCorrelationID] = sig
 	}
 
 	workerCtx, cancel := context.WithCancel(ctx)
@@ -162,7 +162,7 @@ func TestResultWorker_RoutesPerDestination(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		resultWorker(workerCtx, client, "default-results", resultCh)
+		resultWorker(workerCtx, client, "default-results", resultCh, &deliveries)
 	}()
 
 	for _, r := range results {
@@ -209,23 +209,23 @@ func TestResultWorker_RoutesPerDestination(t *testing.T) {
 func TestResultWorker_NoDestinationNacks(t *testing.T) {
 	_, client, _ := newFakePubSubServer(t)
 
-	sig := make(chan bool, 1)
-	resultChannels.Store("c-none", sig)
-	t.Cleanup(func() { resultChannels.Delete("c-none") })
+	var deliveries deliveryRegistry
+	token, sig, closeDelivery := deliveries.open()
+	t.Cleanup(closeDelivery)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan api.ResultMessage)
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		resultWorker(ctx, client, "", resultCh)
+		resultWorker(ctx, client, "", resultCh, &deliveries)
 	}()
 	defer func() {
 		cancel()
 		<-stopped
 	}()
 
-	resultCh <- api.ResultMessage{ID: "r-none", Routing: api.InternalRouting{TransportCorrelationID: "c-none"}}
+	resultCh <- api.ResultMessage{ID: "r-none", Routing: api.InternalRouting{TransportCorrelationID: "c-none", DeliveryToken: token}}
 	select {
 	case ok := <-sig:
 		if ok {
@@ -242,23 +242,23 @@ func TestResultWorker_NoDestinationNacks(t *testing.T) {
 func TestResultWorker_PublishFailureNacks(t *testing.T) {
 	srv, client, _ := newFakePubSubServer(t)
 
-	sig := make(chan bool, 1)
-	resultChannels.Store("c-missing", sig)
-	t.Cleanup(func() { resultChannels.Delete("c-missing") })
+	var deliveries deliveryRegistry
+	token, sig, closeDelivery := deliveries.open()
+	t.Cleanup(closeDelivery)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan api.ResultMessage)
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		resultWorker(ctx, client, "", resultCh)
+		resultWorker(ctx, client, "", resultCh, &deliveries)
 	}()
 	defer func() {
 		cancel()
 		<-stopped
 	}()
 
-	resultCh <- api.ResultMessage{ID: "r-missing", Routing: api.InternalRouting{TransportCorrelationID: "c-missing", ResultQueueName: "no-such-topic"}}
+	resultCh <- api.ResultMessage{ID: "r-missing", Routing: api.InternalRouting{TransportCorrelationID: "c-missing", ResultQueueName: "no-such-topic", DeliveryToken: token}}
 	select {
 	case ok := <-sig:
 		if ok {

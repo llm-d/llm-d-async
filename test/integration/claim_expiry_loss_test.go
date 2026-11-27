@@ -179,6 +179,17 @@ func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 	// before starting Flow C so the original instance is fully inert.
 	flowA.StopConsuming()
 	flowA.Shutdown()
+	workerADone := make(chan struct{})
+	go func() { wgA.Wait(); close(workerADone) }()
+	go func() {
+		for {
+			select {
+			case <-flowA.RetryChannel():
+			case <-workerADone:
+				return
+			}
+		}
+	}()
 
 	// Replacement flow C: healthy IGW returning success immediately.
 	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

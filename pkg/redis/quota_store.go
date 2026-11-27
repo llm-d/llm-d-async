@@ -14,21 +14,45 @@ import (
 // after slotTTL without an acquire or release, which frees slots a crashed
 // dispatcher never returned.
 type QuotaStore struct {
-	rdb     *redis.Client
+	rdb     redis.UniversalClient
 	slotTTL time.Duration
 }
 
-func NewQuotaStore(rdb *redis.Client, slotTTL time.Duration) *QuotaStore {
+func NewQuotaStore(rdb redis.UniversalClient, slotTTL time.Duration) *QuotaStore {
 	return &QuotaStore{rdb: rdb, slotTTL: slotTTL}
+}
+
+// quotaCallTimeout bounds one script call, retries included. go-redis checks
+// the context before it hands an attempt a connection, so no retry starts
+// after this deadline.
+const quotaCallTimeout = 30 * time.Second
+
+// quotaCallGuardTTL outlasts the retries of one script call. The last attempt
+// starts within quotaCallTimeout of the first. The remaining 90s cover that
+// attempt's connection handshake and write, unless the Redis URL raises
+// read_timeout or write_timeout past them. It does not follow slotTTL or how
+// long a slot is held.
+const quotaCallGuardTTL = 2 * time.Minute
+
+// quotaCallGuardKey marks that the call holding token has changed the counter
+// at key. go-redis retries a command whose reply was lost, so a counter script
+// can run twice for one call; the guard keeps the retry from counting again.
+// The hash tag keeps it in the counter's slot on a cluster client.
+func quotaCallGuardKey(key, token string) string {
+	return fmt.Sprintf("quota-call:%s:%s", slotKey(key, true), token)
 }
 
 func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (func(), bool, error) {
 	// Use Lua script for atomic check and increment
 	script := `
+		if redis.call("EXISTS", KEYS[2]) == 1 then
+			return 1
+		end
 		local current = redis.call("GET", KEYS[1])
 		if current and tonumber(current) >= tonumber(ARGV[1]) then
 			return 0
 		end
+		redis.call("SET", KEYS[2], "1", "PX", ARGV[3])
 		redis.call("INCR", KEYS[1])
 		-- Refresh the TTL on every acquire so the counter cannot expire while
 		-- requests are still in flight (#311 sibling). The key then expires only
@@ -42,7 +66,14 @@ func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (fu
 		ttl = 300
 	}
 
-	res, err := s.rdb.Eval(ctx, script, []string{key}, limit, ttl).Int64()
+	token, err := newClaimToken()
+	if err != nil {
+		return nil, false, fmt.Errorf("acquire concurrency quota: %w", err)
+	}
+	keys := []string{key, quotaCallGuardKey(key, token)}
+	callCtx, cancel := context.WithTimeout(ctx, quotaCallTimeout)
+	defer cancel()
+	res, err := s.rdb.Eval(callCtx, script, keys, limit, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
 	if err != nil {
 		return nil, false, fmt.Errorf("acquire concurrency quota: %w", err)
 	}
@@ -76,6 +107,9 @@ func (s *QuotaStore) AcquireSlot(ctx context.Context, key string, limit int) (fu
 func (s *QuotaStore) releaseSlot(ctx context.Context, key string, ttl int) (int64, error) {
 	releaseScript := `
 		local current = redis.call("GET", KEYS[1])
+		if not redis.call("SET", KEYS[2], "1", "NX", "PX", ARGV[2]) then
+			return tonumber(current or "0")
+		end
 		if not current or tonumber(current) <= 0 then
 			return -1
 		end
@@ -86,7 +120,14 @@ func (s *QuotaStore) releaseSlot(ctx context.Context, key string, ttl int) (int6
 		end
 		return remaining
 	`
-	res, err := s.rdb.Eval(ctx, releaseScript, []string{key}, ttl).Int64()
+	token, err := newClaimToken()
+	if err != nil {
+		return 0, fmt.Errorf("release concurrency quota: %w", err)
+	}
+	keys := []string{key, quotaCallGuardKey(key, token)}
+	callCtx, cancel := context.WithTimeout(ctx, quotaCallTimeout)
+	defer cancel()
+	res, err := s.rdb.Eval(callCtx, releaseScript, keys, ttl, quotaCallGuardTTL.Milliseconds()).Int64()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return 0, fmt.Errorf("release concurrency quota: %w", err)
 	}
@@ -98,8 +139,13 @@ func (s *QuotaStore) Admit(ctx context.Context, key string, limit int, window ti
 	now := time.Now().UnixNano()
 	min := now - window.Nanoseconds()
 
+	// A go-redis retry resends the same now, so a member that is already
+	// present means an earlier attempt of this call was admitted.
 	script := `
 		redis.call("ZREMRANGEBYSCORE", KEYS[1], 0, ARGV[1])
+		if redis.call("ZSCORE", KEYS[1], ARGV[3]) then
+			return 1
+		end
 		local count = redis.call("ZCARD", KEYS[1])
 		if count >= tonumber(ARGV[2]) then
 			return 0

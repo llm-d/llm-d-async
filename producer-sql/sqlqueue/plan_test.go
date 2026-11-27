@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -90,7 +91,7 @@ func openExplainedStore(t *testing.T) (*Store, *planRecorder) {
 	t.Cleanup(func() { _ = db.Close() })
 	s := &Store{db: db, tracer: noop.NewTracerProvider().Tracer("")}
 	ctx := context.Background()
-	require.NoError(t, s.Migrate(ctx))
+	require.NoError(t, migrate.Run(ctx, db))
 	require.NoError(t, s.TruncateForTest(ctx))
 	return s, rec
 }
@@ -187,5 +188,43 @@ func TestQueueStatementsStayKeyedUnderEmptyStatistics(t *testing.T) {
 		popped, err := s.PopResults(ctx, "route", now.Unix(), batch)
 		require.NoError(t, err)
 		require.Len(t, popped, batch)
+	})
+	var claimed []Result
+	check("ClaimResults", func() {
+		var err error
+		claimed, err = s.ClaimResults(ctx, "route", "x", time.Minute, batch)
+		require.NoError(t, err)
+		require.Len(t, claimed, batch)
+	})
+	check("AckResult", func() {
+		ok, err := s.AckResult(ctx, claimed[0].Seq, "x")
+		require.NoError(t, err)
+		require.True(t, ok)
+	})
+
+	leased, err := s.ClaimResults(ctx, "route", "prefix", time.Minute, rows/2)
+	require.NoError(t, err)
+	require.Len(t, leased, rows/2)
+	check("ClaimResults past a leased prefix", func() {
+		got, err := s.ClaimResults(ctx, "route", "y", time.Minute, batch)
+		require.NoError(t, err)
+		require.Len(t, got, batch)
+	})
+	check("PopResults past a leased prefix", func() {
+		got, err := s.PopResults(ctx, "route", now.Unix(), batch)
+		require.NoError(t, err)
+		require.Len(t, got, batch)
+	})
+	_, err = s.ClaimResults(ctx, "route", "rest", time.Minute, rows)
+	require.NoError(t, err)
+	check("ClaimResults on an all-leased route", func() {
+		got, err := s.ClaimResults(ctx, "route", "z", time.Minute, 1)
+		require.NoError(t, err)
+		require.Empty(t, got)
+	})
+	check("PopResults on an all-leased route", func() {
+		got, err := s.PopResults(ctx, "route", now.Unix(), 1)
+		require.NoError(t, err)
+		require.Empty(t, got)
 	})
 }

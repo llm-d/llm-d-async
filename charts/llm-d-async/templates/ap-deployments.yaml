@@ -76,6 +76,14 @@ spec:
           {{- if .Values.ap.prometheusCacheTTL }}
           - --prometheus-cache-ttl={{ .Values.ap.prometheusCacheTTL }}
           {{- end }}
+          {{- with .Values.ap.prometheusAuth }}
+          {{- if .bearerTokenFile }}
+          - --prometheus-bearer-token-file={{ .bearerTokenFile }}
+          {{- end }}
+          {{- if .caCertFile }}
+          - --prometheus-ca-cert={{ .caCertFile }}
+          {{- end }}
+          {{- end }}
           {{- if .Values.ap.workerPools }}
           - --pool-config-file=/etc/llm-d-async/config/worker-pools.json
           {{- end }}
@@ -88,6 +96,12 @@ spec:
           - --concurrency={{ .Values.ap.concurrency | default 64 }}
           - --gate-wait-timeout={{ .Values.ap.gateWaitTimeout }}
           - --drain-timeout={{ .Values.ap.drainTimeout | default "2m" }}
+          {{- with .Values.ap.resultHeaderPrefixes }}
+          - --result-header-prefixes={{ join "," . }}
+          {{- end }}
+          {{- with .Values.ap.maxResponseBytes }}
+          - --max-response-bytes={{ int64 . }}
+          {{- end }}
           - --health-port={{ .Values.ap.health.port | default 8081 }}
           - --metrics-endpoint-auth={{ .Values.ap.metrics.secure }}
           - --metrics-port={{ .Values.ap.metrics.port | default 9090 }}

@@ -13,6 +13,7 @@ import (
 	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"cloud.google.com/go/pubsub/v2/pstest"
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
 	"google.golang.org/api/option"
@@ -99,7 +100,7 @@ func TestProcessMessages_QuotaGating(t *testing.T) {
 				return nil
 			}
 
-			// Run in a goroutine because it blocks on resultsChannel
+			// Run in a goroutine because it blocks on the delivery's outcome channel
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 
@@ -108,10 +109,7 @@ func TestProcessMessages_QuotaGating(t *testing.T) {
 					select {
 					case msg := <-ch:
 						// Simulate result worker sending back a result
-						pubsubID := msg.TransportCorrelationID
-						val, _ := resultChannels.Load(pubsubID)
-						resCh := val.(chan bool)
-						resCh <- tt.expectedResult
+						flow.deliveries.signal(logr.Discard(), msg.DeliveryToken, tt.expectedResult)
 					case <-ctx.Done():
 					}
 				}
@@ -236,11 +234,7 @@ func TestProcessMessages_LabelsPropagation(t *testing.T) {
 		case ir := <-ch:
 			receivedIR = ir
 			// Unblock processMessages
-			pubsubID := ir.TransportCorrelationID
-			if val, ok := resultChannels.Load(pubsubID); ok {
-				resCh := val.(chan bool)
-				resCh <- true
-			}
+			flow.deliveries.signal(logr.Discard(), ir.DeliveryToken, true)
 		case <-ctx.Done():
 		}
 	}()

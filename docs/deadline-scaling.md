@@ -26,7 +26,7 @@ A queue with a `deadline_scaling` block gets the gauge `llm_d_async_async_deadli
 | `throughput_rps` | yes | — | Items of this queue that one replica finishes per second (R). Must be positive. |
 | `cold_start_seconds` | no | `0` | Seconds a new replica takes to start serving (C): scheduling, image pull and model load. Zero or more. |
 | `max_replicas` | yes | — | Cap on the gauge, normally the deployment's maximum replica count. At least 1. |
-| `safety_factor` | no | `1` | In (0, 1]: the share of a replica's serving time before each bucket boundary that counts as usable (s), to absorb the coarseness of the buckets. Lower values scale up sooner. |
+| `safety_factor` | no | `1` | In (0, 1]; 0 or omitted means 1. The share of a replica's serving time before each bucket boundary that counts as usable (s), to absorb the coarseness of the buckets. Lower values scale up sooner. |
 
 The block is checked when the configuration loads and, for `redis-sortedset`, on each queue hot reload. An invalid block fails startup, or fails the reload and leaves the last good configuration in effect.
 

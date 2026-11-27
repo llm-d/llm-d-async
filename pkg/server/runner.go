@@ -97,15 +97,17 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	gateFactory = flowcontrol.NewGateFactoryWithCacheTTL(opts.Prometheus.URL, opts.Prometheus.CacheTTL).
-		WithLogger(setupLog)
+	gateFactory, err = newGateFactory(opts.Prometheus, setupLog)
+	if err != nil {
+		return err
+	}
 
 	policy, err := loadRequestMergePolicy(opts.mergePolicyConfigFile(), ctx)
 	if err != nil {
 		return err
 	}
 
-	flow, sortedSetConfig, err := loadFlow(opts, gateFactory, poolsMap)
+	flow, sortedSetConfig, err := loadFlow(baseCtx, opts, gateFactory, poolsMap)
 	if err != nil {
 		return err
 	}
@@ -125,7 +127,7 @@ func (r *Runner) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	inferenceClient, err := initInferenceClient(opts.TLS, totalConcurrency)
+	inferenceClient, err := initInferenceClient(opts.TLS, totalConcurrency, opts.Worker)
 	if err != nil {
 		return err
 	}
@@ -288,7 +290,7 @@ func loadRequestMergePolicy(configPath string, ctx context.Context) (pipeline.Re
 	return policy, nil
 }
 
-func loadFlow(opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[string]pipeline.WorkerPoolConfig) (pipeline.Flow, *redis.SortedSetConfig, error) {
+func loadFlow(ctx context.Context, opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[string]pipeline.WorkerPoolConfig) (pipeline.Flow, *redis.SortedSetConfig, error) {
 	workerPools := make([]pipeline.WorkerPoolConfig, 0, len(poolsMap))
 	for _, p := range poolsMap {
 		workerPools = append(workerPools, p)
@@ -319,7 +321,7 @@ func loadFlow(opts *Options, gateFactory *flowcontrol.GateFactory, poolsMap map[
 		if err != nil {
 			return nil, nil, err
 		}
-		flow, err := sqlflow.New(context.Background(), *cfg, workerPools, gateFactory)
+		flow, err := sqlflow.New(ctx, *cfg, workerPools, gateFactory)
 		return flow, nil, err
 	case "gcp-pubsub":
 		cfg, err := pubsub.LoadConfig(configBytes)
@@ -377,7 +379,7 @@ func startMetricsServer(ctx context.Context, serverCfg ServerConfig) error {
 	return nil
 }
 
-func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int) (*asyncworker.HTTPInferenceClient, error) {
+func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int, worker WorkerConfig) (*asyncworker.HTTPInferenceClient, error) {
 	tlsConfig, err := buildTLSConfig(tlsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build TLS configuration: %w", err)
@@ -394,7 +396,10 @@ func initInferenceClient(tlsCfg TLSConfig, totalConcurrency int) (*asyncworker.H
 			return "http-request"
 		}),
 	)}
-	return asyncworker.NewHTTPInferenceClient(inferenceHTTPClient), nil
+	return asyncworker.NewHTTPInferenceClient(inferenceHTTPClient,
+		asyncworker.WithResultHeaderPrefixes(worker.ResultHeaderPrefixes...),
+		asyncworker.WithMaxResponseBytes(worker.MaxResponseBytes),
+	), nil
 }
 
 func loadTransforms(ctx context.Context, configFile string, setupLog logr.Logger) (*transform.Chain, error) {
@@ -413,6 +418,29 @@ func loadTransforms(ctx context.Context, configFile string, setupLog logr.Logger
 	return chain, nil
 }
 
+// newGateFactory builds the gate factory from the Prometheus options,
+// including the CA and bearer token Prometheus gates authenticate with.
+func newGateFactory(cfg PrometheusConfig, logger logr.Logger) (*flowcontrol.GateFactory, error) {
+	transport, err := flowcontrol.NewPrometheusRoundTripper(cfg.CACertFile, cfg.BearerTokenFile)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.CACertFile != "" && cfg.BearerTokenFile == "" && flowcontrol.IsGMPURL(cfg.URL) {
+		// The explicit transport takes precedence over GMP's Application
+		// Default Credentials, so this combination bypasses ADC but provides
+		// no credentials of its own; queries will get HTTP 401 and the gates
+		// will fall back instead of failing closed. This configuration can
+		// never succeed, so fail closed at startup like the other GMP
+		// misconfigurations.
+		return nil, fmt.Errorf("prometheus-ca-cert alone does not authenticate to Google Managed " +
+			"Prometheus; either omit both prometheus flags to let gates use " +
+			"Application Default Credentials, or also set prometheus-bearer-token-file")
+	}
+	return flowcontrol.NewGateFactoryWithCacheTTL(cfg.URL, cfg.CacheTTL).
+		WithPrometheusTransport(transport).
+		WithLogger(logger), nil
+}
+
 func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	if cfg.CACert == "" && cfg.Cert == "" && cfg.Key == "" && !cfg.InsecureSkipVerify {
 		return nil, nil
@@ -425,6 +453,7 @@ func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec
 
 	if cfg.InsecureSkipVerify {
+		// #nosec G402 -- explicitly requested by the server TLS setting
 		tlsConfig.InsecureSkipVerify = true //nolint:gosec
 	}
 

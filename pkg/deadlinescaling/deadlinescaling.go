@@ -33,7 +33,7 @@ func (c Config) Validate() error {
 	case c.MaxReplicas < 1:
 		return fmt.Errorf("deadline_scaling.max_replicas must be at least 1")
 	case !(c.SafetyFactor >= 0 && c.SafetyFactor <= 1):
-		return fmt.Errorf("deadline_scaling.safety_factor must be in (0, 1]")
+		return fmt.Errorf("deadline_scaling.safety_factor must be in (0, 1]; 0 or omitted means 1")
 	}
 	return nil
 }

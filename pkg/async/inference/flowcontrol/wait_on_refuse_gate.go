@@ -6,6 +6,7 @@ import (
 
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
+	"github.com/llm-d/llm-d-async/pkg/metrics"
 )
 
 var _ pipeline.Gate = (*WaitOnRefuseGate)(nil)
@@ -19,6 +20,10 @@ type WaitOnRefuseGate struct {
 // NewWaitOnRefuseGate creates a WaitOnRefuseGate with the given inner gate.
 func NewWaitOnRefuseGate(inner pipeline.Gate) *WaitOnRefuseGate {
 	return &WaitOnRefuseGate{inner: inner}
+}
+
+func (w *WaitOnRefuseGate) RetireGateMetrics() {
+	metrics.RetireGateMetrics(w.inner)
 }
 
 // Budget implements pipeline.Gate.

@@ -9,12 +9,29 @@
 // are separate plugins that register a factory under their own type.
 package transform
 
-import "github.com/llm-d/llm-d-async/pkg/plugins"
+import (
+	"context"
+
+	"github.com/llm-d/llm-d-async/pkg/plugins"
+)
 
 // RequestTransform is a dispatch-time body-transform plugin. The worker invokes
 // the configured chain after marshalling the request payload and before sending
 // it to the inference backend. A plugin that does not recognize a message
 // returns handled=false from Transform, preserving the default JSON path.
+//
+// Several plugins can serve the same endpoint, and the chain does not decide
+// which one owns a request: it runs every plugin's Validate, then Transform
+// until one handles the request, and an error from either stops the chain
+// (a Validate error fails the request; a Transform error is retried or fails
+// it, depending on its category).
+// So each plugin claims only the requests it owns: a request it owns carries
+// the payload field the plugin reads (for example gcs_uri or file), and, when
+// two plugins read the same field, matches the plugin's configuration (for
+// example its providers list). For any other request a plugin returns nil
+// from Validate and handled=false with no error from Transform, so the next
+// plugin in the chain gets it. Errors are only for requests the plugin has
+// claimed.
 type RequestTransform interface {
 	plugins.Plugin
 
@@ -30,5 +47,24 @@ type RequestTransform interface {
 	// message it returns the new body, the Content-Type to set on the request,
 	// and handled=true. Otherwise it returns handled=false and the default JSON
 	// body is used unchanged.
+	//
+	// An error whose chain contains an api.InferenceError with a retryable
+	// category (RATE_LIMIT, SERVER_ERROR) makes the worker retry the message
+	// with backoff. Any other error fails it as an invalid request.
 	Transform(payload []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error)
+}
+
+// ContextTransform is an optional interface a RequestTransform may also
+// implement, like the ...Context interfaces in database/sql/driver. When a
+// plugin implements it, the chain calls TransformContext instead of Transform,
+// so existing plugins keep working unchanged.
+type ContextTransform interface {
+	// TransformContext behaves like Transform, with two additions. ctx ends
+	// at the dispatch attempt's deadline, the earlier of request-timeout and
+	// the request's own deadline, and is cancelled on shutdown; any I/O the
+	// transform does (e.g. fetching an object) must honor it. A check against
+	// the request's own deadline (e.g. a signed URL's expiry) cannot rely on
+	// ctx.Deadline() alone. requestURL is the full URL the request will be
+	// sent to, so a transform can recognize messages by endpoint path.
+	TransformContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string) (body []byte, contentType string, handled bool, err error)
 }

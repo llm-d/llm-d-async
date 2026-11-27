@@ -81,7 +81,7 @@ func TestRedisLeasedRateGateInitializesDrainMetricsBeforeFirstRequest(t *testing
 	}
 }
 
-func writeDispatchRateLimit(t *testing.T, client *goredis.Client, key string, limit api.DispatchRateLimit) {
+func writeDispatchRateLimit(t *testing.T, client goredis.UniversalClient, key string, limit api.DispatchRateLimit) {
 	t.Helper()
 	err := client.HSet(context.Background(), key, map[string]any{
 		dispatchRateAPIVersionField: limit.APIVersion,
