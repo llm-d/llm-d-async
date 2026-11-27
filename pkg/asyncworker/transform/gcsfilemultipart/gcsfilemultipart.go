@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -42,6 +43,7 @@ var (
 	_ transform.ContextTransform = (*Plugin)(nil)
 
 	errUnsupportedRedirect = errors.New("redirect target is not an allowed GCS host")
+	errTooManyRedirects    = errors.New("too many redirects")
 )
 
 type params struct {
@@ -100,12 +102,12 @@ func New(name string, parameters json.RawMessage, _ plugins.Handle) (plugins.Plu
 	plugin.client = &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
-				return errors.New("too many redirects")
+				return errTooManyRedirects
 			}
 			if !util.IsAbsoluteHTTPSURL(req.URL) {
 				return errUnsupportedRedirect
 			}
-			if err := plugin.allowedURL(req.URL); err != nil {
+			if err := plugin.validateAllowedHost(req.URL); err != nil {
 				return errUnsupportedRedirect
 			}
 			return nil
@@ -139,9 +141,6 @@ func (p *Plugin) TransformContext(ctx context.Context, payload []byte, metadata 
 	if !p.owns(metadata) || !supportedAudioEndpoint(requestURL) {
 		return nil, "", false, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, "", false, retryableDownloadError("audio download stopped", err)
-	}
 
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &fields); err != nil {
@@ -165,17 +164,12 @@ func (p *Plugin) TransformContext(ctx context.Context, payload []byte, metadata 
 		return nil, "", false, invalidRequestErrorf("%q is not supported on the GCS download path", fileBase64Field)
 	}
 
-	deadline := time.Now()
-	if ctxDeadline, hasDeadline := ctx.Deadline(); hasDeadline {
-		deadline = ctxDeadline
-	}
-	// The original request deadline can be later than this attempt's context deadline.
-	if requestDeadline > 0 {
-		deadline = time.Unix(requestDeadline, 0)
-	}
-	parsedURL, err := p.signedURL(signedURL, deadline)
+	parsedURL, err := p.parseSignedURL(signedURL, effectiveDeadline(ctx, requestDeadline))
 	if err != nil {
 		return nil, "", false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", false, retryableDownloadError("audio download stopped", err)
 	}
 
 	var body bytes.Buffer
@@ -208,13 +202,16 @@ func (p *Plugin) download(ctx context.Context, signedURL string, dst io.Writer) 
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		if ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil:
 			return retryableDownloadError("audio download stopped", ctx.Err())
-		}
-		if errors.Is(err, errUnsupportedRedirect) {
+		case errors.Is(err, errUnsupportedRedirect):
 			return invalidRequestErrorf("audio download redirect rejected")
+		case errors.Is(err, errTooManyRedirects):
+			return invalidRequestErrorf("audio download exceeded redirect limit")
+		default:
+			return retryableDownloadError("audio download failed", safeDownloadCause(err))
 		}
-		return retryableDownloadError("audio download failed", safeDownloadCause(err))
 	}
 	defer response.Body.Close() // nolint:errcheck
 	retryAfter := util.ParseRetryAfter(response.Header.Get("Retry-After"))
@@ -251,10 +248,7 @@ func (p *Plugin) download(ctx context.Context, signedURL string, dst io.Writer) 
 
 	bytesRead, err := io.Copy(dst, io.LimitReader(response.Body, p.maxFileBytes))
 	if err != nil {
-		if ctx.Err() != nil {
-			return retryableDownloadError("audio download stopped", ctx.Err())
-		}
-		return retryableDownloadError("audio download failed", safeDownloadCause(err))
+		return downloadFailureError(ctx, err)
 	}
 	if bytesRead == p.maxFileBytes {
 		var extra [1]byte
@@ -263,16 +257,31 @@ func (p *Plugin) download(ctx context.Context, signedURL string, dst io.Writer) 
 			return invalidRequestErrorf("audio download exceeds maxFileBytes")
 		}
 		if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
-			if ctx.Err() != nil {
-				return retryableDownloadError("audio download stopped", ctx.Err())
-			}
-			return retryableDownloadError("audio download failed", safeDownloadCause(readErr))
+			return downloadFailureError(ctx, readErr)
 		}
 	}
 	return nil
 }
 
-func (p *Plugin) allowedURL(parsedURL *url.URL) error {
+func downloadFailureError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return retryableDownloadError("audio download stopped", ctx.Err())
+	}
+	return retryableDownloadError("audio download failed", safeDownloadCause(err))
+}
+
+func effectiveDeadline(ctx context.Context, requestDeadline int64) time.Time {
+	// The original request deadline can be later than this attempt's context deadline.
+	if requestDeadline > 0 {
+		return time.Unix(requestDeadline, 0)
+	}
+	if ctxDeadline, ok := ctx.Deadline(); ok {
+		return ctxDeadline
+	}
+	return time.Now()
+}
+
+func (p *Plugin) validateAllowedHost(parsedURL *url.URL) error {
 	if parsedURL.User != nil || parsedURL.Port() != "" {
 		return invalidRequestErrorf("gcs_uri host is not an allowed hostname")
 	}
@@ -282,7 +291,7 @@ func (p *Plugin) allowedURL(parsedURL *url.URL) error {
 	return nil
 }
 
-func (p *Plugin) signedURL(signedURL string, deadline time.Time) (*url.URL, error) {
+func (p *Plugin) parseSignedURL(signedURL string, deadline time.Time) (*url.URL, error) {
 	parsedURL, err := url.Parse(signedURL)
 	if err != nil {
 		return nil, invalidRequestErrorf("gcs_uri is not a valid URL")
@@ -290,22 +299,25 @@ func (p *Plugin) signedURL(signedURL string, deadline time.Time) (*url.URL, erro
 	if !util.IsAbsoluteHTTPSURL(parsedURL) {
 		return nil, invalidRequestErrorf("gcs_uri must use HTTPS")
 	}
-	if err := p.allowedURL(parsedURL); err != nil {
+	if err := p.validateAllowedHost(parsedURL); err != nil {
 		return nil, err
 	}
 	if !identifiesObject(parsedURL) {
 		return nil, invalidRequestErrorf("gcs_uri must identify a bucket and object")
 	}
 
-	query := parsedURL.Query()
-	algorithm := value(query, "X-Goog-Algorithm")
+	query, err := url.ParseQuery(parsedURL.RawQuery)
+	if err != nil {
+		return nil, invalidRequestErrorf("gcs_uri has an invalid query string")
+	}
+	algorithm := singleQueryValue(query, "X-Goog-Algorithm")
 	if (algorithm != gcsV4RSASHA256 && algorithm != gcsV4HMACSHA256) ||
-		value(query, "X-Goog-Credential") == "" ||
-		value(query, "X-Goog-Date") == "" ||
-		value(query, "X-Goog-Expires") == "" {
+		singleQueryValue(query, "X-Goog-Credential") == "" ||
+		singleQueryValue(query, "X-Goog-Date") == "" ||
+		singleQueryValue(query, "X-Goog-Expires") == "" {
 		return nil, invalidRequestErrorf("gcs_uri is not a signed V4 URL")
 	}
-	signature := value(query, "X-Goog-Signature")
+	signature := singleQueryValue(query, "X-Goog-Signature")
 	if signature == "" || len(signature)%2 != 0 {
 		return nil, invalidRequestErrorf("gcs_uri has an invalid signature format")
 	}
@@ -314,12 +326,12 @@ func (p *Plugin) signedURL(signedURL string, deadline time.Time) (*url.URL, erro
 		return nil, invalidRequestErrorf("gcs_uri has an invalid signature format")
 	}
 
-	start, err := time.Parse("20060102T150405Z", value(query, "X-Goog-Date"))
+	start, err := time.Parse("20060102T150405Z", singleQueryValue(query, "X-Goog-Date"))
 	if err != nil {
 		return nil, invalidRequestErrorf("gcs_uri has an invalid signing date")
 	}
-	seconds, err := strconv.ParseInt(value(query, "X-Goog-Expires"), 10, 64)
-	if err != nil || seconds <= 0 {
+	seconds, err := strconv.ParseInt(singleQueryValue(query, "X-Goog-Expires"), 10, 64)
+	if err != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
 		return nil, invalidRequestErrorf("gcs_uri has an invalid expiry")
 	}
 	expiry := start.Add(time.Duration(seconds) * time.Second)
@@ -384,7 +396,7 @@ func normalizeHostname(host string) (string, error) {
 		return "", errors.New("must be a hostname without a scheme, port, path, query, or fragment")
 	}
 	parsed, err := url.Parse("//" + normalized)
-	if err != nil || parsed.User != nil || parsed.Port() != "" || parsed.Host != normalized {
+	if err != nil || parsed.User != nil || parsed.Port() != "" || parsed.Host != normalized || parsed.Hostname() != normalized {
 		return "", errors.New("must be a hostname without a port or credentials")
 	}
 	return normalized, nil
@@ -424,7 +436,7 @@ func stringField(fields map[string]json.RawMessage, name string) (string, error)
 	return value, nil
 }
 
-func value(query url.Values, name string) string {
+func singleQueryValue(query url.Values, name string) string {
 	values := query[name]
 	if len(values) != 1 {
 		return ""

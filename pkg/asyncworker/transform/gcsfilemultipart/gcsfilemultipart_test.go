@@ -175,6 +175,8 @@ func TestTransformContext_RejectsInvalidURLsBeforeDownload(t *testing.T) {
 		url  string
 	}{
 		{"expired", v4SignedURL(time.Now().Add(-time.Minute))},
+		{"overflow expiry", strings.Replace(v4SignedURL(time.Now().Add(time.Hour)), "X-Goog-Expires=3600", "X-Goog-Expires=9223372037", 1)},
+		{"percent-encoded expires", strings.Replace(v4SignedURL(time.Now().Add(time.Hour)), "X-Goog-Expires=3600", "X-Goog-Expires=%ZZ", 1)},
 		{"invalid signature format", strings.Replace(v4SignedURL(time.Now().Add(time.Hour)), strings.Repeat("ab", 32), "not-hex!", 1)},
 		{"unsupported host", strings.Replace(v4SignedURL(time.Now().Add(time.Hour)), "storage.googleapis.com", "evil.example", 1)},
 		{"http scheme", strings.Replace(v4SignedURL(time.Now().Add(time.Hour)), "https://", "http://", 1)},
@@ -319,13 +321,13 @@ func TestSignedURL_ObjectPath(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := p.signedURL(tc.url, deadline)
+			_, err := p.parseSignedURL(tc.url, deadline)
 			if tc.wantError {
 				assertInvalidRequest(t, err)
 				return
 			}
 			if err != nil {
-				t.Errorf("signedURL: %v", err)
+				t.Errorf("parseSignedURL: %v", err)
 			}
 		})
 	}
@@ -386,8 +388,8 @@ func TestSignedURL_AcceptsV4SignatureAlgorithms(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := p.signedURL(tc.url, deadline); err != nil {
-				t.Fatalf("signedURL: %v", err)
+			if _, err := p.parseSignedURL(tc.url, deadline); err != nil {
+				t.Fatalf("parseSignedURL: %v", err)
 			}
 		})
 	}
@@ -397,7 +399,7 @@ func TestSignedURL_RejectsInvalidHMACSignatureLength(t *testing.T) {
 	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, nil)
 	signedURL := v4SignedURLWithSignature(
 		time.Now().Add(2*time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("ab", 256))
-	_, err := p.signedURL(signedURL, time.Now().Add(time.Hour))
+	_, err := p.parseSignedURL(signedURL, time.Now().Add(time.Hour))
 	assertInvalidRequest(t, err)
 }
 
@@ -605,6 +607,7 @@ func TestNew_Parameters(t *testing.T) {
 		{"missing max bytes", `{"providers":["gcs-file"],"allowedHosts":["storage.googleapis.com"]}`, true},
 		{"zero max bytes", `{"providers":["gcs-file"],"allowedHosts":["storage.googleapis.com"],"maxFileBytes":0}`, true},
 		{"invalid host", `{"providers":["gcs-file"],"allowedHosts":["https://storage.googleapis.com"],"maxFileBytes":1024}`, true},
+		{"invalid host trailing colon", `{"providers":["gcs-file"],"allowedHosts":["storage.googleapis.com:"],"maxFileBytes":1024}`, true},
 		{"unknown field", `{"providers":["gcs-file"],"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024,"foo":1}`, true},
 	}
 	for _, tc := range tests {
@@ -617,5 +620,37 @@ func TestNew_Parameters(t *testing.T) {
 				t.Errorf("New = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func TestTransformContext_CancelledContextDoesNotClaimWithoutGCSURI(t *testing.T) {
+	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("request without gcs_uri must not trigger download")
+		return nil, nil
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	body, contentType, handled, err := transformWithContext(p, ctx, []byte(`{"model":"whisper"}`), testProviderMetadata(), "https://gateway.example/v1/audio/transcriptions")
+	if err != nil || handled || body != nil || contentType != "" {
+		t.Fatalf("TransformContext = (%q, %q, %v, %v), want nil/empty/false/nil", body, contentType, handled, err)
+	}
+}
+
+func TestTransformContext_RejectsTooManyRedirects(t *testing.T) {
+	p := newPlugin(t, `{"allowedHosts":["storage.googleapis.com"],"maxFileBytes":1024}`, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Location", "https://storage.googleapis.com/bucket/next.wav?X-Goog-Signature=secret")
+		return &http.Response{StatusCode: http.StatusFound, Header: header, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}))
+	payload := []byte(fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(time.Now().Add(time.Hour))))
+
+	_, _, handled, err := transformWithContext(p, context.Background(), payload, testProviderMetadata(), "https://gateway.example/v1/audio/transcriptions")
+	if handled {
+		t.Error("handled = true, want false")
+	}
+	assertInvalidRequest(t, err)
+	if strings.Contains(err.Error(), "X-Goog-Signature") || strings.Contains(err.Error(), "secret") {
+		t.Errorf("error %q exposes redirect URL or signature", err.Error())
 	}
 }

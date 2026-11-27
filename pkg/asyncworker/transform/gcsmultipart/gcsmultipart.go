@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"mime/multipart"
 	"net/url"
 	"strconv"
@@ -95,10 +96,11 @@ func (p *Plugin) owns(metadata map[string]string) bool {
 }
 
 // Validate performs a deadline-aware preflight. When the plugin owns the message
-// and gcs_uri is set, it rejects a URL that is not absolute HTTPS. If the URL's
-// expiry can be parsed, it also rejects a URL that expires at or before the
-// request deadline. Messages the plugin does not own, messages without gcs_uri,
-// and URLs with no parseable expiry validate successfully.
+// and gcs_uri is set, it rejects a URL that is not absolute HTTPS. If expiry
+// parameters are present, it validates them and rejects URLs that are malformed
+// or expire at or before the request deadline. Messages the plugin does not own,
+// messages without gcs_uri, and URLs without expiry parameters validate
+// successfully.
 func (p *Plugin) Validate(payload []byte, metadata map[string]string, reqDeadline int64) error {
 	if !p.owns(metadata) {
 		return nil
@@ -115,9 +117,12 @@ func (p *Plugin) Validate(payload []byte, metadata map[string]string, reqDeadlin
 		return err
 	}
 
-	expiry, ok := signedURLExpiry(signedURL)
+	expiry, ok, err := signedURLExpiry(signedURL)
+	if err != nil {
+		return err
+	}
 	if !ok {
-		// No parseable expiry: nothing to preflight, leave it to dispatch.
+		// No expiry parameters: nothing to preflight, leave it to dispatch.
 		return nil
 	}
 	if !expiry.After(time.Unix(reqDeadline, 0)) {
@@ -219,39 +224,51 @@ func validateSignedGCSURL(signedURL string) error {
 
 // signedURLExpiry extracts the absolute expiry time of a signed object URL.
 // It supports V4 signing (X-Goog-Date + X-Goog-Expires seconds) and V2 signing
-// (Expires as Unix seconds). It returns ok=false if no expiry can be determined.
-func signedURLExpiry(signedURL string) (time.Time, bool) {
+// (Expires as Unix seconds). It returns ok=false with a nil error when no expiry
+// parameters are present, and returns an invalid-request error when expiry
+// parameters are present but malformed or out of range.
+func signedURLExpiry(signedURL string) (time.Time, bool, error) {
 	u, err := url.Parse(signedURL)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, false, invalidRequestErrorf("%q is not a valid URL", gcsURIField)
 	}
-	q := u.Query()
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return time.Time{}, false, invalidRequestErrorf("%q has an invalid query string", gcsURIField)
+	}
 
 	// V4: X-Goog-Date (yyyymmddThhmmssZ) + X-Goog-Expires (seconds).
-	if date := q.Get("X-Goog-Date"); date != "" {
-		if expires := q.Get("X-Goog-Expires"); expires != "" {
-			start, err := time.Parse("20060102T150405Z", date)
-			if err != nil {
-				return time.Time{}, false
-			}
-			secs, err := strconv.Atoi(expires)
-			if err != nil {
-				return time.Time{}, false
-			}
-			return start.Add(time.Duration(secs) * time.Second), true
+	if q.Has("X-Goog-Date") || q.Has("X-Goog-Expires") {
+		date := q.Get("X-Goog-Date")
+		expires := q.Get("X-Goog-Expires")
+		if date == "" || expires == "" {
+			return time.Time{}, false, invalidRequestErrorf("%q has incomplete V4 signing expiry parameters", gcsURIField)
 		}
+		start, err := time.Parse("20060102T150405Z", date)
+		if err != nil {
+			return time.Time{}, false, invalidRequestErrorf("%q has an invalid signing date", gcsURIField)
+		}
+		secs, err := strconv.ParseInt(expires, 10, 64)
+		if err != nil || secs <= 0 || secs > math.MaxInt64/int64(time.Second) {
+			return time.Time{}, false, invalidRequestErrorf("%q has an invalid expiry", gcsURIField)
+		}
+		return start.Add(time.Duration(secs) * time.Second), true, nil
 	}
 
 	// V2: Expires as absolute Unix seconds.
-	if expires := q.Get("Expires"); expires != "" {
+	if q.Has("Expires") {
+		expires := q.Get("Expires")
+		if expires == "" {
+			return time.Time{}, false, invalidRequestErrorf("%q has an empty Expires parameter", gcsURIField)
+		}
 		secs, err := strconv.ParseInt(expires, 10, 64)
 		if err != nil {
-			return time.Time{}, false
+			return time.Time{}, false, invalidRequestErrorf("%q has an invalid Expires parameter", gcsURIField)
 		}
-		return time.Unix(secs, 0), true
+		return time.Unix(secs, 0), true, nil
 	}
 
-	return time.Time{}, false
+	return time.Time{}, false, nil
 }
 
 // invalidRequestErrorf builds a non-retryable invalid-request error. The worker

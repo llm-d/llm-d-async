@@ -416,7 +416,8 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						case <-requestCtx.Done():
 						}
 						return
-					} else if handled {
+					}
+					if handled {
 						sendPayload = body
 						sendHeaders = headersWithContentType(msg.HttpHeaders, contentType)
 					}

@@ -102,7 +102,7 @@ ap:
   #         providers: ["whisper-file"]
   #         allowedHosts: '["storage.googleapis.com"]'
   #         # Example 4 MiB per object. At concurrency 64, file bodies use about 256 MiB before multipart and buffer overhead
-  #         # To lower concurrency or raise ap.resources.limits.memory for larger files.
+  #         # Lower concurrency or raise ap.resources.limits.memory for larger files.
   #         maxFileBytes: "4194304"
   #     - name: "gcs-url-audio"
   #       type: "gcs_uri_multipart"
