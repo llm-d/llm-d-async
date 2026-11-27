@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -496,5 +499,159 @@ func TestSendRequest_bodyReadErrorKeepsDroppedReasonAndRetryAfter(t *testing.T) 
 	}
 	if ce.RetryAfter != 5*time.Second {
 		t.Errorf("RetryAfter = %v, want 5s", ce.RetryAfter)
+	}
+}
+
+func TestSendRequest_responseMetadata(t *testing.T) {
+	audio := []byte{'R', 'I', 'F', 'F', 0x00, 0xff, 0xfe, 0x80}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("X-Vllm-Omni-Output-Tokens", "77")
+		w.Header().Set("x-audio-sample-rate", "24000")
+		w.Header().Add("X-Audio-Note", "a")
+		w.Header().Add("X-Audio-Note", "b")
+		w.Header().Set("X-Unrelated", "nope")
+		_, _ = w.Write(audio)
+	}))
+	t.Cleanup(srv.Close)
+
+	tests := []struct {
+		name        string
+		opts        []HTTPClientOption
+		wantHeaders map[string]string
+	}{
+		{name: "no prefixes forwards nothing", wantHeaders: nil},
+		{name: "blank prefixes are ignored", opts: []HTTPClientOption{WithResultHeaderPrefixes(" ", "")}, wantHeaders: nil},
+		{
+			name: "prefixes match case-insensitively and join repeated values",
+			opts: []HTTPClientOption{WithResultHeaderPrefixes("X-VLLM-OMNI-", " x-audio-")},
+			wantHeaders: map[string]string{
+				"x-vllm-omni-output-tokens": "77",
+				"x-audio-sample-rate":       "24000",
+				"x-audio-note":              "a, b",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewHTTPInferenceClient(srv.Client(), tc.opts...)
+			resp, err := client.SendRequest(context.Background(), srv.URL, nil, []byte(`{"input":"hi"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(resp.Body, audio) {
+				t.Errorf("Body = %x, want %x", resp.Body, audio)
+			}
+			if resp.ContentType != "audio/wav" {
+				t.Errorf("ContentType = %q, want audio/wav", resp.ContentType)
+			}
+			if !maps.Equal(resp.Headers, tc.wantHeaders) {
+				t.Errorf("Headers = %v, want %v", resp.Headers, tc.wantHeaders)
+			}
+		})
+	}
+}
+
+func TestSendRequest_errorResponseKeepsMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Audio-Duration-Seconds", "0.000")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad voice"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewHTTPInferenceClient(srv.Client(), WithResultHeaderPrefixes("x-audio-"))
+	resp, err := client.SendRequest(context.Background(), srv.URL, nil, []byte(`{}`))
+	if err == nil {
+		t.Fatal("expected a client error for a 400")
+	}
+	if resp == nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("resp = %+v, want status 400", resp)
+	}
+	if resp.ContentType != "application/json" || resp.Headers["x-audio-duration-seconds"] != "0.000" {
+		t.Errorf("error response lost metadata: %+v", resp)
+	}
+}
+
+func TestSendRequest_maxResponseBytes(t *testing.T) {
+	body := bytes.Repeat([]byte{0xff, 0x00}, 50)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		if r.URL.Query().Get("chunked") != "" {
+			_, _ = w.Write(body[:10])
+			w.(http.Flusher).Flush()
+			_, _ = w.Write(body[10:])
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	tests := []struct {
+		name    string
+		limit   int64
+		query   string
+		wantErr bool
+	}{
+		{name: "zero is unlimited", limit: 0},
+		{name: "negative is unlimited", limit: -1},
+		{name: "max int64 is unlimited", limit: math.MaxInt64, query: "?chunked=1"},
+		{name: "body at the limit is read", limit: int64(len(body))},
+		{name: "chunked body at the limit is read", limit: int64(len(body)), query: "?chunked=1"},
+		{name: "content length over the limit fails", limit: int64(len(body)) - 1, wantErr: true},
+		{name: "chunked body over the limit fails", limit: int64(len(body)) - 1, query: "?chunked=1", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewHTTPInferenceClient(srv.Client(), WithMaxResponseBytes(tc.limit))
+			resp, err := client.SendRequest(context.Background(), srv.URL+tc.query, nil, []byte(`{}`))
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(resp.Body, body) {
+					t.Errorf("Body = %x, want %x", resp.Body, body)
+				}
+				return
+			}
+			if resp != nil {
+				t.Errorf("resp = %+v, want nil so no truncated body becomes a result", resp)
+			}
+			var ce *asyncapi.ClientError
+			if !errors.As(err, &ce) {
+				t.Fatalf("err = %v, want *ClientError", err)
+			}
+			if ce.Category() != asyncapi.ErrCategoryInvalidReq || !ce.Category().Fatal() {
+				t.Errorf("Category = %s, want fatal %s", ce.Category(), asyncapi.ErrCategoryInvalidReq)
+			}
+			if !strings.Contains(ce.Error(), "exceeds 99 bytes") {
+				t.Errorf("err = %q, want the limit in the message", ce.Error())
+			}
+		})
+	}
+}
+
+type failingFullReader struct{}
+
+func (failingFullReader) Read(p []byte) (int, error) {
+	return len(p), errors.New("checksum mismatch")
+}
+
+func TestSendRequest_oversizedBodyWithReadError(t *testing.T) {
+	client := NewHTTPInferenceClient(NewTestClient(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(failingFullReader{}), Header: make(http.Header), ContentLength: -1}, nil
+	}), WithMaxResponseBytes(99))
+	resp, err := client.SendRequest(context.Background(), "http://localhost/v1/audio/speech", nil, []byte(`{}`))
+	if resp != nil {
+		t.Errorf("resp = %+v, want nil so no truncated body becomes a result", resp)
+	}
+	var ce *asyncapi.ClientError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %v, want *ClientError", err)
+	}
+	if ce.Category() != asyncapi.ErrCategoryInvalidReq || !errors.Is(err, errResponseTooLarge) {
+		t.Errorf("err = %v (category %s), want the non-retryable size error", err, ce.Category())
 	}
 }

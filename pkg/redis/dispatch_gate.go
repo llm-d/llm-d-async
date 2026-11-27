@@ -9,7 +9,7 @@ import (
 	"github.com/llm-d/llm-d-async/pipeline"
 	goredis "github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 var _ pipeline.Gate = (*RedisDispatchGate)(nil)

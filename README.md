@@ -53,11 +53,13 @@ The architecture adheres to the following core principles:
 - [Concepts](#concepts)
 - [Deployment](docs/deployment.md): installing the processor, command line parameters, worker pools; to deploy on llm-d, follow the [asynchronous processing guide](https://github.com/llm-d/llm-d/blob/main/guides/batch-serving/asynchronous-processing/README.md)
 - [Transports](docs/transports.md): transport configuration, queue and topic entries, message formats, backend compatibility, implementations
+- [Producer and processor compatibility](docs/compatibility.md): which producer library releases work with which processor releases, and the rules for wire-format changes
 - [SQL Transport Schema Migrations](docs/sql-migrations.md): applying and upgrading the `sql` transport's Postgres schema, writing a migration
 - [Dispatch Gate Reference](docs/dispatch-gates.md): every gate type and its parameters, the budget cascade, sizing `max_concurrency`
 - [Request Merge Policy Reference](docs/merge-policies.md)
 - [Request Body Transform Reference](docs/request-body-transforms.md)
 - [Observability](docs/observability.md): Prometheus metrics and OpenTelemetry tracing
+- [Multi-replica Deployments](docs/guides/multi-replica.md): current validation status, replica semantics, and operational limits
 - [Development](docs/development.md)
 
 ## Concepts

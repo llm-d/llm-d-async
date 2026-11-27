@@ -37,19 +37,15 @@ var _ pipeline.Gate = (*MetricDispatchGate)(nil)
 // formula N = max_SYS × (D − B) when threshold is set to the reserved baseline B.
 // On error or missing/invalid data, the gate returns the configured fallback budget.
 type MetricDispatchGate struct {
-	source        MetricSource
-	threshold     float64
-	fallback      float64
-	owner         pipeline.GateOwner
-	inferencePool string
+	source    MetricSource
+	threshold float64
+	fallback  float64
+	readings  metrics.GateInstanceMetrics
 }
 
-// WithOwner sets the queue or worker pool this gate belongs to. Its
-// queue_id/queue_name/pool_name label the async_gate_metric_value and
-// async_gate_metric_threshold gauges, so they join with the owner's other
-// series (async_dispatch_budget, async_gate_decisions_total, ...).
+// WithOwner sets the queue and worker-pool labels for both shared and per-instance gauges.
 func (g *MetricDispatchGate) WithOwner(owner pipeline.GateOwner) *MetricDispatchGate {
-	g.owner = owner
+	g.readings.Owner = owner
 	return g
 }
 
@@ -57,7 +53,7 @@ func (g *MetricDispatchGate) WithOwner(owner pipeline.GateOwner) *MetricDispatch
 // inference_pool label on the gauges above. It is what the gate measures, not
 // who it throttles — pool_name is the latter.
 func (g *MetricDispatchGate) WithInferencePool(pool string) *MetricDispatchGate {
-	g.inferencePool = pool
+	g.readings.InferencePool = pool
 	return g
 }
 
@@ -111,8 +107,10 @@ func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 
 	// Expose the raw value and threshold so operators can see why the gate is
 	// open/closed (it closes when value <= threshold).
-	metrics.SetGateMetricValue(value, g.threshold, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, g.inferencePool)
-	metrics.SetGateMetricSourceAvailable(true, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, g.inferencePool)
+	owner := g.readings.Owner
+	metrics.SetGateMetricValue(value, g.threshold, owner.QueueID, owner.QueueName, owner.WorkerPoolID, g.readings.InferencePool)
+	metrics.SetGateMetricSourceAvailable(true, owner.QueueID, owner.QueueName, owner.WorkerPoolID, g.readings.InferencePool)
+	g.readings.Record(value, g.threshold, true)
 
 	if value <= g.threshold {
 		return 0.0
@@ -125,9 +123,16 @@ func (g *MetricDispatchGate) Budget(ctx context.Context) float64 {
 // lets an operator tell a fallback budget apart from a real reading of the same
 // number — most importantly a fallback of 0 from a genuinely saturated pool.
 func (g *MetricDispatchGate) useFallback(logger logr.Logger, err error) float64 {
-	metrics.SetGateMetricSourceAvailable(false, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, g.inferencePool)
+	owner := g.readings.Owner
+	metrics.SetGateMetricSourceAvailable(false, owner.QueueID, owner.QueueName, owner.WorkerPoolID, g.readings.InferencePool)
+	g.readings.Record(0, g.threshold, false)
 	logger.Error(err, "using fallback value", "fallback", g.fallback)
 	return g.fallback
+}
+
+// RetireGateMetrics removes this gate's per-instance series.
+func (g *MetricDispatchGate) RetireGateMetrics() {
+	g.readings.Retire()
 }
 
 // Apply implements pipeline.Gate.

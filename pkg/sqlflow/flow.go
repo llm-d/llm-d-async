@@ -20,7 +20,7 @@ import (
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"go.opentelemetry.io/otel"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 const (
@@ -813,6 +813,7 @@ func (f *Flow) QueueBacklog(ctx context.Context) ([]pipeline.QueueBacklogStat, e
 			depth = 0
 		}
 		stat.Depth = depth
+		stat.SourceAvailable = err == nil
 		stat.ExpiringCounts = make([]pipeline.ExpiringCount, 0, len(labels))
 		for i, l := range labels {
 			stat.ExpiringCounts = append(stat.ExpiringCounts, pipeline.ExpiringCount{Window: l, Count: expiring[i]})

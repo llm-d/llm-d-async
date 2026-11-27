@@ -19,7 +19,7 @@ import (
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 )
 
 // SortedSetQueueConfig defines a single queue entry in the sorted-set transport config.
@@ -535,6 +535,9 @@ func (r *RedisSortedSetFlow) ReconfigureQueues(queues []SortedSetQueueConfig, be
 	for _, old := range removed {
 		if old.cancel != nil {
 			old.cancel()
+		}
+		if r.gateFactory != nil && old.config.GateType != "" {
+			metrics.RetireGateMetrics(old.data.gate)
 		}
 	}
 	for _, queueCfg := range normalized {

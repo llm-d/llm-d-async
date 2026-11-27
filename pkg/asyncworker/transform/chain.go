@@ -1,6 +1,9 @@
 package transform
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // Chain is an ordered set of RequestTransform plugins applied to each outgoing
 // request. A nil *Chain is valid and behaves as a no-op, so callers that have no
@@ -42,13 +45,30 @@ func (c *Chain) Validate(payload []byte, metadata map[string]string, reqDeadline
 // returns handled=true, its body and Content-Type are returned and no further
 // transforms run. If no transform handles the message, handled is false and the
 // caller should send the original payload unchanged. A nil/empty chain returns
-// handled=false. An error from any transform short-circuits and is returned.
+// handled=false. An error from any transform short-circuits and is returned,
+// wrapped with %w so callers can still classify it with errors.As.
+//
+// Apply is ApplyContext without a request context or URL, so transforms
+// cannot see a deadline or cancellation.
+//
+// Deprecated: use ApplyContext.
 func (c *Chain) Apply(payload []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error) {
+	return c.ApplyContext(context.Background(), payload, metadata, "")
+}
+
+// ApplyContext is Apply for a request with a deadline and destination. A
+// transform that implements ContextTransform gets ctx and requestURL through
+// TransformContext; any other transform is called through Transform.
+func (c *Chain) ApplyContext(ctx context.Context, payload []byte, metadata map[string]string, requestURL string) (body []byte, contentType string, handled bool, err error) {
 	if c == nil {
 		return nil, "", false, nil
 	}
 	for _, t := range c.transforms {
-		body, contentType, handled, err = t.Transform(payload, metadata)
+		if ct, ok := t.(ContextTransform); ok {
+			body, contentType, handled, err = ct.TransformContext(ctx, payload, metadata, requestURL)
+		} else {
+			body, contentType, handled, err = t.Transform(payload, metadata)
+		}
 		if err != nil {
 			return nil, "", false, fmt.Errorf("transform %s: %w", t.TypedName(), err)
 		}

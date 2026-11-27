@@ -10,6 +10,7 @@ import (
 
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/alicebob/miniredis/v2"
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pkg/async/inference/flowcontrol"
 	redisgate "github.com/llm-d/llm-d-async/pkg/redis"
@@ -99,11 +100,9 @@ func TestGating_EndToEnd(t *testing.T) {
 		}
 
 		// 3. Complete Request 1
-		pubsubID := req1.TransportCorrelationID
-		val, _ := resultChannels.Load(pubsubID)
-		resCh := val.(chan bool)
-		resCh <- true // Success
-		wg.Wait()     // Wait for processMessages to finish and release quota
+		// Report a successful publish for request 1.
+		flow.deliveries.signal(logr.Discard(), req1.DeliveryToken, true)
+		wg.Wait() // Wait for processMessages to finish and release quota
 
 		// 4. Send Request 3 for User A (should now be allowed)
 		msg3 := createMsg("req-3", "user-a")
@@ -144,10 +143,7 @@ func TestGating_EndToEnd(t *testing.T) {
 			select {
 			case req := <-ch:
 				// Finish it immediately
-				pubsubID := req.TransportCorrelationID
-				val, _ := resultChannels.Load(pubsubID)
-				resCh := val.(chan bool)
-				resCh <- true
+				flow.deliveries.signal(logr.Discard(), req.DeliveryToken, true)
 			case <-time.After(1 * time.Second):
 				t.Fatalf("Timeout waiting for %s", id)
 			}

@@ -41,10 +41,9 @@ SKIP_TLS_VERIFY=${SKIP_TLS_VERIFY:-"false"}
 AP_LOG_LEVEL=${AP_LOG_LEVEL:-"info"}
 VALUES_FILE=${VALUES_FILE:-"$AP_PROJECT/charts/llm-d-async/values.yaml"}
 
-# Redis / Valkey Configuration
-# REDIS_CHART selects the Helm chart for the message queue backend.
-# Use "bitnami/valkey" (default) or "bitnami/redis".
-REDIS_CHART=${REDIS_CHART:-"bitnami/valkey"}
+# Message queue backend: Valkey, from the Valkey project's Helm chart.
+VALKEY_CHART_REPO=${VALKEY_CHART_REPO:-"https://valkey.io/valkey-helm/"}
+VALKEY_CHART_VERSION=${VALKEY_CHART_VERSION:-"1.0.0"}
 REDIS_RELEASE_NAME=${REDIS_RELEASE_NAME:-"redis"}
 
 
@@ -79,6 +78,7 @@ PROMETHEUS_SECRET_NAME=${PROMETHEUS_SECRET_NAME:-"prometheus-web-tls"}
 # Flags for deployment steps
 DEPLOY_PROMETHEUS=${DEPLOY_PROMETHEUS:-true}
 DEPLOY_AP=${DEPLOY_AP:-true}
+DEPLOY_REDIS=${DEPLOY_REDIS:-true}
 DEPLOY_LLM_D=${DEPLOY_LLM_D:-true}
 SKIP_CHECKS=${SKIP_CHECKS:-false}
 E2E_TESTS_ENABLED=${E2E_TESTS_ENABLED:-false}
@@ -425,21 +425,19 @@ deploy_ap_controller() {
 }
 
 deploy_redis() {
-    log_info "Deploying message queue backend ($REDIS_CHART)..."
-    helm repo add bitnami https://charts.bitnami.com/bitnami
-    helm repo update
+    log_info "Deploying message queue backend (Valkey chart $VALKEY_CHART_VERSION)..."
 
-    helm upgrade -i "$REDIS_RELEASE_NAME" "$REDIS_CHART" -n $REDIS_NS --set auth.enabled=false
-
-    # Derive service name: bitnami/redis uses -master, bitnami/valkey uses -primary.
-    local svc
-    case "$REDIS_CHART" in
-      */valkey) svc="${REDIS_RELEASE_NAME}-primary" ;;
-      *)        svc="${REDIS_RELEASE_NAME}-master"  ;;
-    esac
+    # fullnameOverride names the Service after the release; the chart would
+    # otherwise append "-valkey". Persistence and AOF keep queued requests
+    # across a pod restart.
+    helm upgrade -i "$REDIS_RELEASE_NAME" valkey --repo "$VALKEY_CHART_REPO" --version "$VALKEY_CHART_VERSION" \
+        -n $REDIS_NS --create-namespace \
+        --set fullnameOverride="$REDIS_RELEASE_NAME" \
+        --set persistence.enabled=true --set persistence.size=1Gi \
+        --set-string extraConfig="appendonly yes"
 
     # Create a secret with the Redis-protocol URL in the AP namespace so the llm-d-async can connect
-    local redis_url="redis://${svc}.${REDIS_NS}.svc.cluster.local:6379"
+    local redis_url="redis://${REDIS_RELEASE_NAME}.${REDIS_NS}.svc.cluster.local:6379"
     log_info "Creating message queue URL secret in $AP_NS namespace"
     kubectl create secret generic redis-creds \
         --from-literal=url="$redis_url" \
@@ -766,7 +764,7 @@ cleanup() {
         undeploy_ap_controller
     fi
 
-    if [ "$DEPLOY_REDIS" = "true"]; then
+    if [ "$DEPLOY_REDIS" = "true" ]; then
         undeploy_redis
     fi
 

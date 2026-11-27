@@ -42,12 +42,15 @@ var _ = ginkgo.Describe("Async Processor Performance Benchmark E2E", ginkgo.Orde
 	})
 
 	ginkgo.AfterAll(func() {
-		// Restore the default simulator setup (which uses fake metrics and responds instantly)
+		// Restore the default simulator setup (which uses fake metrics and responds instantly).
+		// Keep these args in sync with test/e2e/yaml/sim-deploy.yaml: --log-http is required by
+		// specs that count per-request dispatches in the simulator logs (e.g. multi-replica).
 		ginkgo.By("Restoring default llm-sim configuration")
 		patchSimArgs([]string{
 			"--model", "test-model",
 			"--port", "8000",
 			"--fake-metrics", `{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}`,
+			"--log-http",
 		})
 	})
 
