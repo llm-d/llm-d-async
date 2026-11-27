@@ -129,6 +129,7 @@ Each entry in `queues`/`topics` describes one request source and where its reque
 | `id` | no | `queue_name` | Unique queue identifier; becomes the `queue_id` metric label. |
 | `result_queue_name` | no | top-level `result_queue_name` | Per-queue result destination override. |
 | `result_ttl_seconds` | no | `0` (no expiry) | When > 0, sets an expiry on the result destination each time results are pushed. Used for per-request result keys (frontend enqueue mode) so unfetched results are cleaned up. |
+| `deadline_scaling` | no | — | **Experimental.** Publishes the replicas the queue's deployment needs to meet its deadlines, as a gauge for an autoscaler. See [Deadline Scaling](deadline-scaling.md). |
 
 **Additional fields (`gcp-pubsub` only):**
 

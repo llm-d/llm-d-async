@@ -2290,6 +2290,10 @@ func TestQueueBacklogReportsZeroOnError(t *testing.T) {
 	if got["queue-ok"].Depth != 1 || !got["queue-ok"].SourceAvailable {
 		t.Errorf("queue-ok backlog = %+v, want available depth 1", got["queue-ok"])
 	}
+	if !got["queue-bad"].ExpiringCountsFailed || got["queue-ok"].ExpiringCountsFailed {
+		t.Errorf("ExpiringCountsFailed = %v for queue-bad, %v for queue-ok; want true, false",
+			got["queue-bad"].ExpiringCountsFailed, got["queue-ok"].ExpiringCountsFailed)
+	}
 
 	// A failed read must leave the expiring counts zeroed with every bucket
 	// present, so the deadline-proximity snapshot is cleared rather than left

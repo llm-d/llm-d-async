@@ -25,7 +25,8 @@ The Async Processor exposes Prometheus metrics under the `llm_d_async` subsystem
 | `llm_d_async_async_message_latency_time_millis` | Histogram | End-to-end message latency in milliseconds (publish to successful processing). Only registered when the transport supports message latency (GCP Pub/Sub only). |
 | `llm_d_async_async_inference_latency_time_millis` | Histogram | Time in milliseconds spent calling `llm-d-router` (or other inference gateway), measured around each request attempt. Isolates "model time" from "queue time". Always registered. |
 | `llm_d_async_async_queue_residence_time_millis` | Histogram | Time in milliseconds a message spent buffered in-process, from broker ingestion until a worker pulled it for processing. Measures the async delay introduced by the system (queue time). Always registered. |
-| `llm_d_async_async_deadline_proximity_millis` | Histogram | Snapshot histogram of time in milliseconds remaining until each queued item's deadline, rebuilt once per backlog poll from exact cumulative `ZCOUNT` counts per bucket (`le="0"` holds items past their deadline but still queued; higher buckets are cumulative, so every item counts in each bucket it expires in). Redis sorted-set only; Cloud Pub/Sub cannot expose per-item deadlines. Because each poll replaces the snapshot, the series is not monotonic — `rate()` is meaningless; use `histogram_quantile` per scrape. The `_sum` is estimated from bucket midpoints. |
+| `llm_d_async_async_deadline_proximity_millis` | Histogram | Snapshot histogram of time in milliseconds remaining until each queued item's deadline, rebuilt once per backlog poll from exact cumulative counts per bucket (`le="0"` holds items past their deadline but still queued; higher buckets are cumulative, so every item counts in each bucket it expires in). `redis-sortedset` and `sql` transports only; Cloud Pub/Sub cannot expose per-item deadlines. Because each poll replaces the snapshot, the series is not monotonic — `rate()` is meaningless; use `histogram_quantile` per scrape. The `_sum` is estimated from bucket midpoints. |
+| `llm_d_async_async_deadline_required_replicas` | Gauge | **Experimental.** Replicas a queue needs to finish its queued items before their deadlines, recomputed each backlog poll from the deadline-proximity counts and the queue's [`deadline_scaling`](deadline-scaling.md) settings. The value is per queue, so it is right only when each queue has its own deployment: summing queues that share one over-counts. Every processor replica publishes the same value, so aggregate across them with `max()`. Meant as a KEDA trigger with threshold 1. Carries only `queue_id` and `queue_name`. |
 
 **Capacity and backlog:**
 
@@ -82,7 +83,9 @@ triple and joins on it, including the gate gauges. A **pool-level** gate (one
 configured on a worker pool rather than a queue) has no single queue, so its gauges
 and `async_gate_decisions_total` counter carry an empty `queue_id` and `queue_name`
 and are keyed by `pool_name` alone. The pool worker limit and leased drain-limit
-gauges are always keyed by `pool_name` alone.
+gauges are always keyed by `pool_name` alone. Among per-queue series,
+`async_deadline_required_replicas` is the exception: it is keyed by `queue_id` and
+`queue_name` alone, since a sum of it by pool over-counts.
 
 **Example PromQL queries:**
 
