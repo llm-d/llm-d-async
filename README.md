@@ -52,6 +52,7 @@ The architecture adheres to the following core principles:
 - [Design Principles](#design-principles)
 - [Concepts](#concepts)
 - [Deployment](docs/deployment.md): installing the processor, command line parameters, worker pools; to deploy on llm-d, follow the [asynchronous processing guide](https://github.com/llm-d/llm-d/blob/main/guides/batch-serving/asynchronous-processing/README.md)
+- [Upgrading and rolling back a single-replica Async Processor](docs/upgrading.md)
 - [Transports](docs/transports.md): transport configuration, queue and topic entries, message formats, backend compatibility, implementations
 - [Producer and processor compatibility](docs/compatibility.md): which producer library releases work with which processor releases, and the rules for wire-format changes
 - [SQL Transport Schema Migrations](docs/sql-migrations.md): applying and upgrading the `sql` transport's Postgres schema, writing a migration
