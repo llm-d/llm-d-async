@@ -796,10 +796,15 @@ func TestRateLimitRequest(t *testing.T) {
 	}
 }
 
+// request-timeout bounds one attempt, not the request: a send it aborts while
+// the request's own deadline is still ahead is retried, not finished as
+// DEADLINE_EXCEEDED.
 func TestRequestTimeout(t *testing.T) {
 	msgId := "timeout-test"
+	var called atomic.Int32
 	// Simulate a slow server that blocks longer than the request timeout.
 	httpclient := NewTestClient(func(req *http.Request) (*http.Response, error) {
+		called.Add(1)
 		<-req.Context().Done()
 		return nil, req.Context().Err()
 	})
@@ -813,24 +818,39 @@ func TestRequestTimeout(t *testing.T) {
 	go Worker(ctx, ctx, pipeline.Characteristics{HasExternalBackoff: false}, inferenceClient, requestChannel, retryChannel, resultChannel, 100*time.Millisecond, nil)
 	deadline := time.Now().Add(time.Second * 100).Unix()
 
-	requestChannel <- newEmb(asyncapi.RequestMessage{
+	msg := newEmb(asyncapi.RequestMessage{
 		ID:       msgId,
 		Created:  time.Now().Unix(),
 		Deadline: deadline,
 		Payload:  testPayload(map[string]any{"model": "test", "prompt": "hi"}),
 	}, "http://localhost:30800/v1/completions", map[string]string{})
+	msg.QueueID = "request-timeout-q"
+	msg.RequestQueueName = "request-timeout-queue"
+	exceeded := metrics.ExceededDeadlineReqs.WithLabelValues(msg.QueueID, msg.RequestQueueName, msg.WorkerPoolID)
+	before := testutil.ToFloat64(exceeded)
+	requestChannel <- msg
 
 	select {
-	case r := <-resultChannel:
-		// The request should fail due to context deadline exceeded (fatal unknown error).
-		if r.ID != msgId {
-			t.Errorf("Expected result message id to be %s, got %s", msgId, r.ID)
+	case r := <-retryChannel:
+		if r.PublicRequest.ReqID() != msgId {
+			t.Errorf("Expected retry message id to be %s, got %s", msgId, r.PublicRequest.ReqID())
 		}
-	case <-retryChannel:
-		// Context cancellation errors are wrapped as ErrCategoryUnknown (fatal), so no retry.
-		t.Errorf("Timed-out request should not be retried")
+		if r.RetryCount != 1 {
+			t.Errorf("RetryCount = %d, want 1", r.RetryCount)
+		}
+		if r.BackoffDurationSeconds <= 0 {
+			t.Errorf("BackoffDurationSeconds = %v, want a positive backoff", r.BackoffDurationSeconds)
+		}
+	case r := <-resultChannel:
+		t.Errorf("a request-timeout abort with the deadline 100s away must be retried, got terminal result code %q (message %q)", r.ErrorCode, r.ErrorMessage)
 	case <-time.After(5 * time.Second):
 		t.Errorf("Worker did not return within 5s — per-request timeout was not enforced")
+	}
+	if got := called.Load(); got != 1 {
+		t.Errorf("inference client called %d times, want 1", got)
+	}
+	if got := testutil.ToFloat64(exceeded); got != before {
+		t.Errorf("exceeded deadline counter moved from %v to %v before the request's deadline", before, got)
 	}
 }
 

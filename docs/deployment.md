@@ -65,7 +65,7 @@ These two flags let metric gates query a Prometheus API that requires a bearer t
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `request-timeout` | `5m` | Timeout for individual inference requests. |
+| `request-timeout` | `5m` | Timeout for one inference attempt. An attempt it cuts off is retried with backoff while the request's own deadline is ahead; only the deadline ends a request as `DEADLINE_EXCEEDED`. |
 | `drain-timeout` | `2m` | Maximum time to wait for in-flight requests to complete after SIGTERM. |
 
 **Ports and endpoints:**

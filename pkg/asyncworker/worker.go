@@ -459,12 +459,15 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 						return
 					}
 
-					// The send was aborted by the per-request deadline (not a
+					// The send was aborted by the request's own deadline (not a
 					// process shutdown): surface DEADLINE_EXCEEDED so callers
 					// can distinguish a timed-out request from an inference
 					// failure. This happens whenever the deadline expires
 					// while the request is queued or executing downstream.
-					if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+					// reqCtx is also bounded by request-timeout, which only caps
+					// one attempt: when that fires first the request still has
+					// time left, so it falls through to the retry path below.
+					if errors.Is(reqCtx.Err(), context.DeadlineExceeded) && requestDeadlineReached(msg.PublicRequest, time.Now()) {
 						metrics.RecordExceededDeadlineReq(queueID, queueName, msg.WorkerPoolID)
 						select {
 						case resultChannel <- asyncapi.NewDeadlineExceededResult(msg.PublicRequest, msg.InternalRouting):
