@@ -6,6 +6,7 @@ import (
 
 	"github.com/llm-d/llm-d-async/pkg/server"
 	// Register the built-in request body-transform plugins.
+	_ "github.com/llm-d/llm-d-async/pkg/asyncworker/transform/gcsfilemultipart"
 	_ "github.com/llm-d/llm-d-async/pkg/asyncworker/transform/gcsmultipart"
 	"github.com/spf13/pflag"
 	ctrl "sigs.k8s.io/controller-runtime"

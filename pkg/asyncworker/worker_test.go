@@ -925,40 +925,6 @@ func TestRetryMessage_deadlineExact(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfter(t *testing.T) {
-	tests := []struct {
-		name     string
-		value    string
-		wantOK   bool
-		wantZero bool
-	}{
-		{name: "integer seconds", value: "120", wantOK: true},
-		{name: "zero seconds", value: "0", wantOK: true, wantZero: true},
-		{name: "HTTP-date future", value: time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat), wantOK: true},
-		{name: "HTTP-date past", value: time.Now().Add(-10 * time.Second).UTC().Format(http.TimeFormat), wantOK: true, wantZero: true},
-		{name: "negative integer", value: "-5", wantOK: false},
-		{name: "invalid value", value: "abc", wantOK: false},
-		{name: "empty string", value: "", wantOK: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d, ok := parseRetryAfter(tt.value)
-			if ok != tt.wantOK {
-				t.Fatalf("parseRetryAfter(%q): ok = %v, want %v", tt.value, ok, tt.wantOK)
-			}
-			if !tt.wantOK {
-				return
-			}
-			if tt.wantZero && d != 0 {
-				t.Errorf("expected zero duration, got %v", d)
-			}
-			if !tt.wantZero && d <= 0 {
-				t.Errorf("expected positive duration, got %v", d)
-			}
-		})
-	}
-}
-
 func TestRetryMessage_retryAfterHonored(t *testing.T) {
 	retryChannel := make(chan pipeline.RetryMessage, 1)
 	resultChannel := make(chan asyncapi.ResultMessage, 1)

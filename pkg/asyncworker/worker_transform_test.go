@@ -49,10 +49,10 @@ func (t *testTransform) Validate(_ []byte, _ map[string]string, _ int64) error {
 }
 
 func (t *testTransform) Transform(payload []byte, metadata map[string]string) ([]byte, string, bool, error) {
-	return t.TransformContext(context.Background(), payload, metadata, "")
+	return t.TransformContext(context.Background(), payload, metadata, "", 0)
 }
 
-func (t *testTransform) TransformContext(ctx context.Context, _ []byte, _ map[string]string, requestURL string) ([]byte, string, bool, error) {
+func (t *testTransform) TransformContext(ctx context.Context, _ []byte, _ map[string]string, requestURL string, _ int64) ([]byte, string, bool, error) {
 	t.gotURL = requestURL
 	if t.started != nil {
 		close(t.started)

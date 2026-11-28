@@ -112,7 +112,7 @@ func TestTransform_BuildsMultipart(t *testing.T) {
 
 func TestTransform_PassesThroughNonStringFields(t *testing.T) {
 	p := newPlugin(t, "whisper")
-	payload := []byte(`{"gcs_uri":"https://signed/url","temperature":0.5,"stream":true}`)
+	payload := []byte(`{"gcs_uri":"https://signed/url","temperature":0.5,"stream":true,"timestamp_granularities":["word","segment"]}`)
 
 	body, contentType, handled, err := p.Transform(payload, map[string]string{"provider": "whisper"})
 	if err != nil || !handled {
@@ -124,6 +124,9 @@ func TestTransform_PassesThroughNonStringFields(t *testing.T) {
 	}
 	if got := fields["stream"]; len(got) != 1 || got[0] != "true" {
 		t.Errorf("stream field = %v, want [true]", got)
+	}
+	if got := fields["timestamp_granularities"]; len(got) != 1 || got[0] != `["word","segment"]` {
+		t.Errorf("timestamp_granularities = %v, want the original JSON array", got)
 	}
 }
 
@@ -166,6 +169,17 @@ func TestTransform_RejectsFileBase64(t *testing.T) {
 	assertFatal(t, err)
 }
 
+func TestTransform_RejectsHTTPURL(t *testing.T) {
+	p := newPlugin(t, "whisper")
+	payload := []byte(`{"gcs_uri":"http://storage.googleapis.com/bucket/object?sig=x"}`)
+
+	_, _, handled, err := p.Transform(payload, map[string]string{"provider": "whisper"})
+	if handled {
+		t.Error("handled = true, want false on rejection")
+	}
+	assertFatal(t, err)
+}
+
 func TestValidate(t *testing.T) {
 	p := newPlugin(t, "whisper")
 	whisper := map[string]string{"provider": "whisper"}
@@ -179,9 +193,16 @@ func TestValidate(t *testing.T) {
 	}{
 		{"future expiry ok", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(time.Hour))), whisper, false},
 		{"expired before deadline", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(-time.Minute))), whisper, true},
+		{"http URL", `{"gcs_uri":"http://storage.googleapis.com/bucket/object?sig=x"}`, whisper, true},
 		{"no gcs_uri", `{"model":"whisper-1"}`, whisper, false},
 		{"provider mismatch", fmt.Sprintf(`{"gcs_uri":%q}`, v4SignedURL(deadline.Add(-time.Minute))), map[string]string{"provider": "other"}, false},
-		{"unparsable expiry", `{"gcs_uri":"https://signed/url?sig=x"}`, whisper, false},
+		{"no expiry params", `{"gcs_uri":"https://signed/url?sig=x"}`, whisper, false},
+		{"negative X-Goog-Expires", fmt.Sprintf(`{"gcs_uri":%q}`, strings.Replace(v4SignedURL(deadline.Add(time.Hour)), "X-Goog-Expires=3600", "X-Goog-Expires=-1", 1)), whisper, true},
+		{"oversized X-Goog-Expires", fmt.Sprintf(`{"gcs_uri":%q}`, strings.Replace(v4SignedURL(deadline.Add(time.Hour)), "X-Goog-Expires=3600", "X-Goog-Expires=9223372037", 1)), whisper, true},
+		{"malformed X-Goog-Date", fmt.Sprintf(`{"gcs_uri":%q}`, strings.Replace(v4SignedURL(deadline.Add(time.Hour)), "X-Goog-Date=", "X-Goog-Date=bad-", 1)), whisper, true},
+		{"malformed V2 Expires", `{"gcs_uri":"https://storage.googleapis.com/bucket/object?Expires=abc"}`, whisper, true},
+		{"percent-encoded X-Goog-Expires", fmt.Sprintf(`{"gcs_uri":%q}`, strings.Replace(v4SignedURL(deadline.Add(time.Hour)), "X-Goog-Expires=3600", "X-Goog-Expires=%ZZ", 1)), whisper, true},
+		{"percent-encoded V2 Expires", `{"gcs_uri":"https://storage.googleapis.com/bucket/object?Expires=%ZZ"}`, whisper, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -228,20 +249,35 @@ func TestNew_ParamValidation(t *testing.T) {
 func TestSignedURLExpiry(t *testing.T) {
 	ref := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name string
-		url  string
-		want time.Time
-		ok   bool
+		name    string
+		url     string
+		want    time.Time
+		ok      bool
+		wantErr bool
 	}{
-		{"v4", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=3600", ref, true},
-		{"v2", fmt.Sprintf("https://x/o?Expires=%d", ref.Unix()), ref, true},
-		{"none", "https://x/o?sig=abc", time.Time{}, false},
-		{"v4 bad date", "https://x/o?X-Goog-Date=nope&X-Goog-Expires=3600", time.Time{}, false},
-		{"v4 bad expires", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=abc", time.Time{}, false},
+		{"v4", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=3600", ref, true, false},
+		{"v2", fmt.Sprintf("https://x/o?Expires=%d", ref.Unix()), ref, true, false},
+		{"none", "https://x/o?sig=abc", time.Time{}, false, false},
+		{"v4 bad date", "https://x/o?X-Goog-Date=nope&X-Goog-Expires=3600", time.Time{}, false, true},
+		{"v4 bad expires", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=abc", time.Time{}, false, true},
+		{"v4 negative expires", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=-10", time.Time{}, false, true},
+		{"v4 zero expires", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=0", time.Time{}, false, true},
+		{"v4 overflow expires", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=9223372037", time.Time{}, false, true},
+		{"v4 missing date", "https://x/o?X-Goog-Expires=3600", time.Time{}, false, true},
+		{"v2 bad expires", "https://x/o?Expires=abc", time.Time{}, false, true},
+		{"v4 percent-encoded expires", "https://x/o?X-Goog-Date=20260618T110000Z&X-Goog-Expires=%ZZ", time.Time{}, false, true},
+		{"v2 percent-encoded expires", "https://x/o?Expires=%ZZ", time.Time{}, false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := signedURLExpiry(tc.url)
+			got, ok, err := signedURLExpiry(tc.url)
+			if tc.wantErr {
+				assertFatal(t, err)
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if ok != tc.ok {
 				t.Fatalf("ok = %v, want %v", ok, tc.ok)
 			}
