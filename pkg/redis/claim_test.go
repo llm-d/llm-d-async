@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/pipeline"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -225,6 +227,52 @@ func TestReclaimExpiredClaims_RedeliversOnlyLapsedLeases(t *testing.T) {
 	}
 	if exists, _ := rdb.HExists(ctx, newClaimKeys("q", false).claimed, "live").Result(); !exists {
 		t.Fatal("live claim was reclaimed")
+	}
+}
+
+// A request parked for retry when its processor shuts down is dispatched once
+// by the next processor, not again when the old claim's lease lapses.
+func TestShutdown_ParkedRetryIsDispatchedOnce(t *testing.T) {
+	s, rdb, ctx, next := newClaimTestFlow(t)
+	_, member := claimEnvelope(t, "r1", testDeadline)
+	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member})
+
+	// A lease already in the past stands in for the old claim lapsing while
+	// the next processor's gate still holds the retry back.
+	old := &RedisSortedSetFlow{rdb: redis.NewClient(&redis.Options{Addr: s.Addr()}), batchSize: 10, claimLeaseTTL: -time.Minute}
+	sent := make(chan *api.InternalRequest, 1)
+	old.processMessagesWithConfig(ctx, sent, "q", "q", noopGate(), logr.Discard(), SortedSetQueueConfig{})
+	if len(sent) != 1 {
+		t.Fatal("the old processor did not dispatch the request")
+	}
+	// Shutdown cancels the request in flight, and its worker parks it for retry.
+	old.flushRetryBatch(ctx, []pipeline.RetryMessage{{EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{InternalRequest: <-sent}}})
+	old.Shutdown()
+
+	moverCtx, stopMover := context.WithCancel(ctx)
+	defer stopMover()
+	moverDone := make(chan struct{})
+	go func() { defer close(moverDone); next.retryMover(moverCtx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if n, _ := rdb.ZCard(ctx, "q").Result(); n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retry did not return to its queue")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stopMover()
+	<-moverDone
+	if _, err := next.reclaimExpiredClaims(ctx); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+
+	dispatched := make(chan *api.InternalRequest, 2)
+	next.processMessagesWithConfig(ctx, dispatched, "q", "q", noopGate(), logr.Discard(), SortedSetQueueConfig{})
+	if n := len(dispatched); n != 1 {
+		t.Fatalf("the next processor dispatched the request %d times, want 1", n)
 	}
 }
 

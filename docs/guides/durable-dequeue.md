@@ -55,15 +55,15 @@ While a request is held, a background **heartbeater** renews its lease every
 `claim_lease_ttl / 3` (clamped to 1s–30s) with token fencing — stale owners
 cannot extend a lease they no longer own. The lease TTL is therefore the
 crash *detection* window, not a processing-time budget. Graceful shutdown
-simply stops heartbeating; unacked claims are then redelivered via the same
-lease-expiry path.
+stops heartbeating and drops the claims of requests parked for retry; other
+unacked claims are then redelivered via the same lease-expiry path.
 
 Every exit path is paired with exactly one claim outcome:
 
 | Path | Claim outcome |
 |---|---|
 | Result produced (success/error/cancelled/deadline/drop) | acked after the record is durably pushed (fenced) |
-| Request parked for retry | lease renewed (fenced) while it waits |
+| Request parked for retry | lease renewed (fenced) while it waits; dropped on graceful shutdown |
 | Consumer context cancelled mid-hand-off | released back to pending at its original sort score |
 | Owner dies or graceful shutdown stops heartbeating | reclaimer redelivers after lease expiry; another instance picks it up |
 | Gate refuses / gate error | no claim was taken; entry simply stays pending |
@@ -106,14 +106,18 @@ Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclai
 
 ## Known limitations
 
-- Graceful shutdown now relies on lease expiry like hard-kill; unacked work
-  waits out its remaining lease instead of being handed back immediately. An
-  immediate handback can be added as a follow-up once the core path is proven.
+- Apart from requests parked for retry, graceful shutdown relies on lease
+  expiry like hard-kill; unacked work waits out its remaining lease instead of
+  being handed back immediately. An immediate handback can be added as a
+  follow-up once the core path is proven.
 - If a crash occurs while a request sits in the retry queue, the reclaimer
   may redeliver the original claimed payload while the retry-queue copy
   re-enters pending via the mover — at-most one extra pending entry, bounded,
   with stale claim publication prevented by token fencing on each claim. This
   is a known trade-off to be addressed with a unified retry/claim lifecycle.
+- After a graceful shutdown, the retry queue holds the only copy of a request
+  parked for retry, so a crash between the retry mover's `ZREM` and `ZADD`
+  loses that request instead of redelivering it after lease expiry.
 - No delivery counter or dead-letter queue: redelivery is bounded by each
   request's deadline — once it passes, the deadline-exceeded path produces the
   terminal record. Projects like asynq cap attempts and archive instead; here

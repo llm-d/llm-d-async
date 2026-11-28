@@ -201,6 +201,9 @@ type claimHandle struct {
 	deadline     float64
 	requestID    string
 	requestToken string
+	// parked reports whether the retry worker parked this request for retry.
+	// Only that worker sets it; Shutdown reads it after the worker has exited.
+	parked bool
 }
 
 // claimExpiry computes the lease deadline for a request claimed now: the
@@ -486,4 +489,24 @@ func (r *RedisSortedSetFlow) startHeartbeat(ctx context.Context) {
 			r.heartbeatClaims(ctx)
 		}
 	}
+}
+
+// dropParkedClaims drops the claims of requests parked for retry: the retry set
+// already holds each one, so a claim left to lapse would redeliver a duplicate.
+func (r *RedisSortedSetFlow) dropParkedClaims(ctx context.Context) {
+	logger := log.FromContext(ctx)
+	r.claimTokens.Range(func(key, value any) bool {
+		id, _ := key.(string)
+		h, ok := value.(*claimHandle)
+		if !ok || h == nil || !h.parked {
+			return true
+		}
+		keys := newClaimKeys(h.queue, r.clusterKeys)
+		if err := dropClaimScript.Run(ctx, r.rdb, []string{keys.claimed, keys.owners, keys.idx}, id, h.token).Err(); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to drop the claim of a parked retry", "id", h.requestID)
+			return true
+		}
+		r.claimTokens.Delete(id)
+		return true
+	})
 }
