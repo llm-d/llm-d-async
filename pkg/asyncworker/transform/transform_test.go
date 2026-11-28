@@ -214,9 +214,8 @@ func TestLoadConfigAndBuildChain(t *testing.T) {
 func TestLoadConfig_RejectsUnknownTopLevelFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "transforms.json")
-	// responseTransforms is not supported yet (#259); a typo or premature use
-	// must fail loudly rather than be silently dropped.
-	cfg := `{"requestTransforms":[],"responseTransforms":[]}`
+	// A typo in a direction key must fail loudly rather than be silently dropped.
+	cfg := `{"requestTransforms":[],"responseTransform":[]}`
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

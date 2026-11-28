@@ -167,7 +167,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.TLS.Key, "tls-key", o.TLS.Key, "Path to client key file (PEM) for mTLS")
 	fs.BoolVar(&o.TLS.InsecureSkipVerify, "tls-insecure-skip-verify", o.TLS.InsecureSkipVerify, "Skip TLS certificate verification (dev/test only)")
 
-	fs.StringVar(&o.TransformConfigFile, "transform-config-file", o.TransformConfigFile, "Path to the body-transform plugins configuration JSON file (object with a requestTransforms array; empty disables transforms)")
+	fs.StringVar(&o.TransformConfigFile, "transform-config-file", o.TransformConfigFile, "Path to the body-transform plugins configuration JSON file (object with requestTransforms and responseTransforms arrays; empty disables transforms)")
 
 	fs.StringVar(&o.Prometheus.URL, "prometheus-url", o.Prometheus.URL, "Prometheus server URL for metric-based gates (e.g., http://localhost:9090)")
 	fs.DurationVar(&o.Prometheus.CacheTTL, "prometheus-cache-ttl", o.Prometheus.CacheTTL, "TTL for cached Prometheus metrics (e.g., 5s, 0s to disable)")

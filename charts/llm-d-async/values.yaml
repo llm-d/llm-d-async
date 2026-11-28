@@ -86,10 +86,11 @@ ap:
   #   - id: "premium"
   #     workers: 16
   workerPools: []
-  # Request body-transform plugins. When set, rendered to a config file and passed
-  # via --transform-config-file. Object with a requestTransforms array; each entry
-  # has a unique name, a registered plugin type, and opaque parameters. Empty
-  # disables transforms (default JSON dispatch is unchanged).
+  # Request and response body-transform plugins. When set, rendered to a config file
+  # and passed via --transform-config-file. Object with requestTransforms and
+  # responseTransforms arrays; each entry has a unique name, a registered plugin
+  # type, and opaque parameters. Empty disables transforms (default JSON dispatch
+  # and verbatim results are unchanged).
   # transformConfig:
   #   requestTransforms:
   #     - name: "gcs-whisper"

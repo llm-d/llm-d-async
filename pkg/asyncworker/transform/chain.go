@@ -6,23 +6,35 @@ import (
 )
 
 // Chain is an ordered set of RequestTransform plugins applied to each outgoing
-// request. A nil *Chain is valid and behaves as a no-op, so callers that have no
-// transforms configured can pass nil and preserve the default JSON path exactly.
+// request, plus an ordered set of ResponseTransform plugins applied to each
+// successful response. A nil *Chain is valid and behaves as a no-op, so callers
+// that have no transforms configured can pass nil and preserve the default
+// request and response bodies exactly.
 type Chain struct {
-	transforms []RequestTransform
+	transforms         []RequestTransform
+	responseTransforms []ResponseTransform
 }
 
-// NewChain returns a Chain over the given transforms, in priority order.
-func NewChain(transforms []RequestTransform) *Chain {
-	return &Chain{transforms: transforms}
+// NewChain returns a Chain over the given request and response transforms, each
+// in priority order.
+func NewChain(transforms []RequestTransform, responseTransforms ...ResponseTransform) *Chain {
+	return &Chain{transforms: transforms, responseTransforms: responseTransforms}
 }
 
-// Len reports the number of transforms in the chain.
+// Len reports the number of request transforms in the chain.
 func (c *Chain) Len() int {
 	if c == nil {
 		return 0
 	}
 	return len(c.transforms)
+}
+
+// ResponseLen reports the number of response transforms in the chain.
+func (c *Chain) ResponseLen() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.responseTransforms)
 }
 
 // Validate runs every transform's Validate in order and returns the first error.
@@ -71,6 +83,26 @@ func (c *Chain) ApplyContext(ctx context.Context, payload []byte, metadata map[s
 		}
 		if err != nil {
 			return nil, "", false, fmt.Errorf("transform %s: %w", t.TypedName(), err)
+		}
+		if handled {
+			return body, contentType, true, nil
+		}
+	}
+	return nil, "", false, nil
+}
+
+// ApplyResponse runs response transforms in order with the same
+// first-handled-wins, short-circuit semantics as Apply. If no transform handles
+// the response, handled is false and the caller should publish the original body
+// unchanged. A nil/empty chain returns handled=false.
+func (c *Chain) ApplyResponse(ctx context.Context, responseBody []byte, metadata map[string]string) (body []byte, contentType string, handled bool, err error) {
+	if c == nil {
+		return nil, "", false, nil
+	}
+	for _, t := range c.responseTransforms {
+		body, contentType, handled, err = t.Transform(ctx, responseBody, metadata)
+		if err != nil {
+			return nil, "", false, fmt.Errorf("response transform %s: %w", t.TypedName(), err)
 		}
 		if handled {
 			return body, contentType, true, nil

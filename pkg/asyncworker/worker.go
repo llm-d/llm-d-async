@@ -418,15 +418,38 @@ func WorkerWithGateTimeout(consumeCtx, requestCtx context.Context, characteristi
 					metrics.RecordInferenceLatency(reqCtx, float64(time.Since(inferenceStart).Milliseconds()), queueID, queueName, msg.WorkerPoolID)
 
 					if err == nil {
-						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)
 						// SendRequest treats 3xx as success too, so token
-						// recording is gated on a strict 2xx: usage is only
-						// meaningful for real completions.
+						// recording and response transforms are gated on a
+						// strict 2xx: only real completions are rewritten.
 						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 							if input, output, ok := ParseUsage(resp.Body, msg.RequestURL); ok {
 								metrics.RecordTokens(input, output, queueID, queueName, msg.WorkerPoolID)
 							}
+							// A response transform error is fatal: the inference
+							// call already succeeded, so retrying would repeat it.
+							body, contentType, handled, terr := transforms.ApplyResponse(reqCtx, resp.Body, msg.PublicRequest.ReqMetadata())
+							if terr != nil {
+								span.RecordError(terr)
+								span.SetStatus(codes.Error, "response transform failed")
+								span.SetAttributes(
+									attribute.String(uotel.AttrErrorCategory, string(asyncapi.ErrCategoryParse)),
+									attribute.String(uotel.LegacyAttrErrorCategory, string(asyncapi.ErrCategoryParse)),
+								)
+								metrics.RecordFailedReq(queueID, queueName, msg.WorkerPoolID)
+								select {
+								case resultChannel <- asyncapi.NewErrorResult(msg.PublicRequest, msg.InternalRouting, asyncapi.ErrCodeInferenceError, fmt.Sprintf("Failed to transform response body: %s", terr.Error())):
+								case <-requestCtx.Done():
+								}
+								return
+							}
+							if handled {
+								resp.Body = body
+								if contentType != "" {
+									resp.ContentType = contentType
+								}
+							}
 						}
+						metrics.RecordSuccessfulReq(queueID, queueName, msg.WorkerPoolID)
 						select {
 						case resultChannel <- asyncapi.NewResponseResult(msg.PublicRequest, msg.InternalRouting, *resp):
 						case <-requestCtx.Done():

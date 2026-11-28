@@ -137,7 +137,7 @@ Every request message carries a mandatory `deadline` (Unix seconds). When proces
 
 ### Request Body Transforms
 
-By default the worker dispatches the OpenAI-style JSON marshalled from a request's `payload`. Body-transform plugins rewrite the outgoing body and `Content-Type` based on per-message `metadata` — for example turning JSON into `multipart/form-data` for Whisper-style endpoints. The default JSON path is preserved byte-for-byte when no plugin applies. → [Request Body Transform Reference](docs/request-body-transforms.md#request-body-transform-reference)
+By default the worker dispatches the OpenAI-style JSON marshalled from a request's `payload`. Body-transform plugins rewrite the outgoing body and `Content-Type` based on per-message `metadata` — for example turning JSON into `multipart/form-data` for Whisper-style endpoints. The default JSON path is preserved byte-for-byte when no plugin applies. Response body-transform plugins can likewise rewrite a successful response body before it is published as a result. → [Request Body Transform Reference](docs/request-body-transforms.md#request-body-transform-reference)
 
 ### Results
 
