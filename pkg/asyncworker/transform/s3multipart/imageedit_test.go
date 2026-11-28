@@ -142,6 +142,7 @@ func TestTransform_ImageEditRejectsBadInput(t *testing.T) {
 		"internal http url":  `{"images":[{"image_url":"http://169.254.169.254/latest"}]}`,
 		"non-image data url": `{"images":[{"image_url":"data:text/plain;base64,QUJD"}]}`,
 		"bucket not allowed": `{"images":[{"image_url":"s3://other/a.png"}]}`,
+		"dot-dot segment":    `{"images":[{"image_url":"s3://audio/../private/a.png"}]}`,
 		"one bad of two":     `{"images":[{"image_url":"s3://audio/a.png"},{"image_url":"s3://other/b.png"}]}`,
 		"mask given":         `{"images":[{"image_url":"s3://audio/a.png"}],"mask":{"image_url":"s3://audio/m.png"}}`,
 		// A caller-supplied url would reach vllm-omni's unchecked fetch.

@@ -296,3 +296,37 @@ func keys(m map[string]*part) []string {
 	}
 	return out
 }
+
+// Only a segment that is exactly "." or ".." is rejected; dots inside a name
+// are ordinary key characters and stay inside the bucket.
+func TestParseS3URI_PathSegments(t *testing.T) {
+	p := &Plugin{buckets: map[string]struct{}{"audio": {}}}
+	allowed := []string{
+		"s3://audio/call.txt",
+		"s3://audio/notes/meeting.wav",
+		"s3://audio/.hidden/a.wav",
+		"s3://audio/my..file.wav",
+		"s3://audio/...",
+		"s3://audio/v1.2/a.wav",
+	}
+	for _, ref := range allowed {
+		t.Run("allowed "+ref, func(t *testing.T) {
+			if _, _, err := p.parseS3URI(ref); err != nil {
+				t.Errorf("parseS3URI(%q) = %v, want nil", ref, err)
+			}
+		})
+	}
+	rejected := []string{
+		"s3://audio/./a.wav",
+		"s3://audio/../private/a.wav",
+		"s3://audio/a/../../private/a.wav",
+		"s3://audio/a/..",
+		`s3://audio/..\private\a.wav`,
+	}
+	for _, ref := range rejected {
+		t.Run("rejected "+ref, func(t *testing.T) {
+			_, _, err := p.parseS3URI(ref)
+			assertCategory(t, err, asyncapi.ErrCategoryInvalidReq)
+		})
+	}
+}

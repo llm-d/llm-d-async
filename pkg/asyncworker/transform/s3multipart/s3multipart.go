@@ -210,6 +210,14 @@ func (p *Plugin) parseS3URI(ref string) (bucket, key string, err error) {
 	if _, ok := p.buckets[bucket]; !ok {
 		return "", "", fatalf("bucket %q is not in allowedBuckets", bucket)
 	}
+	// The SDK sends "." and ".." segments unchanged, and a store that resolves
+	// them (SeaweedFS before 4.30 did) would read outside the allowed bucket.
+	// Some stores also treat "\" as "/", so check both separators.
+	for _, seg := range strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == "." || seg == ".." {
+			return "", "", fatalf("%q has a %q path segment", ref, seg)
+		}
+	}
 	return bucket, key, nil
 }
 

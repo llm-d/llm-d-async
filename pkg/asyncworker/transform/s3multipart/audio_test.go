@@ -169,6 +169,11 @@ func TestTransform_AudioRejectsBadInput(t *testing.T) {
 		// Declares more than the limit, then sends less: only the declared
 		// length shows the object is too big, before the body is read.
 		"/audio/big-declared.wav": {body: []byte("x"), declaredLength: 33},
+		// Present at the literal paths, so only the segment check rejects them.
+		"/audio/../private/secret.wav":      {body: []byte("secret")},
+		"/audio/a/../../private/secret.wav": {body: []byte("secret")},
+		"/audio/./a.wav":                    {body: []byte("secret")},
+		`/audio/..\private\secret.wav`:      {body: []byte("secret")},
 	})
 	p := newTestPlugin(t, store.URL, 32)
 	tests := map[string]string{
@@ -178,6 +183,10 @@ func TestTransform_AudioRejectsBadInput(t *testing.T) {
 		"file null":          `{"file":null}`,
 		"http url":           `{"file":"https://example.com/a.wav"}`,
 		"bucket not allowed": `{"file":"s3://other/a.wav"}`,
+		"dot-dot segment":    `{"file":"s3://audio/../private/secret.wav"}`,
+		"nested dot-dot":     `{"file":"s3://audio/a/../../private/secret.wav"}`,
+		"dot segment":        `{"file":"s3://audio/./a.wav"}`,
+		"backslash dot-dot":  `{"file":"s3://audio/..\\private\\secret.wav"}`,
 		"no key":             `{"file":"s3://audio"}`,
 		// Valid base64 without the ;base64 marker: a percent-encoded data URL,
 		// which the plugin does not decode.
