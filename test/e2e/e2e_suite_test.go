@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -114,6 +115,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	gomega.Expect(os.Setenv("KUBECONFIG", kindKubeconfig)).To(gomega.Succeed())
 	gomega.Expect(os.Setenv("PUBSUB_EMULATOR_HOST", "localhost:"+pubsubPort)).To(gomega.Succeed())
 	setupK8sClient()
+	configureE2ENodes()
 	setupNameSpace()
 	applyManifests()
 	setupClients()
@@ -179,6 +181,15 @@ func pullIfMissing(image string) {
 	gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
 }
 
+func defaultSimulatorArgs() []string {
+	return []string{
+		"--model", "test-model",
+		"--port", "8000",
+		"--fake-metrics", `{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}`,
+		"--log-http",
+	}
+}
+
 func loadEPPImage() {
 	if routerRoot != "" {
 		ginkgo.By("Building EPP image from " + routerRoot)
@@ -205,7 +216,7 @@ func setupK8sCluster() {
 		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
-		kindLoadImage(apImage)
+		kindLoadImageOnAllNodes(apImage)
 		loadEPPImage()
 		if !multiReplicaOnly {
 			pullIfMissing(oldAPImage)
@@ -261,7 +272,7 @@ func setupK8sCluster() {
 		pullIfMissing(simImage)
 	}
 
-	kindLoadImage(apImage)
+	kindLoadImageOnAllNodes(apImage)
 	kindLoadImage(simImage)
 
 	if !multiReplicaOnly {
@@ -301,7 +312,22 @@ func buildImageCommand(image, dir string) *exec.Cmd {
 }
 
 func kindLoadImage(image string) {
+	kindLoadImageToNodes(image, false)
+}
+
+func kindLoadImageOnAllNodes(image string) {
+	kindLoadImageToNodes(image, true)
+}
+
+func kindLoadImageToNodes(image string, includeWorkers bool) {
 	ginkgo.By(fmt.Sprintf("Loading %s into the cluster %s (runtime=%s)", image, kindClusterName, containerRuntime))
+
+	nodes := []string{kindClusterName + "-control-plane"}
+	if includeWorkers {
+		out, err := exec.Command("kind", "get", "nodes", "--name", kindClusterName).Output()
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		nodes = strings.Fields(string(out))
+	}
 
 	if containerRuntime == "podman" {
 		// Podman: tag unqualified images so kind can find them, then pipe via
@@ -315,8 +341,8 @@ func kindLoadImage(image string) {
 			gomega.Eventually(session).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
 		}
 
-		shell := fmt.Sprintf("podman save --format docker-archive %s | kind load image-archive /dev/stdin --name %s",
-			qualifiedImage, kindClusterName)
+		shell := fmt.Sprintf("podman save --format docker-archive %s | kind load image-archive /dev/stdin --name %s --nodes %s",
+			qualifiedImage, kindClusterName, strings.Join(nodes, ","))
 		command := exec.Command("bash", "-c", shell)
 		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -327,17 +353,81 @@ func kindLoadImage(image string) {
 		// fails for multi-arch images when only one platform's layers are
 		// present locally (e.g. arm64-only pull on Apple Silicon).
 		//
-		// This applies to ALL images loaded into the cluster (not just the
-		// MQ image). It assumes a single-node Kind cluster with the default
-		// control-plane node name and overlayfs snapshotter.
-		node := kindClusterName + "-control-plane"
-		shell := fmt.Sprintf(
-			"docker save %s | docker exec -i %s ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -",
-			image, node)
-		command := exec.Command("bash", "-c", shell)
-		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		// Only the current AP image is needed on the lifecycle workers. Other
+		// suite services are pinned to the control-plane node by worker taints.
+		for _, node := range nodes {
+			shell := fmt.Sprintf(
+				"docker save %s | docker exec -i %s ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -",
+				image, node)
+			command := exec.Command("bash", "-c", shell)
+			session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+		}
+	}
+}
+
+// configureE2ENodes keeps the ordinary suite on the control-plane and reserves
+// two tainted workers for multi-replica lifecycle tests. This prevents a worker
+// drain from also evicting Redis, Envoy, EPP, Prometheus, or the simulator.
+func configureE2ENodes() {
+	expectedNodes := []string{
+		kindClusterName + "-control-plane",
+		kindClusterName + "-worker",
+		kindClusterName + "-worker2",
+	}
+	out, err := exec.Command("kind", "get", "nodes", "--name", kindClusterName).Output()
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	actualNodes := strings.Fields(string(out))
+	gomega.Expect(actualNodes).To(gomega.ConsistOf(expectedNodes),
+		"existing Kind cluster uses an incompatible topology; recreate %q with three nodes", kindClusterName)
+
+	controlPlane := kindClusterName + "-control-plane"
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"patch", "node", controlPlane, "--type=merge", "-p", `{"spec":{"taints":[]}}`)
+	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+
+	for _, worker := range []string{kindClusterName + "-worker", kindClusterName + "-worker2"} {
+		command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"label", "node", worker, "e2e.llm-d.ai/processor=true", "--overwrite")
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-		gomega.Eventually(session).WithTimeout(600 * time.Second).Should(gexec.Exit(0))
+		gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+
+		command = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+			"taint", "node", worker, "e2e.llm-d.ai/processor=true:NoSchedule", "--overwrite")
+		session, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(session).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
+	}
+
+	assertSystemPodsOnControlPlane(controlPlane)
+}
+
+func assertSystemPodsOnControlPlane(controlPlane string) {
+	command := exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"get", "pods", "--all-namespaces", "-o", "json")
+	out, err := command.Output()
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	var pods struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				NodeName string `json:"nodeName"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	gomega.Expect(json.Unmarshal(out, &pods)).To(gomega.Succeed())
+	for _, pod := range pods.Items {
+		if strings.HasPrefix(pod.Metadata.Name, "coredns-") ||
+			strings.HasPrefix(pod.Metadata.Name, "local-path-provisioner-") {
+			gomega.Expect(pod.Spec.NodeName).To(gomega.Equal(controlPlane),
+				"system pod %s must stay off lifecycle workers; recreate the Kind cluster", pod.Metadata.Name)
+		}
 	}
 }
 
@@ -726,7 +816,8 @@ const kindClusterConfig = `
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
-- extraPortMappings:
+- role: control-plane
+  extraPortMappings:
   - containerPort: 30480
     hostPort: ${REDIS_PORT}
     protocol: TCP
@@ -748,6 +839,22 @@ nodes:
   - containerPort: 30494
     hostPort: ${JAEGER_PORT}
     protocol: TCP
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "e2e.llm-d.ai/processor=true"
+        register-with-taints: "e2e.llm-d.ai/processor=true:NoSchedule"
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "e2e.llm-d.ai/processor=true"
+        register-with-taints: "e2e.llm-d.ai/processor=true:NoSchedule"
 `
 
 func setupPubSubEmulatorTopicsAndSubscriptions() {
