@@ -25,7 +25,6 @@ import (
 
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/pipeline"
-	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -40,11 +39,10 @@ type headroomSource interface {
 // reading at most once per interval. A request that finishes, is retried or loses its claim
 // returns its slot to the reading that granted it. A failed reading admits nothing.
 type HeadroomGate struct {
+	gateMetrics
 	source   headroomSource
 	interval time.Duration
 	now      func() time.Time
-
-	owner pipeline.GateOwner
 
 	refreshLock chan struct{}
 	readAt      time.Time
@@ -63,7 +61,7 @@ func NewHeadroomGate(source headroomSource, interval time.Duration) *HeadroomGat
 
 // WithOwner records the queue or pool that owns the gate for its metric labels.
 func (g *HeadroomGate) WithOwner(owner pipeline.GateOwner) *HeadroomGate {
-	g.owner = owner
+	g.readings.Owner = owner
 	return g
 }
 
@@ -132,12 +130,10 @@ func (g *HeadroomGate) refresh(ctx context.Context) error {
 	allowance := 0.0
 	if err != nil {
 		log.FromContext(ctx).Error(err, "headroom gate closed until the next reading")
-		metrics.SetGateMetricSourceAvailable(false, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, "")
 	} else {
-		metrics.SetGateMetricValue(headroom, 0, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, "")
-		metrics.SetGateMetricSourceAvailable(true, g.owner.QueueID, g.owner.QueueName, g.owner.WorkerPoolID, "")
 		allowance = math.Floor(headroom)
 	}
+	g.recordReading(headroom, 0, err == nil)
 
 	g.readAt, g.haveRead = now, true
 	g.mu.Lock()

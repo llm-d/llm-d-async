@@ -313,12 +313,19 @@ func (f *GateFactory) CreateGate(cfg pipeline.GateConfig) (pipeline.Gate, error)
 	return f.createGate(cfg, "")
 }
 
+type metricGate interface {
+	setMetricIdentity(pipeline.GateConfig, string)
+}
+
+var (
+	_ metricGate = (*MetricDispatchGate)(nil)
+	_ metricGate = (*HeadroomGate)(nil)
+)
+
 func (f *GateFactory) createGate(cfg pipeline.GateConfig, index string) (pipeline.Gate, error) {
 	gate, err := f.buildGate(cfg, index)
-	if metric, ok := gate.(*MetricDispatchGate); ok {
-		metric.WithOwner(cfg.Owner)
-		metric.readings.Type = cfg.GateType
-		metric.readings.Index = index
+	if metric, ok := gate.(metricGate); ok {
+		metric.setMetricIdentity(cfg, index)
 	}
 	return gate, err
 }
@@ -598,7 +605,6 @@ func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline
 		}
 		f.logger.Info("inference-pool-ready metric source", "pool", pool, "query", source.Expr())
 		return NewMetricDispatchGate(cachedSource(source, f.cacheTTL), 0.0, fallback).
-			WithOwner(cfg.Owner).
 			WithInferencePool(pool), nil
 
 	case "prometheus-query":
@@ -700,7 +706,7 @@ func (f *GateFactory) buildGate(cfg pipeline.GateConfig, index string) (pipeline
 			if f.cacheTTL <= 0 {
 				return nil, fmt.Errorf("endpoint-scrape admission 'counted' takes one reading per --prometheus-cache-ttl, which must be greater than 0")
 			}
-			return NewHeadroomGate(NewScrapeMetricSource(scrapeCfg), f.cacheTTL).WithOwner(cfg.Owner), nil
+			return NewHeadroomGate(NewScrapeMetricSource(scrapeCfg), f.cacheTTL), nil
 		default:
 			return nil, fmt.Errorf("endpoint-scrape admission must be either 'budget' or 'counted', got %q", admission)
 		}
